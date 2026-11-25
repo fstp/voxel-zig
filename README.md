@@ -10,7 +10,8 @@ Planning lives in Vikunja, project **Voxel engine in Zig** (tasks 0.x research,
 ## Requirements
 
 - Zig **0.17.1** (pinned in `.tool-versions`, installed with asdf)
-- Linux x86_64, OpenGL-capable GPU (window backend decided in task 0.2)
+- Linux x86_64, OpenGL 4.6-capable GPU
+- SDL3 (vendored through the Zig package manager, see `docs/adr/0001-window-backend.md`)
 
 ```sh
 asdf install        # picks up .tool-versions
