@@ -9,13 +9,28 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // The engine lives in its own module so the voxel/math code can be tested
-    // without pulling in main() or (later) a window and a GL context.
+    // SDL3 handles window, input and the GL context (ADR 0001).
+    const sdl = b.dependency("sdl", .{ .target = target, .optimize = optimize });
+    // OpenGL 4.6 core bindings, loaded through SDL_GL_GetProcAddress (ADR 0002).
+    const gl = @import("zigglgen").generateModule(b, .{
+        .api = .gl,
+        .version = .@"4.6",
+        .profile = .core,
+    });
+
+    // The engine lives in its own module so voxel/math/world code can be tested
+    // without opening a window.
     const engine = b.addModule("voxel_zig", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "sdl3", .module = sdl.module("sdl3") },
+            .{ .name = "gl", .module = gl },
+        },
     });
+    engine.linkSystemLibrary("GL", .{});
 
     const exe = b.addExecutable(.{
         .name = "voxel-zig",

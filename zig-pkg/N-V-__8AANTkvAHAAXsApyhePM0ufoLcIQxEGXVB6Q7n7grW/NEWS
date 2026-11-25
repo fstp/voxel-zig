@@ -1,0 +1,227 @@
+Changes in IBus 1.5.34
+
+A S Alam (1):
+      po: Update translation (Punjabi)
+
+Alan01 (1):
+      po: Update translation (Danish)
+
+Aleksandr Sidorenko (1):
+      po: Update translation (Russian)
+
+Andi Chandler (1):
+      po: Update translation (English (United Kingdom))
+
+Andika Triwidada (1):
+      po: Update translation (Indonesian)
+
+Arif Budiman (1):
+      po: Update translation (Indonesian)
+
+Arnout Engelen (1):
+      ui/gtk3: Don't build in parallel
+
+Baurzhan Muftakhidinov (1):
+      po: Update translation (Kazakh)
+
+ButterflyOfFire (1):
+      po: Update translation (Kabyle)
+
+Changwoo Ryu (1):
+      po: Update translation (Korean)
+
+Danny Milosavljevic (2):
+      client/wayland: Close leaked keymap fd on early return
+      client/wayland: Close keymap fd on early return in input_method_keyboard_keymap
+
+David Edmundson (1):
+      client/wayland: Connect delete surrounding text
+
+Jim Spentzos (1):
+      po: Update translation (Greek)
+
+Joan Torres Lopez (6):
+      bus: Update gdm bits based on new gdm changes
+      src: Move group name detection to ibus_get_group_name()
+      src/ibustypes: Add IBUS_INPUT_HINT_HIDDEN_TEXT
+      bus/inputcontext: Prevent preedit text display on hidden_text hint
+      bus/inputcontext: Fix use-after-free when updating preedit text
+      bus/inputcontext: Resend preedit text when HIDDEN_TEXT hint changes
+
+Jonas Hubeny (1):
+      po: Update translation (Czech)
+
+Luna Jernberg (1):
+      po: Update translation (Swedish)
+
+Léane GRASSER (1):
+      po: Update translation (French)
+
+Mike FABIAN (1):
+      po: Update translation (German)
+
+Nathan (1):
+      po: Update translation (Italian)
+
+Olivier Fourdan (1):
+      ui/gtk3: GNOME Kiosk is also GNOME
+
+Oğuz Ersen (1):
+      po: Update translation (Turkish)
+
+Priit Jõerüüt (1):
+      po: Update translation (Estonian)
+
+Rafael Fontenelle (1):
+      po: Update translation (Portuguese (Brazil))
+
+Remus-Gabriel Chelu (1):
+      po: Update translation (Romanian)
+
+Robbie Williams (1):
+      po: Update translation (Spanish)
+
+Temuri Doghonadze (1):
+      po: Update translation (Georgian)
+
+Weblate Translation Memory (1):
+      po: Update translation (Georgian)
+
+Yuri Chornoivan (1):
+      po: Update translation (Ukrainian)
+
+fujiwarat (42):
+      Revert "bus: Update gdm bits based on new gdm changes"
+      engine: Update simple.xml with xkeyboard-config 2.46
+      src: Load EN compose file in pt-BR locale
+      github/workflows: Downgrade pcre2 for workaround of broken Fedora 43
+      github/ISSUE_TEMPLATE: Replace `ibus-daemon` with `ibus start`
+      Release 1.5.34-alpha1
+      src: Fix GCC `-Wunused-but-set-variable` flag
+      ui/gtk3/application: --enable-wayland-im option without daemon
+      util/IMdkit: Fix memory leaks with fail safe
+      Fix memory leaks #2
+      ui/gtk3: Fix mouse position in Emojier category list
+      ui/gtk3: Set MessageDialog at input cursor
+      client/wayland: Free IBusInputContext in input_method_activate()
+      util/IMdkit: Fix SEGV with allocation fail in _Xi18nChangeIC()
+      ui/gtk3: Refer QT_IM_MODULES to check Wayland configuration
+      src/tests/ibus-keypress: Fix GTK3 build
+      ui/gtk3/propertypanel: Disable X11 display in Wayland
+      configure: Add warning to run `make -C tools maintainer-clean-generic`
+      src/ibuscomposetable: Order locale compose and user compose
+      client/wayland: Fix Backspace after commit-text in Ghostty
+      ui/gtk3/extension: Fix assertion in panel_binding_construct()
+      ui/gtk3: Fix SEGV with double bus_name_acquired_cb()
+      po: Update POT file
+      github/workflows: Fix wget bot error
+      engine/test-gnome: Fix python3 script
+      ui/gtk3: Show Emoji annotations in GNOME
+      ui/gtk3: Disable loading Unicode notification with Unicode typing
+      Release 1.5.34-beta1
+      client/wayland: Add text-input-unstable-v3-client-protocol.h
+      src/ibustypes: Update IBusInputPurpose and IBusInputHints
+      client/wayland: Support input purpose and hints
+      po: Update translation (Japanese)
+      client/wayland: Fix "no memory" error with focus changes in Sway
+      client/wayland: Fix latch key in Latvian(tilde) keymap
+      github/workflows: Replace Fedora 42 with Fedora 44
+      src/tests: Fix only GTK3 builds
+      Revert "github/workflows: Downgrade pcre2 for workaround of broken Fedora 43"
+      src/tests/ibus-compose: Fix keymap warning
+      src/tests: Fix bus tests builds
+      Release 1.5.34-rc1
+      client/wayland: Fix label at end of compound statement
+      Release 1.5.34-rc2
+
+lumingzh (1):
+      po: Update translation (Chinese (Simplified) (zh_CN))
+
+naly zzwd (1):
+      po: Update translation (Catalan)
+
+김인수 (2):
+      po: Update translation (Korean)
+      po: Update translation (Korean)
+
+
+Revert "bus: Update gdm bits based on new gdm changes" (fujiwarat) ea70b2df
+bus: Update gdm bits based on new gdm changes (Joan Torres Lopez) c1588000
+engine: Update simple.xml with xkeyboard-config 2.46 (fujiwarat) 62a178f6
+src: Load EN compose file in pt-BR locale (fujiwarat) 00c28b9c
+github/workflows: Downgrade pcre2 for workaround of broken Fedora 43 (fujiwarat) cd53b97c
+github/ISSUE_TEMPLATE: Replace `ibus-daemon` with `ibus start` (fujiwarat) ee32a0e9
+Release 1.5.34-alpha1 (fujiwarat) 39d993cb
+ui/gtk3: Don't build in parallel (Arnout Engelen) 102fafab
+src: Fix GCC `-Wunused-but-set-variable` flag (fujiwarat) 9c1d430d
+ui/gtk3/application: --enable-wayland-im option without daemon (fujiwarat) f4c4eafa
+util/IMdkit: Fix memory leaks with fail safe (fujiwarat) 313f24f1
+Fix memory leaks #2 (fujiwarat) 7885035a
+ui/gtk3: Fix mouse position in Emojier category list (fujiwarat) 03e996b9
+ui/gtk3: Set MessageDialog at input cursor (fujiwarat) 7aaf42a3
+client/wayland: Free IBusInputContext in input_method_activate() (fujiwarat) 6d254b30
+util/IMdkit: Fix SEGV with allocation fail in _Xi18nChangeIC() (fujiwarat) d7ef4040
+ui/gtk3: Refer QT_IM_MODULES to check Wayland configuration (fujiwarat) b811db87
+src: Move group name detection to ibus_get_group_name() (Joan Torres Lopez) 7154c25f
+src/tests/ibus-keypress: Fix GTK3 build (fujiwarat) 92db49ff
+ui/gtk3/propertypanel: Disable X11 display in Wayland (fujiwarat) 57a25858
+configure: Add warning to run `make -C tools maintainer-clean-generic` (fujiwarat) 1d5aa37d
+src/ibuscomposetable: Order locale compose and user compose (fujiwarat) 0ed56876
+client/wayland: Connect delete surrounding text (David Edmundson) e2bbb41b
+client/wayland: Fix Backspace after commit-text in Ghostty (fujiwarat) 7e707ed2
+ui/gtk3/extension: Fix assertion in panel_binding_construct() (fujiwarat) cc2e7d82
+ui/gtk3: Fix SEGV with double bus_name_acquired_cb() (fujiwarat) 49b1f0c7
+ui/gtk3: GNOME Kiosk is also GNOME (Olivier Fourdan) 873119c3
+po: Update POT file (fujiwarat) 2ec548dd
+github/workflows: Fix wget bot error (fujiwarat) c039ce2e
+src/ibustypes: Add IBUS_INPUT_HINT_HIDDEN_TEXT (Joan Torres Lopez) 695b1ec2
+bus/inputcontext: Prevent preedit text display on hidden_text hint (Joan Torres Lopez) 79369dfd
+bus/inputcontext: Fix use-after-free when updating preedit text (Joan Torres Lopez) 1ff8b3f0
+bus/inputcontext: Resend preedit text when HIDDEN_TEXT hint changes (Joan Torres Lopez) 4dd87afa
+engine/test-gnome: Fix python3 script (fujiwarat) a8bce780
+ui/gtk3: Show Emoji annotations in GNOME (fujiwarat) 5f2bc357
+ui/gtk3: Disable loading Unicode notification with Unicode typing (fujiwarat) 7d777ba4
+Release 1.5.34-beta1 (fujiwarat) a5624b25
+client/wayland: Add text-input-unstable-v3-client-protocol.h (fujiwarat) 36d2193e
+src/ibustypes: Update IBusInputPurpose and IBusInputHints (fujiwarat) b0cec097
+client/wayland: Support input purpose and hints (fujiwarat) 7b014b58
+po: Update translation (Turkish) (Oğuz Ersen) e2e5f3d0
+po: Update translation (Indonesian) (Andika Triwidada) d29df19d
+po: Update translation (Indonesian) (Arif Budiman) 496958d4
+po: Update translation (Russian) (Aleksandr Sidorenko) 0f6b1b9b
+po: Update translation (Estonian) (Priit Jõerüüt) 43a039d1
+po: Update translation (Georgian) (Weblate Translation Memory) cee57525
+po: Update translation (Georgian) (Temuri Doghonadze) 1ab308f7
+po: Update translation (Kabyle) (ButterflyOfFire) 20c993cd
+po: Update translation (Swedish) (Luna Jernberg) cb5a46bc
+po: Update translation (French) (Léane GRASSER) f66c1191
+po: Update translation (Korean) (김인수) 036e01e6
+po: Update translation (Korean) (Changwoo Ryu) 9c247e8b
+po: Update translation (Korean) (김인수) c64c6217
+po: Update translation (Ukrainian) (Yuri Chornoivan) 82d1e38d
+po: Update translation (Italian) (Nathan) c99578bc
+po: Update translation (German) (Mike FABIAN) 19b13d0f
+po: Update translation (Catalan) (naly zzwd) caa39386
+po: Update translation (Kazakh) (Baurzhan Muftakhidinov) 9b4bd5e6
+po: Update translation (Romanian) (Remus-Gabriel Chelu) 32fb1472
+po: Update translation (Punjabi) (A S Alam) e9cbd45d
+po: Update translation (Spanish) (Robbie Williams) cae4ffdc
+po: Update translation (Portuguese (Brazil)) (Rafael Fontenelle) 63f54746
+po: Update translation (Czech) (Jonas Hubeny) 6bbdb6b6
+po: Update translation (Chinese (Simplified) (zh_CN)) (lumingzh) be2aaa05
+po: Update translation (Greek) (Jim Spentzos) c53f4b0d
+po: Update translation (English (United Kingdom)) (Andi Chandler) c842aefc
+po: Update translation (Japanese) (fujiwarat) 218b3816
+po: Update translation (Danish) (Alan01) 9680ceb4
+client/wayland: Fix "no memory" error with focus changes in Sway (fujiwarat) 8757b874
+client/wayland: Fix latch key in Latvian(tilde) keymap (fujiwarat) 01044861
+github/workflows: Replace Fedora 42 with Fedora 44 (fujiwarat) c2e3af0f
+src/tests: Fix only GTK3 builds (fujiwarat) ce49b595
+client/wayland: Close leaked keymap fd on early return (Danny Milosavljevic) 2853f07c
+client/wayland: Close keymap fd on early return in input_method_keyboard_keymap (Danny Milosavljevic) be954a56
+Revert "github/workflows: Downgrade pcre2 for workaround of broken Fedora 43" (fujiwarat) 6ceff60a
+src/tests/ibus-compose: Fix keymap warning (fujiwarat) 29bc7de2
+src/tests: Fix bus tests builds (fujiwarat) e1e6045b
+Release 1.5.34-rc1 (fujiwarat) ea8a525b
+client/wayland: Fix label at end of compound statement (fujiwarat) cd60d951
+Release 1.5.34-rc2 (fujiwarat) 1f7af284

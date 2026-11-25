@@ -1,13 +1,15 @@
 //! Root of the `voxel_zig` module: the engine's public surface.
 //!
-//! Modules by responsibility (the rest arrive with their tasks):
+//! Modules by responsibility:
 //!   math/   vectors and matrices            (1.2, 1.3)
 //!   voxel/  block ids, coordinates, mesher  (1.4 - 1.6)
 //!   world/  chunk storage, terrain, save    (1.5, 1.8, 1.14)
-//!   gfx/    window, GL, shaders             (1.1, 1.4)
+//!   gfx/    window, GL, textures            (1.1, 1.4)
 //!   player/ controller and collision        (1.9, 1.10)
 
-pub const version = "0.0.1";
+pub const version = "0.1.0";
+
+pub const App = @import("app.zig").App;
 
 pub const math = struct {
     pub const Vec3 = @import("math/vec.zig").Vec3;
@@ -18,9 +20,14 @@ pub const voxel = struct {
     pub const coords = @import("voxel/coords.zig");
 };
 
+pub const gfx = struct {
+    pub const Window = @import("gfx/window.zig").Window;
+};
+
 test {
     // Pull the submodule tests into the module test binary.
     _ = @import("math/vec.zig");
     _ = @import("voxel/block.zig");
     _ = @import("voxel/coords.zig");
+    _ = @import("app.zig");
 }

@@ -1,0 +1,15 @@
+# Emoji tests
+<Multi_key> <Multi_key> <l> <e> <o>             : "♌"  U264C   # LEO
+<Multi_key> <Multi_key> <v> <i> <r> <g> <o>     : "♍"  U264D   # VIRGO
+<Multi_key> <Multi_key> <I> <n> <t>             : "∫"
+<Multi_key> <Multi_key> <I> <I> <n> <t>         : "∬"
+<Multi_key> <Multi_key> <I> <I> <n> <o>         : "🗼"
+<Multi_key> <Multi_key> <I> <I> <n> <p>         : "(゜∀゜)"
+<Multi_key> <Multi_key> <I> <I> <n> <q>         : "*・゜゜・*:.。..。.:*・゜(n‘Д‘)η゜・*:.。. .。.:*・ ゜゜・* !!!!!"
+<Multi_key> <Multi_key> <I> <I> <I> <n> <t>     : "∭"
+<Multi_key> <Multi_key> <o> <I> <n> <t>         : "∮"
+<Multi_key> <Multi_key> <o> <I> <I> <n> <t>     : "∯"
+<Multi_key> <Multi_key> <o> <I> <I> <I> <n> <t> : "∰"
+# Unicode boundary tests
+<U2800> <0> : "a"
+<braille_blank> <0> : "a"

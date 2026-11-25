@@ -2,25 +2,25 @@ const std = @import("std");
 const engine = @import("voxel_zig");
 
 pub fn main(init: std.process.Init) !void {
-    _ = init;
-
-    // Placeholder for the real thing: until 1.1 there is no window, so the
-    // executable's job is to prove the engine module links and runs.
-    std.debug.print("voxel-zig {s} (zig {s})\n", .{ engine.version, @import("builtin").zig_version_string });
-
-    var solid: usize = 0;
-    for (std.enums.values(engine.voxel.BlockId)) |block| {
-        if (block.isSolid()) solid += 1;
+    // Long-lived allocations go through the debug allocator so a leak shows up
+    // at exit; per-frame temporaries live in the app's arena (ADR 0006 spirit:
+    // no allocations in the hot path).
+    var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
+    defer {
+        const check = debug_allocator.deinit();
+        if (check == .leak) std.debug.print("LEAK: allocations still live at exit\n", .{});
     }
-    std.debug.print("block registry: {d} types, {d} solid\n", .{ std.enums.values(engine.voxel.BlockId).len, solid });
+    const gpa = debug_allocator.allocator();
 
-    const forward = engine.math.Vec3.init(0, 0, -1);
-    const up = engine.math.Vec3.init(0, 1, 0);
-    std.debug.print("math sane: dot={d:.1} cross.y={d:.1}\n", .{ forward.dot(up), forward.cross(up).y });
+    var app = try engine.App.init(gpa, init.io, .{
+        .title = "voxel-zig",
+        .width = 1280,
+        .height = 720,
+        .vsync = true,
+    });
+    defer app.deinit();
 
-    std.debug.print("run `zig build test` for the suite\n", .{});
-}
+    try app.run();
 
-test "enum values are exhaustive" {
-    try std.testing.expectEqual(@as(usize, 8), std.enums.values(engine.voxel.BlockId).len);
+    std.debug.print("voxel-zig {s} exited cleanly\n", .{engine.version});
 }
