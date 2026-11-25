@@ -30,6 +30,9 @@ pub const voxel = struct {
 pub const gfx = struct {
     pub const Window = @import("gfx/window.zig").Window;
     pub const DebugDraw = @import("gfx/debug_draw.zig").DebugDraw;
+    pub const Shader = @import("gfx/shader.zig").Shader;
+    pub const TextureArray = @import("gfx/texture.zig").TextureArray;
+    pub const BlockRenderer = @import("gfx/block_renderer.zig").BlockRenderer;
 };
 
 test {

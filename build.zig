@@ -31,6 +31,9 @@ pub fn build(b: *std.Build) void {
         },
     });
     engine.linkSystemLibrary("GL", .{});
+    // stb_image: one C translation unit, declared by hand in src/gfx/stb.zig.
+    engine.addIncludePath(b.path("src/vendor"));
+    engine.addCSourceFile(.{ .file = b.path("src/vendor/stb_impl.c"), .flags = &.{} });
 
     const exe = b.addExecutable(.{
         .name = "voxel-zig",

@@ -4,10 +4,14 @@ const Window = @import("gfx/window.zig").Window;
 const gl = @import("gfx/gl.zig");
 const DebugDraw = @import("gfx/debug_draw.zig").DebugDraw;
 const Input = @import("input.zig").Input;
+const TextureArray = @import("gfx/texture.zig").TextureArray;
+const BlockRenderer = @import("gfx/block_renderer.zig").BlockRenderer;
+const block = @import("voxel/block.zig");
 const Camera = @import("camera.zig").Camera;
 const Frustum = @import("math/frustum.zig").Frustum;
 const Aabb = @import("math/aabb.zig").Aabb;
 const Vec3 = @import("math/vec.zig").Vec3;
+const Mat4 = @import("math/mat4.zig").Mat4;
 
 pub const Config = struct {
     title: [:0]const u8 = "voxel-zig",
@@ -83,6 +87,8 @@ pub const App = struct {
     camera: Camera = .{},
     input: Input,
     debug: DebugDraw,
+    textures: TextureArray,
+    block_renderer: BlockRenderer,
     boxes: [BOX_COUNT]Aabb,
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io, config: Config) !App {
@@ -104,7 +110,18 @@ pub const App = struct {
         var debug = try DebugDraw.init();
         errdefer debug.deinit();
 
+        // ADR 0002: one 16x16 RGBA8 layer per block texture, array texture.
+        var textures = try TextureArray.init(&block.texture_paths, block.TEXTURE_SIZE);
+        errdefer textures.deinit();
+        std.debug.print("textures: {d} layers of {d}x{d}\n", .{ textures.layers, textures.size, textures.size });
+
+        var block_renderer = try BlockRenderer.init();
+        errdefer block_renderer.deinit();
+
         gl.gl.Enable(gl.gl.DEPTH_TEST);
+        gl.gl.Enable(gl.gl.CULL_FACE);
+        gl.gl.CullFace(gl.gl.BACK);
+        gl.gl.FrontFace(gl.gl.CCW);
 
         var input = Input.init();
         input.setRelativeMouse(&window, true);
@@ -115,11 +132,15 @@ pub const App = struct {
             .frame_arena = std.heap.ArenaAllocator.init(gpa),
             .input = input,
             .debug = debug,
+            .textures = textures,
+            .block_renderer = block_renderer,
             .boxes = buildDebugBoxes(),
         };
     }
 
     pub fn deinit(self: *App) void {
+        self.block_renderer.deinit();
+        self.textures.deinit();
         self.debug.deinit();
         self.frame_arena.deinit();
         self.window.deinit();
@@ -223,6 +244,12 @@ pub const App = struct {
         const aspect = @as(f32, @floatFromInt(self.window.width)) / @as(f32, @floatFromInt(self.window.height));
         const vp = self.camera.viewProjection(aspect);
         const frustum = Frustum.fromViewProjection(vp);
+
+        // Textured blocks: a grass block and a leaves block to exercise the
+        // alpha cutout. The chunk mesher replaces this in 1.6.
+        self.block_renderer.begin(vp, &self.textures);
+        self.block_renderer.draw(.grass, .{ .x = 0, .y = 4, .z = 0 }, 6, Mat4.identity);
+        self.block_renderer.draw(.leaves, .{ .x = 8, .y = 4, .z = 0 }, 6, Mat4.identity);
 
         self.debug.begin(vp);
         var visible: usize = 0;

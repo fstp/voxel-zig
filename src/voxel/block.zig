@@ -28,7 +28,60 @@ pub const BlockId = enum(u8) {
             else => true,
         };
     }
+
+    pub fn faceTextures(self: BlockId) FaceTextures {
+        return switch (self) {
+            .air => .{ .top = LAYER_STONE, .side = LAYER_STONE, .bottom = LAYER_STONE },
+            .stone => .{ .top = LAYER_STONE, .side = LAYER_STONE, .bottom = LAYER_STONE },
+            .dirt => .{ .top = LAYER_DIRT, .side = LAYER_DIRT, .bottom = LAYER_DIRT },
+            .grass => .{ .top = LAYER_GRASS_TOP, .side = LAYER_GRASS_SIDE, .bottom = LAYER_DIRT },
+            .sand => .{ .top = LAYER_SAND, .side = LAYER_SAND, .bottom = LAYER_SAND },
+            .wood => .{ .top = LAYER_WOOD, .side = LAYER_WOOD, .bottom = LAYER_WOOD },
+            .leaves => .{ .top = LAYER_LEAVES, .side = LAYER_LEAVES, .bottom = LAYER_LEAVES },
+            .water => .{ .top = LAYER_WATER, .side = LAYER_WATER, .bottom = LAYER_WATER },
+        };
+    }
+
+    pub fn layerFor(self: BlockId, face: Face) u8 {
+        const textures = self.faceTextures();
+        return switch (face) {
+            .py => textures.top,
+            .ny => textures.bottom,
+            else => textures.side,
+        };
+    }
 };
+
+pub const Face = enum(u3) { px, nx, py, ny, pz, nz };
+
+pub const FaceTextures = struct { top: u8, side: u8, bottom: u8 };
+
+// Layer indices must match the order of `texture_paths`.
+pub const LAYER_STONE: u8 = 0;
+pub const LAYER_DIRT: u8 = 1;
+pub const LAYER_GRASS_TOP: u8 = 2;
+pub const LAYER_GRASS_SIDE: u8 = 3;
+pub const LAYER_SAND: u8 = 4;
+pub const LAYER_WOOD: u8 = 5;
+pub const LAYER_LEAVES: u8 = 6;
+pub const LAYER_WATER: u8 = 7;
+
+pub const TEXTURE_SIZE: u32 = 16;
+
+/// One PNG per texture layer, loaded into a single GL_TEXTURE_2D_ARRAY
+/// (ADR 0002). The order defines the layer indices above.
+pub const texture_paths = [_][:0]const u8{
+    "assets/blocks/stone.png",
+    "assets/blocks/dirt.png",
+    "assets/blocks/grass_top.png",
+    "assets/blocks/grass_side.png",
+    "assets/blocks/sand.png",
+    "assets/blocks/wood.png",
+    "assets/blocks/leaves.png",
+    "assets/blocks/water.png",
+};
+
+// ------------------------------------------------------------------ tests
 
 test "air and water do not block the player" {
     try std.testing.expect(!BlockId.air.isSolid());
@@ -44,4 +97,29 @@ test "leaves are solid but not opaque" {
 test "ids fit in a byte" {
     try std.testing.expectEqual(@as(usize, 8), std.enums.values(BlockId).len);
     try std.testing.expect(@sizeOf(BlockId) == 1);
+}
+
+test "grass uses grass top, grass side and dirt bottom" {
+    const grass = BlockId.grass;
+    try std.testing.expectEqual(LAYER_GRASS_TOP, grass.faceTextures().top);
+    try std.testing.expectEqual(LAYER_GRASS_SIDE, grass.faceTextures().side);
+    try std.testing.expectEqual(LAYER_DIRT, grass.faceTextures().bottom);
+}
+
+test "layerFor picks the right layer per face" {
+    const grass = BlockId.grass;
+    try std.testing.expectEqual(LAYER_GRASS_TOP, grass.layerFor(.py));
+    try std.testing.expectEqual(LAYER_DIRT, grass.layerFor(.ny));
+    try std.testing.expectEqual(LAYER_GRASS_SIDE, grass.layerFor(.px));
+    try std.testing.expectEqual(LAYER_GRASS_SIDE, grass.layerFor(.nz));
+    try std.testing.expectEqual(LAYER_STONE, BlockId.stone.layerFor(.ny));
+}
+
+test "every block maps inside the texture array" {
+    for (std.enums.values(BlockId)) |block| {
+        const t = block.faceTextures();
+        try std.testing.expect(t.top < texture_paths.len);
+        try std.testing.expect(t.side < texture_paths.len);
+        try std.testing.expect(t.bottom < texture_paths.len);
+    }
 }
