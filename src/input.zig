@@ -1,0 +1,58 @@
+const std = @import("std");
+const sdl = @import("sdl3");
+const Window = @import("gfx/window.zig").Window;
+
+/// Frame input: held keys come straight from SDL's keyboard state, relative
+/// mouse movement and wheel are accumulated from events and cleared at the end
+/// of each frame.
+pub const Input = struct {
+    keys: [*c]const bool,
+    mouse_dx: f32 = 0,
+    mouse_dy: f32 = 0,
+    wheel: f32 = 0,
+    quit: bool = false,
+    relative_mouse: bool = false,
+
+    pub fn init() Input {
+        return .{ .keys = sdl.SDL_GetKeyboardState(null) };
+    }
+
+    pub fn pump(self: *Input, window: *Window) void {
+        var ev: sdl.SDL_Event = undefined;
+        while (sdl.SDL_PollEvent(&ev)) {
+            switch (ev.type) {
+                sdl.SDL_EVENT_QUIT => self.quit = true,
+                sdl.SDL_EVENT_KEY_DOWN => {
+                    if (ev.key.key == sdl.SDLK_ESCAPE) self.quit = true;
+                    // Tab releases the mouse so the desktop is usable again.
+                    if (ev.key.key == sdl.SDLK_TAB) self.setRelativeMouse(window, !self.relative_mouse);
+                },
+                sdl.SDL_EVENT_MOUSE_MOTION => {
+                    self.mouse_dx += ev.motion.xrel;
+                    self.mouse_dy += ev.motion.yrel;
+                },
+                sdl.SDL_EVENT_MOUSE_WHEEL => {
+                    self.wheel += ev.wheel.y;
+                },
+                sdl.SDL_EVENT_WINDOW_RESIZED, sdl.SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED => window.syncSize(),
+                else => {},
+            }
+        }
+    }
+
+    /// Clears the per-frame accumulators. Call after the frame has consumed them.
+    pub fn endFrame(self: *Input) void {
+        self.mouse_dx = 0;
+        self.mouse_dy = 0;
+        self.wheel = 0;
+    }
+
+    pub fn setRelativeMouse(self: *Input, window: *Window, enabled: bool) void {
+        _ = sdl.SDL_SetWindowRelativeMouseMode(window.handle, enabled);
+        self.relative_mouse = enabled;
+    }
+
+    pub fn down(self: Input, scancode: c_int) bool {
+        return self.keys[@intCast(scancode)];
+    }
+};

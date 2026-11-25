@@ -1,6 +1,13 @@
 const std = @import("std");
+const sdl = @import("sdl3");
 const Window = @import("gfx/window.zig").Window;
 const gl = @import("gfx/gl.zig");
+const DebugDraw = @import("gfx/debug_draw.zig").DebugDraw;
+const Input = @import("input.zig").Input;
+const Camera = @import("camera.zig").Camera;
+const Frustum = @import("math/frustum.zig").Frustum;
+const Aabb = @import("math/aabb.zig").Aabb;
+const Vec3 = @import("math/vec.zig").Vec3;
 
 pub const Config = struct {
     title: [:0]const u8 = "voxel-zig",
@@ -19,6 +26,14 @@ pub const Step = struct {
 
 pub const FIXED_DT: f64 = 1.0 / 60.0;
 pub const MAX_STEPS_PER_FRAME: u32 = 5;
+
+/// Debug scene: a 5 x 3 x 5 grid of wireframe boxes, 6 units apart.
+pub const BOX_GRID_X = 5;
+pub const BOX_GRID_Y = 3;
+pub const BOX_GRID_Z = 5;
+pub const BOX_COUNT = BOX_GRID_X * BOX_GRID_Y * BOX_GRID_Z;
+pub const BOX_SIZE = 2.0;
+pub const BOX_SPACING = 6.0;
 
 /// Advances a fixed-timestep accumulator by `dt` seconds.
 ///
@@ -40,15 +55,38 @@ pub fn advance(accumulator: f64, dt: f64, fixed_dt: f64, max_steps: u32) Step {
     return .{ .accumulator = acc, .steps = steps, .clamped = clamped };
 }
 
+pub fn buildDebugBoxes() [BOX_COUNT]Aabb {
+    var boxes: [BOX_COUNT]Aabb = undefined;
+    var index: usize = 0;
+    for (0..BOX_GRID_X) |ix| {
+        for (0..BOX_GRID_Y) |iy| {
+            for (0..BOX_GRID_Z) |iz| {
+                const centre = Vec3.init(
+                    (@as(f32, @floatFromInt(ix)) - 2.0) * BOX_SPACING,
+                    @as(f32, @floatFromInt(iy)) * BOX_SPACING,
+                    (@as(f32, @floatFromInt(iz)) - 2.0) * BOX_SPACING,
+                );
+                boxes[index] = Aabb.fromCenterSize(centre, Vec3.splat(BOX_SIZE));
+                index += 1;
+            }
+        }
+    }
+    return boxes;
+}
+
 pub const App = struct {
     io: std.Io,
     window: Window,
     frame_arena: std.heap.ArenaAllocator,
     accumulator: f64 = 0,
     sim_ticks: u64 = 0,
+    camera: Camera = .{},
+    input: Input,
+    debug: DebugDraw,
+    boxes: [BOX_COUNT]Aabb,
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io, config: Config) !App {
-        const window = try Window.init(.{
+        var window = try Window.init(.{
             .title = config.title,
             .width = config.width,
             .height = config.height,
@@ -61,17 +99,28 @@ pub const App = struct {
 
         // The GL context must exist before the entry points can be loaded.
         try gl.init();
-
         std.debug.print("renderer: {s}\n", .{gl.rendererString()});
+
+        var debug = try DebugDraw.init();
+        errdefer debug.deinit();
+
+        gl.gl.Enable(gl.gl.DEPTH_TEST);
+
+        var input = Input.init();
+        input.setRelativeMouse(&window, true);
 
         return .{
             .io = io,
             .window = window,
             .frame_arena = std.heap.ArenaAllocator.init(gpa),
+            .input = input,
+            .debug = debug,
+            .boxes = buildDebugBoxes(),
         };
     }
 
     pub fn deinit(self: *App) void {
+        self.debug.deinit();
         self.frame_arena.deinit();
         self.window.deinit();
     }
@@ -82,18 +131,33 @@ pub const App = struct {
         var frames: u32 = 0;
         var worst_ms: f64 = 0;
         var first_frame = true;
+        var visible: usize = 0;
 
         while (true) {
-            switch (self.window.pumpEvents()) {
-                .quit => break,
-                .resize => gl.gl.Viewport(0, 0, self.window.width, self.window.height),
-                .none => {},
-            }
+            self.input.pump(&self.window);
+            if (self.input.quit) break;
 
             const now = std.Io.Timestamp.now(self.io, .awake);
             const dt_ns = now.nanoseconds - last.nanoseconds;
             last = now;
             const dt = @as(f64, @floatFromInt(dt_ns)) / 1e9;
+
+            // Look is frame-rate shaped by the mouse; movement uses the frame
+            // delta so the camera is smooth on a 120 Hz display without
+            // interpolation. Physics (1.9) will run on the fixed step below.
+            self.camera.look(self.input.mouse_dx, self.input.mouse_dy);
+            if (self.input.wheel != 0) self.camera.adjustSpeed(self.input.wheel);
+
+            const wish = Vec3.init(
+                @as(f32, @floatFromInt(@intFromBool(self.input.down(sdl.SDL_SCANCODE_D)))) -
+                    @as(f32, @floatFromInt(@intFromBool(self.input.down(sdl.SDL_SCANCODE_A)))),
+                @as(f32, @floatFromInt(@intFromBool(self.input.down(sdl.SDL_SCANCODE_SPACE)))) -
+                    @as(f32, @floatFromInt(@intFromBool(self.input.down(sdl.SDL_SCANCODE_LCTRL)))),
+                @as(f32, @floatFromInt(@intFromBool(self.input.down(sdl.SDL_SCANCODE_W)))) -
+                    @as(f32, @floatFromInt(@intFromBool(self.input.down(sdl.SDL_SCANCODE_S)))),
+            );
+            self.camera.fly(wish, @floatCast(dt), self.input.down(sdl.SDL_SCANCODE_LSHIFT));
+            self.input.endFrame();
 
             const step = advance(self.accumulator, dt, FIXED_DT, MAX_STEPS_PER_FRAME);
             self.accumulator = step.accumulator;
@@ -103,16 +167,11 @@ pub const App = struct {
                 self.sim_ticks += 1;
             }
 
-            // Per-frame temporaries are reset every frame; nothing allocates
-            // during rendering that outlives it.
             _ = self.frame_arena.reset(.retain_capacity);
-
-            self.render();
+            visible = self.render();
             self.window.swap();
 
             if (first_frame) {
-                // The first present includes window mapping and driver warmup;
-                // keep it out of the frame statistics.
                 first_frame = false;
                 last = std.Io.Timestamp.now(self.io, .awake);
                 report_at = last;
@@ -127,12 +186,18 @@ pub const App = struct {
             if (report_dt_ns >= std.time.ns_per_s) {
                 const seconds = @as(f64, @floatFromInt(report_dt_ns)) / 1e9;
                 std.debug.print(
-                    "fps {d:6.1}  frame {d:5.2} ms  worst {d:5.2} ms  ticks {d}  chunks 0\n",
+                    "fps {d:6.1} frame {d:5.2}ms worst {d:5.2}ms  vis {d}/{d}  pos ({d:.1},{d:.1},{d:.1}) yaw {d:.2} speed {d:.0}\n",
                     .{
                         @as(f64, @floatFromInt(frames)) / seconds,
                         @as(f64, @floatFromInt(report_dt_ns)) / 1e6 / @as(f64, @floatFromInt(frames)),
                         worst_ms,
-                        self.sim_ticks,
+                        visible,
+                        BOX_COUNT,
+                        self.camera.position.x,
+                        self.camera.position.y,
+                        self.camera.position.z,
+                        self.camera.yaw,
+                        self.camera.speed,
                     },
                 );
                 frames = 0;
@@ -148,13 +213,29 @@ pub const App = struct {
         _ = dt;
     }
 
-    fn render(self: *App) void {
+    /// Draws the debug grid, culling boxes against the frustum. Returns the
+    /// number of boxes that survived culling.
+    fn render(self: *App) usize {
         gl.gl.Viewport(0, 0, self.window.width, self.window.height);
-        // Sky colour until the world exists.
         gl.gl.ClearColor(0.53, 0.72, 0.92, 1.0);
         gl.gl.Clear(gl.gl.COLOR_BUFFER_BIT | gl.gl.DEPTH_BUFFER_BIT);
+
+        const aspect = @as(f32, @floatFromInt(self.window.width)) / @as(f32, @floatFromInt(self.window.height));
+        const vp = self.camera.viewProjection(aspect);
+        const frustum = Frustum.fromViewProjection(vp);
+
+        self.debug.begin(vp);
+        var visible: usize = 0;
+        for (self.boxes) |box| {
+            if (!frustum.containsAabb(box)) continue;
+            visible += 1;
+            self.debug.box(box, .{ 0.15, 0.95, 0.75 });
+        }
+        return visible;
     }
 };
+
+// ------------------------------------------------------------------ tests
 
 test "60 fps input produces one simulation step per frame" {
     var acc: f64 = 0;
@@ -185,4 +266,16 @@ test "fractional frames accumulate rather than dropping time" {
         steps += step.steps;
     }
     try std.testing.expectEqual(@as(u32, 60), steps);
+}
+
+test "debug grid is 75 boxes centred on the origin in x and z" {
+    const boxes = buildDebugBoxes();
+    try std.testing.expectEqual(@as(usize, 75), boxes.len);
+    var min_x: f32 = std.math.inf(f32);
+    var max_x: f32 = -std.math.inf(f32);
+    for (boxes) |b| {
+        min_x = @min(min_x, b.min.x);
+        max_x = @max(max_x, b.max.x);
+    }
+    try std.testing.expectApproxEqAbs(@as(f32, 0), min_x + max_x, 1e-5);
 }

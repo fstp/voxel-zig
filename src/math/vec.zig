@@ -159,6 +159,10 @@ pub const Vec4 = struct {
         return .{ .x = self.x + other.x, .y = self.y + other.y, .z = self.z + other.z, .w = self.w + other.w };
     }
 
+    pub fn sub(self: Vec4, other: Vec4) Vec4 {
+        return .{ .x = self.x - other.x, .y = self.y - other.y, .z = self.z - other.z, .w = self.w - other.w };
+    }
+
     pub fn scale(self: Vec4, factor: f32) Vec4 {
         return .{ .x = self.x * factor, .y = self.y * factor, .z = self.z * factor, .w = self.w * factor };
     }

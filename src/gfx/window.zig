@@ -71,28 +71,13 @@ pub const Window = struct {
         sdl.SDL_Quit();
     }
 
-    /// Drains the event queue. Anything that matters this early is quit or resize.
-    pub fn pumpEvents(self: *Window) Event {
-        var result: Event = .none;
-        var ev: sdl.SDL_Event = undefined;
-        while (sdl.SDL_PollEvent(&ev)) {
-            switch (ev.type) {
-                sdl.SDL_EVENT_QUIT => result = .quit,
-                sdl.SDL_EVENT_KEY_DOWN => {
-                    if (ev.key.key == sdl.SDLK_ESCAPE) result = .quit;
-                },
-                sdl.SDL_EVENT_WINDOW_RESIZED, sdl.SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED => {
-                    var width: i32 = 0;
-                    var height: i32 = 0;
-                    _ = sdl.SDL_GetWindowSizeInPixels(self.handle, &width, &height);
-                    self.width = width;
-                    self.height = height;
-                    if (result == .none) result = .resize;
-                },
-                else => {},
-            }
-        }
-        return result;
+    /// Re-reads the framebuffer size after a resize event.
+    pub fn syncSize(self: *Window) void {
+        var width: i32 = 0;
+        var height: i32 = 0;
+        _ = sdl.SDL_GetWindowSizeInPixels(self.handle, &width, &height);
+        self.width = width;
+        self.height = height;
     }
 
     pub fn swap(self: *Window) void {
