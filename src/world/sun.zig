@@ -112,7 +112,12 @@ pub const Sun = struct {
     pub fn lighting(self: Sun) Lighting {
         const r = self.ramp();
         const elevation_rad = self.elevation() * std.math.pi / 180.0;
-        const strength = @max(@sin(elevation_rad), 0.0);
+        // A floor on the strength: irradiance on a *horizontal* face does fall
+        // with the sine of elevation, and N.L already handles that geometry, so
+        // scaling the sun colour by the sine as well made a low sun almost
+        // disappear and its shadows with it. 0.25 + 0.75*sin keeps dawn dim but
+        // still directional.
+        const strength = 0.25 + 0.75 * @max(@sin(elevation_rad), 0.0);
         return .{
             .sun_dir = self.direction(),
             .sun_colour = r.sun.scale(strength),

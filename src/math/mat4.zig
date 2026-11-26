@@ -117,6 +117,18 @@ pub const Mat4 = struct {
     }
 
     /// Right-handed look-at view matrix.
+    /// Orthographic projection with GL clip depth -1..1, same column-major
+    /// layout as `perspective`. Needed by the sun shadow map (3.8).
+    pub fn ortho(left: f32, right: f32, bottom: f32, top: f32, near: f32, far: f32) Mat4 {
+        std.debug.assert(right != left and top != bottom and far != near);
+        return .{ .m = .{
+            2.0 / (right - left), 0, 0, 0,
+            0, 2.0 / (top - bottom), 0, 0,
+            0, 0, -2.0 / (far - near), 0,
+            -(right + left) / (right - left), -(top + bottom) / (top - bottom), -(far + near) / (far - near), 1,
+        } };
+    }
+
     pub fn lookAt(eye: Vec3, target: Vec3, up: Vec3) Mat4 {
         const f = target.sub(eye).normalized();
         const s = f.cross(up).normalized();
@@ -261,4 +273,21 @@ test "singular matrix has no inverse" {
 test "transpose twice is the original" {
     const m = Mat4.translate(Vec3.init(1, 2, 3)).mul(Mat4.rotateZ(0.4));
     try std.testing.expect(m.transposed().transposed().eqlApprox(m, 1e-6));
+}
+
+test "ortho maps the box corners onto the clip cube" {
+    const projection = Mat4.ortho(-10, 10, -5, 5, 1, 101);
+    // Centre of the box maps to the origin.
+    const centre = projection.transformPoint(Vec3.init(0, 0, -51));
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), centre.x, 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), centre.y, 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), centre.z, 1e-5);
+    // Corner (10, 5, -1) maps to (1, 1, -1): the near plane is the front face.
+    const corner = projection.transformPoint(Vec3.init(10, 5, -1));
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), corner.x, 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), corner.y, 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, -1.0), corner.z, 1e-5);
+    // And the far plane is +1.
+    const far_corner = projection.transformPoint(Vec3.init(-10, -5, -101));
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), far_corner.z, 1e-4);
 }

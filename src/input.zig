@@ -29,6 +29,8 @@ pub const Input = struct {
     time_jump: ?f32 = null,
     /// F6 shows the normal debug view (3.3), F7 toggles distance fog (3.7).
     fog_toggle: bool = false,
+    /// F8 toggles the sun shadow map (3.8).
+    shadows_toggle: bool = false,
     /// 3.10: O pins the sun at an explicit angle or hands it back to the clock;
     /// the arrow keys move a pinned sun.
     sun_pin_toggle: bool = false,
@@ -64,6 +66,7 @@ pub const Input = struct {
                     if (ev.key.key == sdl.SDLK_F4) self.shading_toggle = true;
                     if (ev.key.key == sdl.SDLK_F6) self.normals_toggle = true;
                     if (ev.key.key == sdl.SDLK_F7) self.fog_toggle = true;
+                    if (ev.key.key == sdl.SDLK_F8) self.shadows_toggle = true;
                     if (ev.key.key == sdl.SDLK_O) self.sun_pin_toggle = true;
                     if (ev.key.key == sdl.SDLK_LEFT) self.sun_azimuth_delta -= 2.0;
                     if (ev.key.key == sdl.SDLK_RIGHT) self.sun_azimuth_delta += 2.0;
@@ -120,6 +123,7 @@ pub const Input = struct {
         self.shading_toggle = false;
         self.normals_toggle = false;
         self.fog_toggle = false;
+        self.shadows_toggle = false;
         self.sun_pin_toggle = false;
         self.sun_azimuth_delta = 0;
         self.sun_elevation_delta = 0;

@@ -62,6 +62,12 @@ const FRAG_SRC: [:0]const u8 =
     \\uniform float u_fog_start;
     \\uniform float u_fog_end;
     \\uniform float u_fog_enabled;
+    \\uniform sampler2D u_shadow;   // depth from the sun, unit 1
+    \\uniform mat4 u_light_vp;
+    \\uniform vec2 u_shadow_texel;
+    \\uniform float u_shadow_bias;
+    \\uniform float u_shadow_normal_offset;
+    \\uniform float u_shadows_enabled;
     \\in vec2 v_uv;
     \\in float v_layer;
     \\in float v_ao;
@@ -79,6 +85,23 @@ const FRAG_SRC: [:0]const u8 =
     \\    if (id < 4.5) return 0.65; // +z
     \\    return 0.65;               // -z
     \\}
+    \\// 3x3 PCF with a normal offset: offsetting along the normal is what kills
+    \\// the acne that a depth bias alone leaves on large flat voxel faces.
+    \\float sunVisibility(vec3 world, vec3 normal) {
+    \\    if (u_shadows_enabled < 0.5) return 1.0;
+    \\    vec4 light_position = u_light_vp * vec4(world + normal * u_shadow_normal_offset, 1.0);
+    \\    vec3 p = light_position.xyz / light_position.w * 0.5 + 0.5;
+    \\    if (p.x < 0.0 || p.x > 1.0 || p.y < 0.0 || p.y > 1.0 || p.z > 1.0) return 1.0;
+    \\    float sum = 0.0;
+    \\    for (int y = -1; y <= 1; ++y) {
+    \\        for (int x = -1; x <= 1; ++x) {
+    \\            float depth = texture(u_shadow, p.xy + vec2(float(x), float(y)) * u_shadow_texel).r;
+    \\            sum += (p.z - u_shadow_bias <= depth) ? 1.0 : 0.0;
+    \\        }
+    \\    }
+    \\    return sum / 9.0;
+    \\}
+    \\
     \\void main() {
     \\    vec4 c = texture(u_tex, vec3(v_uv, v_layer));
     \\    if (c.a < 0.5) discard; // alpha cutout (leaves, ADR 0002)
@@ -94,7 +117,7 @@ const FRAG_SRC: [:0]const u8 =
     \\    // Sun lighting (ADR 0008): Lambert plus a hemisphere ambient, times AO.
     \\    float ndl = max(dot(v_normal, u_sun_dir), 0.0);
     \\    vec3 hemi = mix(u_ambient_ground, u_ambient_sky, v_normal.y * 0.5 + 0.5);
-    \\    vec3 lit = (hemi + u_sun_colour * ndl) * ao;
+    \\    vec3 lit = (hemi + u_sun_colour * ndl * sunVisibility(v_world, v_normal)) * ao;
     \\    // F4 A/B: the old hardcoded table, kept so 3.9 can show the difference.
     \\    vec3 legacy = vec3(faceBrightness(v_face) * ao);
     \\    vec3 rgb = mix(c.rgb * lit, c.rgb * legacy, u_legacy);
@@ -158,6 +181,13 @@ pub const ChunkRenderer = struct {
         fog_enabled: bool,
         legacy: bool,
         normals: bool,
+        /// 3.8: the sun's depth map plus the matrix that reads it.
+        shadow_enabled: bool,
+        light_vp: Mat4,
+        shadow_texture: gl.uint,
+        shadow_texel: f32,
+        shadow_bias: f32,
+        shadow_normal_offset: f32,
     };
 
     pub fn begin(self: *ChunkRenderer, textures: *const TextureArray, params: FrameParams) void {
@@ -177,6 +207,17 @@ pub const ChunkRenderer = struct {
         self.shader.setVec3("u_ambient_sky", asArray(params.lighting.ambient_sky));
         self.shader.setVec3("u_ambient_ground", asArray(params.lighting.ambient_ground));
         textures.bind(0);
+        if (params.shadow_texture != 0) {
+            gl.ActiveTexture(gl.TEXTURE1);
+            gl.BindTexture(gl.TEXTURE_2D, params.shadow_texture);
+            gl.ActiveTexture(gl.TEXTURE0);
+        }
+        self.shader.setInt("u_shadow", 1);
+        self.shader.setMat4("u_light_vp", params.light_vp.m);
+        self.shader.setFloat("u_shadows_enabled", if (params.shadow_enabled) 1.0 else 0.0);
+        self.shader.setFloat("u_shadow_texel", params.shadow_texel);
+        self.shader.setFloat("u_shadow_bias", params.shadow_bias);
+        self.shader.setFloat("u_shadow_normal_offset", params.shadow_normal_offset);
 
         gl.Enable(gl.DEPTH_TEST);
         // Explicit, not inherited: the sky pass runs with depth writes off and a

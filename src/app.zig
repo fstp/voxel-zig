@@ -23,6 +23,7 @@ const sun_mod = @import("world/sun.zig");
 const physics = @import("physics/bodies.zig");
 const BlockRenderer = @import("gfx/block_renderer.zig").BlockRenderer;
 const SkyRenderer = @import("gfx/sky_renderer.zig").SkyRenderer;
+const ShadowRenderer = @import("gfx/shadow_renderer.zig").ShadowRenderer;
 const net = @import("net/udp.zig");
 const block = @import("voxel/block.zig");
 const coords = @import("voxel/coords.zig");
@@ -183,6 +184,8 @@ pub const App = struct {
     undo: undo_mod.Undo,
     block_renderer: BlockRenderer,
     sky_renderer: SkyRenderer,
+    shadow_renderer: ShadowRenderer,
+    shadows_enabled: bool = true,
     bodies: physics.Bodies,
     body_items: []physics.Body,
     rng: u32 = 0x1234_5678,
@@ -237,6 +240,10 @@ pub const App = struct {
         // 3.6: the procedural sky, drawn before everything else.
         var sky_renderer = try SkyRenderer.init();
         errdefer sky_renderer.deinit();
+
+        // 3.8: the sun's depth map.
+        var shadow_renderer = try ShadowRenderer.init();
+        errdefer shadow_renderer.deinit();
 
         gl.gl.Enable(gl.gl.DEPTH_TEST);
         gl.gl.Enable(gl.gl.CULL_FACE);
@@ -312,6 +319,7 @@ pub const App = struct {
             .undo = undo_mod.Undo.init(gpa),
             .block_renderer = block_renderer,
             .sky_renderer = sky_renderer,
+            .shadow_renderer = shadow_renderer,
             .bodies = undefined,
             .peer = peer,
             .body_items = try gpa.alloc(physics.Body, MAX_BODIES),
@@ -363,6 +371,7 @@ pub const App = struct {
         self.undo.deinit();
         self.block_renderer.deinit();
         self.sky_renderer.deinit();
+        self.shadow_renderer.deinit();
         self.allocator.free(self.body_items);
         self.hud.deinit();
         self.chunk_renderer.deinit();
@@ -765,6 +774,7 @@ pub const App = struct {
             if (self.input.shading_toggle) self.legacy_lighting = !self.legacy_lighting;
             if (self.input.normals_toggle) self.show_normals = !self.show_normals;
             if (self.input.fog_toggle) self.fog_enabled = !self.fog_enabled;
+            if (self.input.shadows_toggle) self.shadows_enabled = !self.shadows_enabled;
             if (self.input.sun_pin_toggle) {
                 if (self.sun.mode == .pinned) {
                     self.sun.unpin();
@@ -1034,10 +1044,20 @@ pub const App = struct {
         const vp = self.camera.viewProjection(aspect);
         const frustum = Frustum.fromViewProjection(vp);
 
+        const lighting = self.sun.lighting();
+        // Shadow map first: it needs the chunk meshes but none of the colour state.
+        if (self.shadows_enabled) {
+            self.shadow_renderer.begin(self.camera.position, lighting.sun_dir);
+            var shadow_it = self.meshes.valueIterator();
+            while (shadow_it.next()) |mesh| {
+                self.shadow_renderer.drawMesh(mesh.vao, mesh.index_count, mesh.origin);
+            }
+            self.shadow_renderer.end(self.window.width, self.window.height);
+        }
+
         // Sky first, over the cleared colour buffer, then terrain on top of it.
         self.sky_renderer.draw(vp, self.camera.position, &self.sun);
 
-        const lighting = self.sun.lighting();
         const sky_ramp = self.sun.ramp();
         // Fog ends just inside the load radius so chunks fade in behind it rather
         // than popping through a hard frontier: radius 6 chunks = 192 blocks.
@@ -1053,6 +1073,14 @@ pub const App = struct {
             .fog_enabled = self.fog_enabled,
             .legacy = self.legacy_lighting,
             .normals = self.show_normals,
+            .shadow_enabled = self.shadows_enabled,
+            .light_vp = self.shadow_renderer.light_vp,
+            .shadow_texture = if (self.shadows_enabled) self.shadow_renderer.texture else 0,
+            .shadow_texel = 1.0 / @as(f32, @floatFromInt(self.shadow_renderer.size)),
+            // Depth bias in normalised depth; 0.0012 of a 840-block range is about
+            // half a block, with the normal offset doing the real work.
+            .shadow_bias = 0.0012,
+            .shadow_normal_offset = self.shadow_renderer.texelSize() * 1.2,
         });
         var drawn: usize = 0;
         var it = self.meshes.valueIterator();
@@ -1121,7 +1149,7 @@ pub const App = struct {
         if (std.fmt.bufPrint(&buffer, "FPS {d:.1}", .{if (self.frame_ms > 0) 1000.0 / self.frame_ms else 0})) |text| {
             self.hud.text(10, 8, text);
         } else |_| {}
-        if (std.fmt.bufPrint(&buffer, "FRAME {d:.2} MS  WORST {d:.2} MS  SKY {d:.3} MS", .{ self.frame_ms, self.worst_frame_ms, self.sky_renderer.last_ms })) |text| {
+        if (std.fmt.bufPrint(&buffer, "FRAME {d:.2} MS  WORST {d:.2} MS  SKY {d:.3}  SHDW {d:.3} MS", .{ self.frame_ms, self.worst_frame_ms, self.sky_renderer.last_ms, self.shadow_renderer.last_ms })) |text| {
             self.hud.text(10, 26, text);
         } else |_| {}
         line = 2;
@@ -1188,7 +1216,7 @@ pub const App = struct {
             self.hud.text(10, @as(f32, @floatFromInt(self.window.height)) - 66, text);
         }
 
-        const keys = "F1 HUD  F FLY  F3 BOXES  F4 LIGHT A/B  F6 NORMALS  F7 FOG  P PAUSE SUN  1-4 TIMES";
+        const keys = "F1 HUD  F FLY  F3 BOXES  F4 LIGHT A/B  F6 NORMALS  F7 FOG  F8 SUN SHADOWS  P PAUSE SUN  1-4 TIMES";
         self.hud.setColour(0.6, 0.6, 0.6);
         self.hud.text(10, @as(f32, @floatFromInt(self.window.height)) - 22, keys);
 
