@@ -29,7 +29,7 @@ const SEED: u32 = 1337;
 
 /// Bumped whenever the field or the mesher changes. Printed at startup so a stale binary cannot be
 /// mistaken for a change that "made no difference" - which is what the last commit could not rule out.
-const BUILD_TAG = "slab-v11";
+const BUILD_TAG = "globalslab-v12";
 // 8x8 chunks (64 chunks, 256 m^2), re-meshed as the camera crosses a chunk border:: at PATCH=4 the boundary was visible in frame and accounted for
 // 99.6% of the background pixels counted as "holes". A bigger patch pushes the world edge out of
 // shot, which is the honest way to separate a mesher defect from the edge of the world.
@@ -45,27 +45,6 @@ fn heightAt(x: f32, z: f32) f32 {
     const big = noise.fbm2(SEED, x * 0.009, z * 0.009, 4, 2.0, 0.5);
     const detail = noise.fbm2(SEED + 7, x * 0.041, z * 0.041, 3, 2.0, 0.5);
     return base + 22.0 * big + 3.0 * detail;
-}
-
-fn buildField(alloc: std.mem.Allocator, cx: i32, cz: i32) ![]f32 {
-    const side = CHUNK + 1;
-    const vals = try alloc.alloc(f32, side * side * side);
-    const ox: f32 = @floatFromInt(cx * @as(i32, @intCast(CHUNK)));
-    const oz: f32 = @floatFromInt(cz * @as(i32, @intCast(CHUNK)));
-    var k: usize = 0;
-    while (k < side) : (k += 1) {
-        var j: usize = 0;
-        while (j < side) : (j += 1) {
-            var i: usize = 0;
-            while (i < side) : (i += 1) {
-                const x = ox + @as(f32, @floatFromInt(i)) * CELL;
-                const y = 40.0 + @as(f32, @floatFromInt(j)) * CELL;
-                const z = oz + @as(f32, @floatFromInt(k)) * CELL;
-                vals[i + side * (j + side * k)] = y - heightAt(x, z);
-            }
-        }
-    }
-    return vals;
 }
 
 const Coloured = extern struct {
@@ -269,11 +248,17 @@ fn meshChunkInto(
     idx: *std.ArrayList(u32),
 ) !usize {
     const n = CHUNK;
+    // ONE global y slab for the whole world, so every chunk samples the same y planes. This is the
+    // fix for the border hairlines: with a per-chunk slab two neighbours evaluate a shared border
+    // cell from different planes and their vertices do not coincide (10,394 measured).
+    const ny_cells: usize = 71; // y 20..92: covers the terrain's peak near 87 with room below
+    const y_base: f32 = 20.0;
     // One skirt cell each side. Tried two, on the theory that the QEF gradient stencil was clamped
     // at the boundary in one chunk and central in its neighbour: it made the hairline count WORSE
     // (10,394 -> 19,805 near-duplicates), so the theory is wrong and this stays at one.
     const side = n + 3;
-    const vals = try alloc.alloc(f32, side * side * side);
+    const side_y = ny_cells + 3;
+    const vals = try alloc.alloc(f32, side * side_y * side);
     defer alloc.free(vals);
 
     // The field is a HEIGHT field: y - height(x, z) depends on the column only, so the height is
@@ -292,23 +277,17 @@ fn meshChunkInto(
             );
         }
     }
-    // The sampled slab has to CONTAIN the surface. It used to start at y = 40 and span 34 m, while
-    // the fBm terrain peaks near 87 - so every peak above 75 was cut open and drew as a hole, which
-    // is exactly where the big holes were reported. Anchoring the slab to the chunk's own lowest
-    // column keeps the whole surface inside it.
-    var min_h: f32 = 1e9;
-    for (heights) |h| {
-        if (h < min_h) min_h = h;
-    }
-    const y0 = min_h - 2.0;
+    // Global slab: tall enough for the peaks (which is what the earlier per-chunk anchoring was for)
+    // AND identical in every chunk (which is what the hairlines needed).
+    const y0 = y_base;
     var k: usize = 0;
     while (k < side) : (k += 1) {
         var j: usize = 0;
-        while (j < side) : (j += 1) {
+        while (j < side_y) : (j += 1) {
             var i: usize = 0;
             while (i < side) : (i += 1) {
                 const y = y0 + (@as(f32, @floatFromInt(j)) - 1.0) * CELL;
-                vals[i + side * (j + side * k)] = y - heights[i + side * k];
+                vals[i + side * (j + side_y * k)] = y - heights[i + side * k];
             }
         }
     }
@@ -316,6 +295,7 @@ fn meshChunkInto(
     const field = dc.Field{
         .values = vals,
         .n = CHUNK,
+        .ny = ny_cells,
         .skirt = 1,
         .origin = .{
             @as(f32, @floatFromInt((patch_origin + cx) * @as(i32, @intCast(CHUNK)))),

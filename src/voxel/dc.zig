@@ -278,7 +278,9 @@ pub fn extract(alloc: std.mem.Allocator, field: Field) !Surface {
     var ci: usize = 0;
     while (ci < cpa) : (ci += 1) {
         var cj: usize = 0;
-        while (cj < cpa) : (cj += 1) {
+        while (cj < cpay) : (cj += 1) { // y, cpay: with a non-cubic field this must not be cpa, or
+            // the pass never reaches the terrain's y range and the mesh comes out nearly empty -
+            // which is exactly the 3,277-quad collapse that took two sessions to pin down.
             var ck: usize = 0;
             while (ck < cpa) : (ck += 1) { // z, not y: at() is i + sx*(j + sy*k)
                 var v: [8]f32 = undefined;

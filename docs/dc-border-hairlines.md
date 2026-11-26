@@ -27,10 +27,13 @@ Exact duplicates are harmless (same position, no gap). **Near duplicates are the
 | per-chunk y slab (start) | 5,264 | before the peak fix; the defect was already present |
 | per-chunk y slab + peak fix | 10,394 | anchoring the slab per chunk made it worse |
 | two-cell skirt | 19,805 | nearly double; theory refuted |
-| global y slab (kernel fixed) | **272** | mechanism confirmed; but the mesh collapsed to 3,277 quads |
+| global y slab, mesh broken | 272 | **INVALID** — measured on a collapsed mesh (3,277 quads). Few vertices cannot have many duplicates; the number proved nothing |
+| global y slab, mesh correct | 5,269 | after fixing the Y loop bound. Same as the original per-chunk figure |
 
-The global slab is the right fix: it drops the defect by ~40x because every chunk then samples the same
-y planes, so two neighbours evaluating a shared border cell compute the same vertex.
+**The global slab is NOT the fix.** With the mesh actually complete the count is 5,269 - indistinguishable
+from the 5,264 measured with per-chunk slabs at the start. The 272 was an artefact of the broken mesh, and
+recording it as "mechanism confirmed" was wrong. The border mismatch is therefore not about which y planes
+are sampled, and the two-cell skirt result (worse) now fits: the cause is neither the slab nor the skirt.
 
 ## Hypotheses tested and refuted (do not re-test these)
 
@@ -53,6 +56,14 @@ y planes, so two neighbours evaluating a shared border cell compute the same ver
 2. **Segfault** in `extract` after the non-cubic field was added: the loops are x(`cpa`), y(`cpay`),
    z(`cpa`) because `at()` is `i + sx*(j + sy*k)`, and both `cj` and `ck` had been switched to the y
    bound — a ~2x overrun of `cell_vert`. Fixed in `d861ac9`.
+
+## The Y loop bound bug (fixed, and it explains the collapse)
+
+`extract`'s vertex pass ran `while (cj < cpa)` - the Y loop using the X/Z cell count. With a cubic field
+that is correct; with ny = 71 it meant the pass only covered y cells 0..33, i.e. world y 19..52, which is
+BELOW the terrain (62..87). Almost no crossings, ~63 vertices per chunk, 3,277 quads. It is now `cpay`,
+with a comment saying why. Two sessions went into chasing this as a shading or seam problem; it was a
+single loop bound.
 
 ## The remaining bug, precisely
 
