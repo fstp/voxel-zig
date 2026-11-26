@@ -61,4 +61,21 @@ pub fn build(b: *std.Build) void {
 
     const exe_tests = b.addTest(.{ .root_module = exe.root_module });
     test_step.dependOn(&b.addRunArtifact(exe_tests).step);
+
+    // Mesher benchmark (ADR 0004). Numbers only count in a release build:
+    //   zig build bench -Doptimize=ReleaseFast
+    const bench_step = b.step("bench", "Run the mesher benchmark (use -Doptimize=ReleaseFast)");
+    const bench_exe = b.addExecutable(.{
+        .name = "mesher-bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/bench/mesher_bench.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "voxel_zig", .module = engine },
+            },
+        }),
+    });
+    const bench_run = b.addRunArtifact(bench_exe);
+    bench_step.dependOn(&bench_run.step);
 }

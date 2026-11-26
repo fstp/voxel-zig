@@ -27,6 +27,7 @@ pub const voxel = struct {
     pub const coords = @import("voxel/coords.zig");
     pub const BlockPos = coords.BlockPos;
     pub const ChunkPos = coords.ChunkPos;
+    pub const mesher = @import("voxel/mesher.zig");
 };
 
 pub const world = struct {
@@ -56,5 +57,6 @@ test {
     _ = @import("world/chunk.zig");
     _ = @import("world/chunk_slab.zig");
     _ = @import("world/world.zig");
+    _ = @import("voxel/mesher.zig");
     _ = @import("app.zig");
 }
