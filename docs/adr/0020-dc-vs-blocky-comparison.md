@@ -19,13 +19,34 @@ Same terrain generator, same 32-cell chunks, 1 m cells, ReleaseFast on burken.
 | quads per 32^3 chunk | ~8,570 (943k in view across ~110 drawn chunks) | 1,369 (136,920 across 100 chunks) |
 | mesh time per chunk | not measured | 0.37 ms mean, 0.44 ms worst |
 | verts per chunk | not measured | 1,552 |
-| cracks at chunk borders | none (face-culled, shares faces exactly) | none, with a one-cell skirt and a half-open ownership cube |
-| remaining visible defects | none known on this axis | 185 enclosed-background pixels of pinch artefacts |
+| cracks at chunk borders | none (face-culled, shares faces exactly) | none after the two-cell-skirt fix (2026-11-27); a one-cell skirt left 510 border cells disagreeing by up to 1.358 blocks |
+| remaining visible defects | none known on this axis | 0 enclosed-background pixels after the two-cell-skirt fix; 2,751 in 51 components before it |
 | materials | 256^2 texture array, indexed by block face id | per-vertex id + world-space procedural noise |
 
 The quad ratio is the headline: **1,369 vs 8,570 per chunk, 6.3x fewer**. That is expected - the
 blocky mesher emits a quad per visible face while DC emits one per crossed cell edge - and it is
 the reason the path is worth continuing.
+
+## The border-hole defect: cause and closure (2026-11-27)
+
+The DC column above used to carry 185 enclosed-background pixels labelled "pinch artefacts". On the
+current 8x8 patch the honest magenta check measured 2,751 such pixels in 51 components, and they
+were not pinches: `ambiguous_cells` and `degenerate_quads` were both 0, and no quad was skipped for
+a missing cell. The defect was that two chunks sharing a border cell computed its QEF from
+different gradient stencils - `Field.gradient()` falls back to a one-sided difference at the edge
+of the padded sample grid, so the owner used a central difference and the skirting neighbour a
+one-sided one. 510 of 4,287 referenced cell copies disagreed by more than 1e-3 (299 by more than
+half a block, worst 1.358).
+
+A two-cell skirt puts the shared cells two samples from the padded edge, so both sides use central
+differences: cell-copy deltas went 510 -> 0, and enclosed magenta pixels 2,751 -> 0 (two captures at
+different orbit phases). Quad count unchanged at 89,004; vertices 100,402 -> 112,474 because more
+skirt cells are meshed and not drawn. A curved-field regression test was added; the older
+plane-field overlap test cannot see this, because one-sided and central differences agree exactly
+on a linear field.
+
+Measurements, the misleading near-duplicate counter and the refuted hypotheses:
+`docs/dc-border-hairlines.md`.
 
 ## Not measured, and required before integration
 
@@ -53,9 +74,11 @@ the reason the path is worth continuing.
 
 ## What the spike proved, and what it did not
 
-Proved: the extraction is correct (closed interior, seam-exact tiling under a skirt), it is cheap
-(0.37 ms per chunk), it needs 6.3x less geometry, and materials work without textures. The defect
-metric is now trustworthy because the background is a colour the render cannot produce.
+Proved: the extraction is correct (closed interior, seam-exact tiling under a two-cell skirt), it is
+cheap (0.37 ms per chunk), it needs 6.3x less geometry, and materials work without textures. The
+defect metric is trustworthy only when the background is a colour the render cannot produce AND the
+sky pass is skipped in that mode; the magenta clear alone is overdrawn by the sky.
 
 Did not prove: that it renders faster in the real engine, that water or collision can be carried
-over, or that the pinch artefacts are acceptable at scale. Those are the integration's job.
+over, or that the defect count stays at zero across every camera angle and LOD - two orbit phases
+were checked, not a sweep. Those are the integration's job.

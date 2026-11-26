@@ -29,7 +29,7 @@ const SEED: u32 = 1337;
 
 /// Bumped whenever the field or the mesher changes. Printed at startup so a stale binary cannot be
 /// mistaken for a change that "made no difference" - which is what the last commit could not rule out.
-const BUILD_TAG = "globalslab-v12";
+const BUILD_TAG = "skirt2";
 // 8x8 chunks (64 chunks, 256 m^2), re-meshed as the camera crosses a chunk border:: at PATCH=4 the boundary was visible in frame and accounted for
 // 99.6% of the background pixels counted as "holes". A bigger patch pushes the world edge out of
 // shot, which is the honest way to separate a mesher defect from the edge of the world.
@@ -235,6 +235,24 @@ fn mul(a: [16]f32, b: [16]f32) [16]f32 {
 
 
 
+const ChunkStats = struct {
+    quads: usize = 0,
+    skipped_missing: usize = 0,
+    skipped_bounds: usize = 0,
+    ambiguous: usize = 0,
+    degenerate: usize = 0,
+    min_area: f32 = 1e9,
+};
+
+const PatchStats = struct {
+    quads: usize = 0,
+    skipped_missing: usize = 0,
+    skipped_bounds: usize = 0,
+    ambiguous: usize = 0,
+    degenerate: usize = 0,
+    min_area: f32 = 1e9,
+};
+
 /// Meshes ONE chunk of the patch into the given buffers. Split out so a rebuild can be spread across
 /// frames: 64 chunks x ~0.6 ms is a 40 ms hitch if done at once, and a fraction of a millisecond per
 /// frame if done a few at a time - which removes the need for a worker thread entirely.
@@ -246,18 +264,27 @@ fn meshChunkInto(
     cz: i32,
     verts: *std.ArrayList(Coloured),
     idx: *std.ArrayList(u32),
-) !usize {
+) !ChunkStats {
     const n = CHUNK;
-    // ONE global y slab for the whole world, so every chunk samples the same y planes. This is the
-    // fix for the border hairlines: with a per-chunk slab two neighbours evaluate a shared border
-    // cell from different planes and their vertices do not coincide (10,394 measured).
+    // ONE global y slab for the whole world: every chunk samples the same y planes (so a shared
+    // border cell is evaluated from the same values) and the slab is tall enough for the peaks near
+    // 87. It is not what fixes the border holes - the gradient stencil in the skirt does that; see
+    // the skirt comment below.
     const ny_cells: usize = 71; // y 20..92: covers the terrain's peak near 87 with room below
     const y_base: f32 = 20.0;
-    // One skirt cell each side. Tried two, on the theory that the QEF gradient stencil was clamped
-    // at the boundary in one chunk and central in its neighbour: it made the hairline count WORSE
-    // (10,394 -> 19,805 near-duplicates), so the theory is wrong and this stays at one.
-    const side = n + 3;
-    const side_y = ny_cells + 3;
+    // TWO skirt cells each side, and that number is a correctness requirement, not a tuning knob.
+    // A duplicated border cell is meshed by both chunks; its copies agree only if the QEF sees the
+    // same input from both. The field values and sample positions are already bit-identical, but
+    // `Field.gradient()` falls back to a one-sided difference at the padded grid's edge - so with a
+    // one-cell skirt the chunk that holds the cell in its skirt computes a different stencil than
+    // the chunk that owns it. Measured with the per-cell copy metric: 510 border cells disagreed by
+    // more than 1e-3 (299 by more than half a block, worst 1.36). A second skirt cell puts the
+    // duplicated cells two samples away from the grid edge, so both sides use central differences.
+    // The earlier "two-cell skirt made it worse" measurement counted unreferenced skirt vertices,
+    // which this metric does not.
+    const skirt: usize = 2;
+    const side = n + 1 + 2 * skirt;
+    const side_y = ny_cells + 1 + 2 * skirt;
     const vals = try alloc.alloc(f32, side * side_y * side);
     defer alloc.free(vals);
 
@@ -269,8 +296,8 @@ fn meshChunkInto(
     while (ck < side) : (ck += 1) {
         var ci: usize = 0;
         while (ci < side) : (ci += 1) {
-            const gx: i32 = (patch_origin + cx) * @as(i32, @intCast(CHUNK)) + @as(i32, @intCast(ci)) - 1;
-            const gz: i32 = (patch_origin_z + cz) * @as(i32, @intCast(CHUNK)) + @as(i32, @intCast(ck)) - 1;
+            const gx: i32 = (patch_origin + cx) * @as(i32, @intCast(CHUNK)) + @as(i32, @intCast(ci)) - @as(i32, @intCast(skirt));
+            const gz: i32 = (patch_origin_z + cz) * @as(i32, @intCast(CHUNK)) + @as(i32, @intCast(ck)) - @as(i32, @intCast(skirt));
             heights[ci + side * ck] = heightAt(
                 @as(f32, @floatFromInt(gx)) * CELL,
                 @as(f32, @floatFromInt(gz)) * CELL,
@@ -286,7 +313,7 @@ fn meshChunkInto(
         while (j < side_y) : (j += 1) {
             var i: usize = 0;
             while (i < side) : (i += 1) {
-                const y = y0 + (@as(f32, @floatFromInt(j)) - 1.0) * CELL;
+                const y = y0 + (@as(f32, @floatFromInt(j)) - @as(f32, @floatFromInt(skirt))) * CELL;
                 vals[i + side * (j + side_y * k)] = y - heights[i + side * k];
             }
         }
@@ -296,7 +323,7 @@ fn meshChunkInto(
         .values = vals,
         .n = CHUNK,
         .ny = ny_cells,
-        .skirt = 1,
+        .skirt = skirt,
         .origin = .{
             @as(f32, @floatFromInt((patch_origin + cx) * @as(i32, @intCast(CHUNK)))),
             y0,
@@ -306,6 +333,14 @@ fn meshChunkInto(
     };
     const surf = try dc.extract(alloc, field);
     defer surf.deinit(alloc);
+    const stats = ChunkStats{
+        .quads = surf.quadCount(),
+        .skipped_missing = dc.skipped_missing_cell,
+        .skipped_bounds = dc.skipped_bounds,
+        .ambiguous = dc.ambiguous_cells,
+        .degenerate = dc.degenerate_quads,
+        .min_area = dc.min_quad_area_observed,
+    };
     const base: u32 = @intCast(verts.items.len);
     for (surf.verts) |v| {
         var mat: u8 = 0;
@@ -313,7 +348,7 @@ fn meshChunkInto(
         try verts.append(alloc, .{ .pos = v.pos, .normal = v.normal, .colour = col, .material = @floatFromInt(mat) });
     }
     for (surf.indices) |v| try idx.append(alloc, base + v);
-    return surf.quadCount();
+    return stats;
 }
 
 /// Meshes a PATCH x PATCH block of chunks with the one-cell skirt. Factored out of `main` so a
@@ -325,17 +360,23 @@ fn meshPatch(
     patch_origin_z: i32,
     verts: *std.ArrayList(Coloured),
     idx: *std.ArrayList(u32),
-) !usize {
-    var quads: usize = 0;
+) !PatchStats {
+    var out = PatchStats{};
 
     var cz: i32 = 0;
     while (cz < PATCH) : (cz += 1) {
         var cx: i32 = 0;
         while (cx < PATCH) : (cx += 1) {
-            quads += try meshChunkInto(alloc, patch_origin, patch_origin_z, cx, cz, verts, idx);
+            const st = try meshChunkInto(alloc, patch_origin, patch_origin_z, cx, cz, verts, idx);
+            out.quads += st.quads;
+            out.skipped_missing += st.skipped_missing;
+            out.skipped_bounds += st.skipped_bounds;
+            out.ambiguous += st.ambiguous;
+            out.degenerate += st.degenerate;
+            if (st.min_area < out.min_area) out.min_area = st.min_area;
         }
     }
-return quads;
+    return out;
 }
 
 
@@ -423,6 +464,186 @@ fn countNearDuplicates(alloc: std.mem.Allocator, verts: []const Coloured) !struc
     return .{ .exact = exact, .near = near };
 }
 
+/// The defect this measures: one vertex per crossed cell means the SAME world cell is meshed by
+/// every chunk whose padded grid contains it, and the copies must be bit-identical or the seam
+/// crack shows background. Keying by the cell (floor of the position, valid because the QEF is
+/// clamped 2 % inside its cell) compares copies of one cell. The older near-duplicate metric
+/// counted every pair of unrelated vertices closer than half a block, including skirt vertices that
+/// no quad references, so it could not tell a real seam mismatch from two adjacent cells whose
+/// surface points happen to sit close together.
+const CopyStats = struct {
+    pairs: usize = 0,
+    exact: usize = 0, // delta <= 1e-6
+    tiny: usize = 0, // 1e-6 .. 1e-3
+    big: usize = 0, // > 1e-3
+    border: usize = 0, // pairs whose cell sits on a chunk border column
+    hist: [7]usize = .{ 0, 0, 0, 0, 0, 0, 0 }, // 1e-6,1e-4,1e-3,1e-2,1e-1,0.5,inf
+    max_delta: f32 = 0,
+    worst_pos: [3]f32 = .{ 0, 0, 0 },
+};
+
+fn countCellCopies(alloc: std.mem.Allocator, verts: []const Coloured, idx: []const u32) !CopyStats {
+    var out = CopyStats{};
+    const used = try alloc.alloc(bool, verts.len);
+    defer alloc.free(used);
+    @memset(used, false);
+    for (idx) |i| used[i] = true;
+
+    var first = std.AutoHashMap([3]i32, u32).init(alloc);
+    defer first.deinit();
+    for (verts, 0..) |v, i| {
+        if (!used[i]) continue;
+        const key = [3]i32{
+            @intFromFloat(@floor(v.pos[0])),
+            @intFromFloat(@floor(v.pos[1])),
+            @intFromFloat(@floor(v.pos[2])),
+        };
+        const gop = try first.getOrPut(key);
+        if (!gop.found_existing) {
+            gop.value_ptr.* = @intCast(i);
+            continue;
+        }
+        const o = verts[gop.value_ptr.*].pos;
+        const dx = v.pos[0] - o[0];
+        const dy = v.pos[1] - o[1];
+        const dz = v.pos[2] - o[2];
+        const d = @sqrt(dx * dx + dy * dy + dz * dz);
+        out.pairs += 1;
+        const bucket: usize = if (d <= 1e-6) 0 else if (d <= 1e-4) 1 else if (d <= 1e-3) 2 else if (d <= 1e-2) 3 else if (d <= 1e-1) 4 else if (d <= 0.5) 5 else 6;
+        out.hist[bucket] += 1;
+        if (d <= 1e-6) {
+            out.exact += 1;
+        } else if (d <= 1e-3) {
+            out.tiny += 1;
+        } else {
+            out.big += 1;
+        }
+        const bx = @mod(key[0], @as(i32, @intCast(CHUNK)));
+        const bz = @mod(key[2], @as(i32, @intCast(CHUNK)));
+        const is_border = bx == 0 or bx == CHUNK - 1 or bz == 0 or bz == CHUNK - 1;
+        if (d > 1e-3 and is_border) out.border += 1;
+        if (d > out.max_delta) {
+            out.max_delta = d;
+            out.worst_pos = v.pos;
+        }
+    }
+    return out;
+}
+
+/// Connectivity of the whole patch: every interior edge must be shared by exactly two triangles. An
+/// edge counted once is a crack where background shows through; counted three or more is duplicated
+/// or folded geometry. Edges within two blocks of the patch's x/z bounds are the world edge, where
+/// the surface legitimately stops, and are reported apart from the interior.
+const ClosureStats = struct {
+    edges: usize = 0,
+    open: usize = 0,
+    open_outer: usize = 0,
+    open_interior: usize = 0,
+    once: usize = 0,
+    more: usize = 0,
+    nan_verts: usize = 0,
+    first_interior: [3]f32 = .{ 0, 0, 0 },
+};
+
+fn checkClosure(
+    alloc: std.mem.Allocator,
+    verts: []const Coloured,
+    idx: []const u32,
+    patch_origin: i32,
+    patch_origin_z: i32,
+) !ClosureStats {
+    var out = ClosureStats{};
+    for (verts) |v| {
+        if (!(std.math.isFinite(v.pos[0]) and std.math.isFinite(v.pos[1]) and std.math.isFinite(v.pos[2]))) out.nan_verts += 1;
+    }
+    var counts = std.AutoHashMap(u64, u8).init(alloc);
+    defer counts.deinit();
+
+    // Chunk meshes are concatenated without a shared vertex index, so an edge on a chunk border is
+    // two different index pairs even when the two vertices are the same point. Weld bit-identical
+    // copies by quantised position first (the two-cell skirt makes them exact); otherwise every
+    // border reads as an open edge and the count says nothing about the surface being closed.
+    const canon = try alloc.alloc(u32, verts.len);
+    defer alloc.free(canon);
+    var posmap = std.AutoHashMap([3]i64, u32).init(alloc);
+    defer posmap.deinit();
+    const quant = struct {
+        fn f(x: f32) i64 {
+            return @intFromFloat(@round(x * 1024.0));
+        }
+    }.f;
+    for (verts, 0..) |v, i| {
+        const q = [3]i64{ quant(v.pos[0]), quant(v.pos[1]), quant(v.pos[2]) };
+        const gop = try posmap.getOrPut(q);
+        if (!gop.found_existing) gop.value_ptr.* = @intCast(i);
+        canon[i] = gop.value_ptr.*;
+    }
+
+    var t: usize = 0;
+    while (t + 2 < idx.len) : (t += 3) {
+        for (0..3) |e| {
+            const a = canon[idx[t + e]];
+            const b = canon[idx[t + (e + 1) % 3]];
+            if (a == b) continue;
+            const lo = @min(a, b);
+            const hi = @max(a, b);
+            const key = (@as(u64, lo) << 32) | @as(u64, hi);
+            const gop = try counts.getOrPut(key);
+            if (!gop.found_existing) gop.value_ptr.* = 0;
+            gop.value_ptr.* +|= 1;
+        }
+    }
+    out.edges = counts.count();
+    const x0: f32 = @as(f32, @floatFromInt(patch_origin * @as(i32, @intCast(CHUNK))));
+    const x1: f32 = @as(f32, @floatFromInt((patch_origin + PATCH) * @as(i32, @intCast(CHUNK))));
+    const z0: f32 = @as(f32, @floatFromInt(patch_origin_z * @as(i32, @intCast(CHUNK))));
+    const z1: f32 = @as(f32, @floatFromInt((patch_origin_z + PATCH) * @as(i32, @intCast(CHUNK))));
+    const isOuter = struct {
+        fn f(p: [3]f32, a: f32, b: f32, c: f32, d: f32) bool {
+            return p[0] <= a + 2.0 or p[0] >= b - 2.0 or p[2] <= c + 2.0 or p[2] >= d - 2.0;
+        }
+    }.f;
+    var it = counts.iterator();
+    while (it.next()) |kv| {
+        if (kv.value_ptr.* == 2) continue;
+        out.open += 1;
+        if (kv.value_ptr.* == 1) out.once += 1 else out.more += 1;
+        const key = kv.key_ptr.*;
+        const a: u32 = @intCast(key >> 32);
+        const b: u32 = @intCast(key & 0xffffffff);
+        if (isOuter(verts[a].pos, x0, x1, z0, z1) or isOuter(verts[b].pos, x0, x1, z0, z1)) {
+            out.open_outer += 1;
+        } else {
+            if (out.open_interior == 0) out.first_interior = verts[a].pos;
+            out.open_interior += 1;
+        }
+    }
+    return out;
+}
+
+fn diagnoseMesh(
+    alloc: std.mem.Allocator,
+    verts: []const Coloured,
+    idx: []const u32,
+    patch_origin: i32,
+    patch_origin_z: i32,
+) !void {
+    const copies = try countCellCopies(alloc, verts, idx);
+    std.debug.print(
+        "diag copies: {d} cell pairs (exact {d}, <=1e-3 {d}, >1e-3 {d}, border>1e-3 {d}), max delta {d:.6} at ({d:.3},{d:.3},{d:.3})\n",
+        .{ copies.pairs, copies.exact, copies.tiny, copies.big, copies.border, copies.max_delta, copies.worst_pos[0], copies.worst_pos[1], copies.worst_pos[2] },
+    );
+    std.debug.print(
+        "diag delta hist: <=1e-6 {d}, <=1e-4 {d}, <=1e-3 {d}, <=1e-2 {d}, <=1e-1 {d}, <=0.5 {d}, >0.5 {d}\n",
+        .{ copies.hist[0], copies.hist[1], copies.hist[2], copies.hist[3], copies.hist[4], copies.hist[5], copies.hist[6] },
+    );
+    const cl = try checkClosure(alloc, verts, idx, patch_origin, patch_origin_z);
+    std.debug.print(
+        "diag closure: {d} edges, open {d} (once {d}, more {d}; outer {d}, interior {d}), nan verts {d}, first interior open ({d:.3},{d:.3},{d:.3})\n",
+        .{ cl.edges, cl.open, cl.once, cl.more, cl.open_outer, cl.open_interior, cl.nan_verts, cl.first_interior[0], cl.first_interior[1], cl.first_interior[2] },
+    );
+}
+
 pub fn main(init: std.process.Init) !void {
     // VOXEL_DC_BG=magenta paints the background a colour that terrain shading cannot produce, so a
     // hole count can never be confused with a pixel that merely happens to land near the sky tone.
@@ -476,10 +697,14 @@ pub fn main(init: std.process.Init) !void {
     var pending_z: i32 = 0;
     var pending_cursor: i32 = 0;
     var rebuilds: usize = 0;
-    const quads = try meshPatch(alloc, patch_origin, patch_origin_z, &all_verts, &all_idx);
+    const first = try meshPatch(alloc, patch_origin, patch_origin_z, &all_verts, &all_idx);
     const all_verts_s = all_verts.items;
     const all_idx_s = all_idx.items;
-    std.debug.print("DC viewer: {d} verts, {d} quads over {d} skirted chunks\n", .{ all_verts_s.len, quads, PATCH * PATCH });
+    std.debug.print("DC viewer: {d} verts, {d} quads over {d} skirted chunks\n", .{ all_verts_s.len, first.quads, PATCH * PATCH });
+    std.debug.print("kernel: emitted {d}, skipped_missing {d}, skipped_bounds {d}, ambiguous cells {d}, degenerate quads {d}, min tri area {d:.6}\n", .{
+        first.quads, first.skipped_missing, first.skipped_bounds, first.ambiguous, first.degenerate, first.min_area,
+    });
+    try diagnoseMesh(alloc, all_verts_s, all_idx_s, patch_origin, patch_origin_z);
     {
         const dup = try countNearDuplicates(alloc, all_verts_s);
         std.debug.print("duplicates: exact {d}, near (<0.5 block, >1e-5) {d}\n", .{ dup.exact, dup.near });
@@ -493,10 +718,10 @@ pub fn main(init: std.process.Init) !void {
     var probe_idx: std.ArrayList(u32) = .empty;
     defer probe_idx.deinit(alloc);
     const t_rebuild = nowNs();
-    const probe_quads = try meshPatch(alloc, patch_origin, patch_origin_z, &probe_verts, &probe_idx);
+    const probe = try meshPatch(alloc, patch_origin, patch_origin_z, &probe_verts, &probe_idx);
     const rebuild_ms = @as(f64, @floatFromInt(nowNs() - t_rebuild)) / 1e6;
-    const identical = probe_verts.items.len == all_verts_s.len and probe_idx.items.len == all_idx_s.len and probe_quads == quads;
-    std.debug.print("rebuild: {d} quads in {d:.1} ms, identical to the first build: {}\n", .{ probe_quads, rebuild_ms, identical });
+    const identical = probe_verts.items.len == all_verts_s.len and probe_idx.items.len == all_idx_s.len and probe.quads == first.quads;
+    std.debug.print("rebuild: {d} quads in {d:.1} ms, identical to the first build: {}\n", .{ probe.quads, rebuild_ms, identical });
 
     var shader = try gfx.Shader.init(vertex_src, fragment_src);
     defer shader.deinit();
@@ -589,7 +814,10 @@ pub fn main(init: std.process.Init) !void {
         const vp_m = mul(proj, view);
         const eye_v = Vec3.init(eye[0], eye[1], eye[2]);
         cloud_shift = Vec3.init(cloud_shift.x + 0.016 * 2.0, 0, cloud_shift.z + 0.016 * 0.6);
-        sky.draw(Mat4{ .m = vp_m }, eye_v, &sun, true, cloud_shift);
+        // The sky pass fills the whole screen, so with it running the magenta clear colour is never
+        // visible and a hole shows sky instead. In the diagnostic mode the background is left empty
+        // so every hole is the one colour the render cannot produce.
+        if (!bg_magenta) sky.draw(Mat4{ .m = vp_m }, eye_v, &sun, true, cloud_shift);
 
         shader.use();
         shader.setMat4("u_view_proj", vp_m);

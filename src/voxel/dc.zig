@@ -655,6 +655,104 @@ test "dual contouring: an overlapping chunk reproduces the border vertices exact
     try std.testing.expectEqual(considered, matched);
 }
 
+test "dual contouring: a curved field reproduces border vertices with a two-cell skirt" {
+    // The overlap test above uses a LINEAR field, and on a linear field the one-sided fallback in
+    // Field.gradient() returns exactly what the central difference does - so it cannot see a chunk
+    // that computes a shared border cell with a different stencil. That is not hypothetical: with a
+    // one-cell skirt the chunk holding a border cell in its skirt uses a one-sided gradient while
+    // the owner uses a central one, and on real fBm terrain the two QEF solutions landed up to 1.358
+    // blocks apart (510 of 4,287 shared cells disagreed by >1e-3). Two skirt cells put the shared
+    // cells two samples from the padded edge, both stencils central, copies bit-identical. This test
+    // pins that property on a curved field, where the fallback actually differs.
+    const alloc = std.testing.allocator;
+    const n = 16;
+    const cell: f32 = 1.0;
+    const skirt: usize = 2;
+    const side = n + 1 + 2 * skirt;
+    const Fn = struct {
+        fn f(x: f32, y: f32, z: f32) f32 {
+            const cx = 16.0;
+            const cy = 8.0;
+            const cz = 8.0;
+            return @sqrt((x - cx) * (x - cx) + (y - cy) * (y - cy) + (z - cz) * (z - cz)) - 7.0;
+        }
+    };
+    const build = struct {
+        fn g(al: std.mem.Allocator, origin: [3]f32) ![]f32 {
+            const vals = try al.alloc(f32, side * side * side);
+            var k: usize = 0;
+            while (k < side) : (k += 1) {
+                var j: usize = 0;
+                while (j < side) : (j += 1) {
+                    var i: usize = 0;
+                    while (i < side) : (i += 1) {
+                        const sk: f32 = @floatFromInt(skirt);
+                        const x = origin[0] + (@as(f32, @floatFromInt(i)) - sk) * cell;
+                        const y = origin[1] + (@as(f32, @floatFromInt(j)) - sk) * cell;
+                        const z = origin[2] + (@as(f32, @floatFromInt(k)) - sk) * cell;
+                        vals[i + side * (j + side * k)] = Fn.f(x, y, z);
+                    }
+                }
+            }
+            return vals;
+        }
+    }.g;
+    const a_vals = try build(alloc, .{ 0, 0, 0 });
+    defer alloc.free(a_vals);
+    const b_vals = try build(alloc, .{ n * cell, 0, 0 });
+    defer alloc.free(b_vals);
+    const fa = Field{ .values = a_vals, .n = n, .skirt = skirt, .origin = .{ 0, 0, 0 }, .cell = cell };
+    const fb = Field{ .values = b_vals, .n = n, .skirt = skirt, .origin = .{ n * cell, 0, 0 }, .cell = cell };
+    const sa = try extract(alloc, fa);
+    defer sa.deinit(alloc);
+    const sb = try extract(alloc, fb);
+    defer sb.deinit(alloc);
+
+    // Compare copies of the same world cell, keyed by floor(pos) - the QEF is clamped 2 % inside
+    // its cell, so the floor is the cell index for every vertex.
+    // Only vertices a quad references: the padded grids also compute cells outside every owned
+    // range, and those copies are not part of the surface (this is the same filter the viewer's
+    // cell-copy metric applies).
+    const used_a = try alloc.alloc(bool, sa.verts.len);
+    defer alloc.free(used_a);
+    @memset(used_a, false);
+    for (sa.indices) |i| used_a[i] = true;
+    const used_b = try alloc.alloc(bool, sb.verts.len);
+    defer alloc.free(used_b);
+    @memset(used_b, false);
+    for (sb.indices) |i| used_b[i] = true;
+
+    var map = std.AutoHashMap([3]i32, [3]f32).init(alloc);
+    defer map.deinit();
+    for (sa.verts, 0..) |v, vi| {
+        if (!used_a[vi]) continue;
+        const key = [3]i32{
+            @intFromFloat(@floor(v.pos[0])),
+            @intFromFloat(@floor(v.pos[1])),
+            @intFromFloat(@floor(v.pos[2])),
+        };
+        try map.put(key, v.pos);
+    }
+    var copies: usize = 0;
+    var bad: usize = 0;
+    for (sb.verts, 0..) |v, vi| {
+        if (!used_b[vi]) continue;
+        const key = [3]i32{
+            @intFromFloat(@floor(v.pos[0])),
+            @intFromFloat(@floor(v.pos[1])),
+            @intFromFloat(@floor(v.pos[2])),
+        };
+        const pa = map.get(key) orelse continue;
+        copies += 1;
+        const dx = v.pos[0] - pa[0];
+        const dy = v.pos[1] - pa[1];
+        const dz = v.pos[2] - pa[2];
+        if (@sqrt(dx * dx + dy * dy + dz * dz) > 1e-6) bad += 1;
+    }
+    try std.testing.expect(copies > 20);
+    try std.testing.expectEqual(@as(usize, 0), bad);
+}
+
 test "dual contouring: a uniform field yields nothing" {
     const alloc = std.testing.allocator;
     const n = 4;

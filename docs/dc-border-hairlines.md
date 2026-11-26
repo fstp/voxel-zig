@@ -1,94 +1,102 @@
-# Chunk-border hairlines in the DC spike: state of the investigation
+# Chunk-border holes in the DC spike: cause and fix
 
-Everything below is measured, not suspected. Written when the remaining fix was one sampler bug away
-and the session ran out of context.
+Status: **resolved 2026-11-27**. The rendered surface has no enclosed background pixels on the
+magenta check, and the two chunks that share a border cell now compute it bit-identically.
 
 ## The symptom
 
-The rendered DC surface shows thin white slivers following chunk boundaries. They are real holes: the
-background shows through them (confirmed by clearing to magenta, which terrain shading cannot produce).
+The DC surface showed thin slivers and scattered specks of background, many of them along lines
+that follow chunk boundaries. They were real holes, not shading: with the sky pass skipped and the
+framebuffer cleared to magenta, the magenta was visible inside the terrain silhouette - 2,751
+pixels in 51 enclosed components on an 8x8-chunk patch at 1920x1080.
 
-## The instrument
+## The cause
 
-`countNearDuplicates()` in `dc_view.zig` spatial-hashes every vertex and counts pairs closer than half
-a block but not coincident. That is the defect in one number, and it is what every hypothesis below was
-judged by. It prints at startup as
+One vertex per crossed cell means the same world cell is meshed by both chunks whose padded grids
+contain it. The two copies must be bit-identical, or the quads on either side of the border connect
+to different points and the seam draws a crack.
 
-```
-duplicates: exact N, near (<0.5 block, >1e-5) M
-```
+Every QEF input was already identical - the field is sampled from integer world coordinates and the
+sample positions are exact - except one: **`dc.Field.gradient()` falls back to a one-sided
+difference at the edge of the padded sample grid**. With a one-cell skirt the cell row at the
+border is the last *owned* cell in one chunk (central difference at both corners) and the first
+*skirt* cell in the neighbour (one-sided at its outer corner). The two QEFs then disagree, and on
+cells where the solve is ill-conditioned the regularised solution lands in different parts of the
+clamp box - up to 1.358 blocks apart. 510 of 4,287 shared cells disagreed by more than 1e-3, and
+**all 510 sat on a chunk-border column**.
 
-Exact duplicates are harmless (same position, no gap). **Near duplicates are the hairlines.**
+## The instrument that localised it
 
-## What the number did
+`diag copies` in `src/tools/dc_view.zig` keys every **referenced** vertex by the cell it belongs to
+(`floor(pos)`, valid because the QEF is clamped 2 % inside its cell) and compares copies of the same
+cell. It reports a delta histogram and how many disagreeing pairs sit on a border column.
 
-| Configuration | near duplicates | notes |
-|---|---|---|
-| per-chunk y slab (start) | 5,264 | before the peak fix; the defect was already present |
-| per-chunk y slab + peak fix | 10,394 | anchoring the slab per chunk made it worse |
-| two-cell skirt | 19,805 | nearly double; theory refuted |
-| global y slab, mesh broken | 272 | **INVALID** — measured on a collapsed mesh (3,277 quads). Few vertices cannot have many duplicates; the number proved nothing |
-| global y slab, mesh correct | 5,269 | after fixing the Y loop bound. Same as the original per-chunk figure |
+The older `duplicates:` counter could not do this. It counted every pair of vertices closer than
+half a block, including skirt vertices that no quad references, so it moved with the amount of
+padding rather than with the defect. That is why an earlier session recorded "two-cell skirt made
+it worse (10,394 -> 19,805)" and rejected the correct fix; the per-cell metric shows the second
+skirt ring only adds unreferenced copies (near-pairs rose 5,269 -> 6,695 while the defect fell to
+zero).
 
-**The global slab is NOT the fix.** With the mesh actually complete the count is 5,269 - indistinguishable
-from the 5,264 measured with per-chunk slabs at the start. The 272 was an artefact of the broken mesh, and
-recording it as "mechanism confirmed" was wrong. The border mismatch is therefore not about which y planes
-are sampled, and the two-cell skirt result (worse) now fits: the cause is neither the slab nor the skirt.
+## Measured
 
-## Hypotheses tested and refuted (do not re-test these)
+Same 8x8-chunk patch, 1920x1080, ReleaseFast, magenta background with the sky pass off.
 
-- **Pinch / ambiguous cells** (two diagonally opposite corners inside): **0** on the bench terrain.
-  Manifold dual contouring would fix nothing here — a large redesign ruled out on evidence.
-- **Degenerate quads** (better split still under 1e-5 area): **0**. Smallest triangle area seen: 0.02.
-- **Triangulation rule** (fixed diagonal / shorter diagonal / max-min-area): deltas of −15 and −7 px on a
-  1.44M-pixel frame. Not the cause.
-- **Two-cell skirt**, on the theory that the QEF gradient stencil was clamped in one chunk and central in
-  its neighbour: 10,394 → 19,805, i.e. worse.
-- **Missing cell vertices** (`skipped_missing_cell`): **0**.
-- **Camera outside the world**: a real bug that made the patch edge look like holes (orbit 260 m vs 128 m
-  half-extent), fixed by orbiting at 60 m. Worth remembering that two of the "defects" in this
-  investigation were the edge of the world seen from outside it.
+| configuration | cell-copy pairs | exact | >1e-3 | max delta | enclosed magenta px |
+|---|---|---|---|---|---|
+| one-cell skirt | 4,287 | 3,774 | 510 (all border cells) | 1.358 | 2,751 in 51 components |
+| two-cell skirt | 4,287 | 4,287 | **0** | **0** | **0** |
 
-## Two real bugs found along the way
+Delta histogram at one-cell skirt: 2 in (1e-3, 1e-2], 63 in (1e-2, 1e-1], 146 in (0.1, 0.5], 299
+above 0.5 - the disagreement was not a subpixel rounding issue.
 
-1. **Peaks cut open** (reported by the user): the field sampled y 40..75 while the terrain peaks near 87.
-   Fixed by a taller slab; the make-do per-chunk anchoring cost the duplicate count above.
-2. **Segfault** in `extract` after the non-cubic field was added: the loops are x(`cpa`), y(`cpay`),
-   z(`cpa`) because `at()` is `i + sx*(j + sy*k)`, and both `cj` and `ck` had been switched to the y
-   bound — a ~2x overrun of `cell_vert`. Fixed in `d861ac9`.
+Kernel counters on the same patch were unchanged by the fix and rule out the other candidates:
+`skipped_missing_cell` 0, `skipped_bounds` 0, `ambiguous_cells` 0, `degenerate_quads` 0, smallest
+triangle area 0.0028. Quad count stayed at 89,004.
 
-## The Y loop bound bug (fixed, and it explains the collapse)
+## The fix
 
-`extract`'s vertex pass ran `while (cj < cpa)` - the Y loop using the X/Z cell count. With a cubic field
-that is correct; with ny = 71 it meant the pass only covered y cells 0..33, i.e. world y 19..52, which is
-BELOW the terrain (62..87). Almost no crossings, ~63 vertices per chunk, 3,277 quads. It is now `cpay`,
-with a comment saying why. Two sessions went into chasing this as a shading or seam problem; it was a
-single loop bound.
+`meshChunkInto` uses `skirt = 2` and derives `side`, `side_y`, the sample coordinates and
+`Field.skirt` from it. The duplicated cell row is then two samples from the padded edge in both
+chunks, so both compute central gradients and the copies are bit-identical. The cost is padded
+cells, not visible geometry: vertices rise from 100,402 to 112,474 (more skirt vertices are
+meshed - they are not drawn), full-patch rebuild 65.9 -> 69.9 ms, and the viewer still runs at
+120 fps.
 
-## The remaining bug, precisely
+Topology after the fix, welding exact copies by quantised position: 267,607 edges, 1,192 open at the
+patch rim (the surface legitimately stops there) and **1** open interior edge (0.0004 %), with 0 NaN
+vertices. That single edge is recorded rather than rounded away; it produces no visible pixel.
 
-With the global slab active (`ny = 71`, y base 20, `side_y = 74`), the kernel produces **272**
-near-duplicates (correct) but only **3,277 quads** where 88,722 are expected — most of the surface is
-missing. The build tag was verified, so this is a genuine sampler regression, not a stale binary.
+Regression test: `dc.zig`'s "a curved field reproduces border vertices with a two-cell skirt". The
+older overlap test uses a linear plane, where the one-sided and central stencils are numerically
+identical, so it passed straight through this bug. The new test uses a sphere field and asserts that
+every referenced shared cell agrees to 1e-6; it fails at skirt = 1 (177/178 tests) and passes at
+skirt = 2.
 
-The arithmetic checks out on paper, which is why the next step must be a measurement rather than another
-patch:
+## Refuted along the way (do not re-test)
 
-- `side_y = ny_cells + 3 = 74` matches `Field.sideY()` = `ny + 1 + 2*skirt`.
-- the value fill `vals[i + side*(j + side_y*k)]` maxes at 90,649 against an allocation of 90,650.
-- `Field.at()` uses the same stride, and `corners` has `dj` as the y offset.
+- **Pinch / ambiguous cells** (two diagonally opposite corners inside): **0** on the real fBm
+  terrain, counted in `extract`. Manifold DC would fix nothing here.
+- **Degenerate quads**: **0**; the best split's smaller triangle never fell below 0.0028.
+- **Missing / out-of-bounds cell vertices**: **0**. Not a sampling miss.
+- **Triangulation rule**: fixed diagonal, shorter diagonal and max-min-area differ by -15 and -7 px
+  of 1.44 M. Not the cause.
+- **Camera outside the world**: a real bug that once made the patch edge look like holes; the orbit
+  is at 60 m against a 128 m half extent.
 
-**The experiment to run first:** in `meshChunkInto`, print for ONE chunk: min/max field value, min/max
-height, and the number of columns whose corners change sign. Two outcomes:
+## Two real bugs found earlier in this investigation
 
-- crossed columns ~1,024 but ~63 vertices in the output → the field is fine and something downstream
-  drops cells (check `cpay` in the vertex pass and `own_hi_y` in the quad pass).
-- crossed columns themselves tiny → the fill is writing the wrong values (check the `heights` indexing
-  and whether any loop bound was left at the old `side`).
+1. **Peaks cut open** (reported by the user): the field sampled y 40..75 while the terrain peaks near
+   87. Fixed by one global y slab tall enough for the peak.
+2. **The mesh collapse**: `extract`'s Y loop ran to the X/Z cell count, and with `ny = 71` it covered
+   only world y 19..52 - below the terrain - giving 3,277 quads where 88,722 were expected. Fixed in
+   `6b3e9c4`. The 272 near-duplicate figure measured on that broken mesh was invalid and is not
+   evidence about the seam.
 
 ## Files
 
-- `src/voxel/dc.zig` — kernel; non-cubic support is in and tested, inactive until a caller sets `ny`.
-- `src/tools/dc_view.zig` — reverted to the working per-chunk slab (`eab85c7`) while the sampler bug is
-  open. Its `meshChunkInto()` is the function to change.
+- `src/voxel/dc.zig` - kernel; `Field.gradient()`'s border fallback is the mechanism, the skirt is
+  the caller's contract. Curved-field seam test added.
+- `src/tools/dc_view.zig` - `meshChunkInto` owns the `skirt = 2` sampler; `diag copies`, `diag
+  closure` and the kernel-counter line are the instruments.
 - ADR 0018/0019/0020 for the decision history.
