@@ -14,6 +14,7 @@ fn asArray(v: Vec3) [3]f32 {
 const Aabb = @import("../math/aabb.zig").Aabb;
 
 const VERT_SRC: [:0]const u8 =
+    \\
     \\#version 460 core
     \\layout(location = 0) in vec3 a_pos;
     \\layout(location = 1) in vec2 a_uv;
@@ -59,7 +60,9 @@ const VERT_SRC: [:0]const u8 =
     \\    v_normal = normalFromFace(a_face);
     \\    vec3 world = (u_model * vec4(a_pos, 1.0)).xyz;
     \\    float height = 0.0;
-    \\    if (u_waves > 0.5 && abs(a_layer - u_water_layer) < 0.5) {
+    \\    // Upward faces only: a displaced side face stretches into a long sliver, and
+    \\    // those slivers were the white lines lying across the sea.
+    \\    if (u_waves > 0.5 && abs(a_layer - u_water_layer) < 0.5 && a_face > 1.5 && a_face < 2.5) {
     \\        height = waveHeight(world.xz, u_time) * u_wave_amp;
     \\        world.y += height;
     \\    }
@@ -70,6 +73,7 @@ const VERT_SRC: [:0]const u8 =
 ;
 
 const FRAG_SRC: [:0]const u8 =
+    \\
     \\#version 460 core
     \\uniform sampler2DArray u_tex;
     \\uniform float u_legacy;  // 1 = the old face table, 0 = sun lighting (F4 A/B)
@@ -290,7 +294,11 @@ const FRAG_SRC: [:0]const u8 =
     \\        vec2 uv2 = uv * 1.7 + vec2(-u_time * 0.026, u_time * 0.018);
     \\        vec3 n1 = texture(u_normal, vec3(uv1, v_layer)).rgb * 2.0 - 1.0;
     \\        vec3 n2 = texture(u_normal, vec3(uv2, v_layer)).rgb * 2.0 - 1.0;
-    \\        tangent_normal = vec3((n1.xy + n2.xy) * 0.9, 1.0);
+    \\        // GPU Gems 1 ch. 1 attenuates any wave the surface cannot represent.
+    \\        // Here the pixel is the limit: past a few tens of blocks the ripple
+    \\        // detail is smaller than a pixel, and all it can do is shimmer.
+    \\        float detail = 1.0 - smoothstep(20.0, 70.0, length(u_eye - v_world));
+    \\        tangent_normal = vec3((n1.xy + n2.xy) * 0.9 * detail, 1.0);
     \\    } else {
     \\        tangent_normal = texture(u_normal, vec3(uv, v_layer)).rgb * 2.0 - 1.0;
     \\    }
