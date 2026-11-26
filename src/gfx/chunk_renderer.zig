@@ -67,6 +67,8 @@ const FRAG_SRC: [:0]const u8 =
     \\uniform vec2 u_shadow_texel;
     \\uniform float u_shadow_bias;
     \\uniform float u_shadow_normal_offset;
+    \\uniform float u_shadow_pcf_radius; // in texels (3.12: soft edges)
+    \\uniform int u_shadow_kernel;       // 1 = 3x3, 2 = 5x5 taps
     \\uniform float u_shadows_enabled;
     \\in vec2 v_uv;
     \\in float v_layer;
@@ -93,20 +95,23 @@ const FRAG_SRC: [:0]const u8 =
     \\    vec3 p = light_position.xyz / light_position.w * 0.5 + 0.5;
     \\    if (p.x < 0.0 || p.x > 1.0 || p.y < 0.0 || p.y > 1.0 || p.z > 1.0) return 1.0;
     \\    float sum = 0.0;
-    \\    for (int y = -1; y <= 1; ++y) {
-    \\        for (int x = -1; x <= 1; ++x) {
-    \\            float depth = texture(u_shadow, p.xy + vec2(float(x), float(y)) * u_shadow_texel).r;
+    \\    float taps = 0.0;
+    \\    for (int y = -u_shadow_kernel; y <= u_shadow_kernel; ++y) {
+    \\        for (int x = -u_shadow_kernel; x <= u_shadow_kernel; ++x) {
+    \\            taps += 1.0;
+    \\            float depth = texture(u_shadow, p.xy + vec2(float(x), float(y)) * u_shadow_texel * u_shadow_pcf_radius).r;
     \\            sum += (p.z - u_shadow_bias <= depth) ? 1.0 : 0.0;
     \\        }
     \\    }
-    \\    return sum / 9.0;
+    \\    return sum / taps;
     \\}
     \\
     \\void main() {
     \\    vec4 c = texture(u_tex, vec3(v_uv, v_layer));
     \\    if (c.a < 0.5) discard; // alpha cutout (leaves, ADR 0002)
-    \\    // AO 0..3 -> 0.45..1.0, the concave-corner darkening from 1.12.
-    \\    float ao = mix(0.45, 1.0, v_ao / 3.0);
+    \\    // AO 0..15 (3.12) with a curve: more bands than the old 0..3, and the
+    \\    // curve keeps the darkest step from reading as a black line.
+    \\    float ao = mix(0.42, 1.0, pow(clamp(v_ao / 15.0, 0.0, 1.0), 0.85));
     \\    if (u_normals > 0.5) {
     \\        // Debug: -1..1 mapped to 0..1, so +Y is green, +X red, +Z blue.
     \\        // The framebuffer is sRGB (ADR 0008), so encode here or the colours
@@ -117,7 +122,10 @@ const FRAG_SRC: [:0]const u8 =
     \\    // Sun lighting (ADR 0008): Lambert plus a hemisphere ambient, times AO.
     \\    float ndl = max(dot(v_normal, u_sun_dir), 0.0);
     \\    vec3 hemi = mix(u_ambient_ground, u_ambient_sky, v_normal.y * 0.5 + 0.5);
-    \\    vec3 lit = (hemi + u_sun_colour * ndl * sunVisibility(v_world, v_normal)) * ao;
+    \\    // AO darkens the ambient fully and the direct sun only partly: the shadow
+    \\    // map is what should darken a lit face that is in shadow, and multiplying
+    \\    // both factors at full strength made corners twice as dark as either.
+    \\    vec3 lit = hemi * ao + u_sun_colour * ndl * sunVisibility(v_world, v_normal) * mix(0.55, 1.0, ao);
     \\    // F4 A/B: the old hardcoded table, kept so 3.9 can show the difference.
     \\    vec3 legacy = vec3(faceBrightness(v_face) * ao);
     \\    vec3 rgb = mix(c.rgb * lit, c.rgb * legacy, u_legacy);
@@ -188,6 +196,10 @@ pub const ChunkRenderer = struct {
         shadow_texel: f32,
         shadow_bias: f32,
         shadow_normal_offset: f32,
+        /// 3.12: PCF spread in texels, and the kernel radius in taps (1 = 3x3,
+        /// 2 = 5x5). Both matter: nine taps spread wider is still nine taps.
+        shadow_pcf_radius: f32,
+        shadow_kernel: i32,
     };
 
     pub fn begin(self: *ChunkRenderer, textures: *const TextureArray, params: FrameParams) void {
@@ -218,6 +230,8 @@ pub const ChunkRenderer = struct {
         self.shader.setFloat("u_shadow_texel", params.shadow_texel);
         self.shader.setFloat("u_shadow_bias", params.shadow_bias);
         self.shader.setFloat("u_shadow_normal_offset", params.shadow_normal_offset);
+        self.shader.setFloat("u_shadow_pcf_radius", params.shadow_pcf_radius);
+        self.shader.setInt("u_shadow_kernel", params.shadow_kernel);
 
         gl.Enable(gl.DEPTH_TEST);
         // Explicit, not inherited: the sky pass runs with depth writes off and a

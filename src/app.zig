@@ -186,6 +186,7 @@ pub const App = struct {
     sky_renderer: SkyRenderer,
     shadow_renderer: ShadowRenderer,
     shadows_enabled: bool = true,
+    soft_shadows: bool = true,
     bodies: physics.Bodies,
     body_items: []physics.Body,
     rng: u32 = 0x1234_5678,
@@ -775,6 +776,7 @@ pub const App = struct {
             if (self.input.normals_toggle) self.show_normals = !self.show_normals;
             if (self.input.fog_toggle) self.fog_enabled = !self.fog_enabled;
             if (self.input.shadows_toggle) self.shadows_enabled = !self.shadows_enabled;
+            if (self.input.soft_shadows_toggle) self.soft_shadows = !self.soft_shadows;
             if (self.input.sun_pin_toggle) {
                 if (self.sun.mode == .pinned) {
                     self.sun.unpin();
@@ -1081,6 +1083,12 @@ pub const App = struct {
             // half a block, with the normal offset doing the real work.
             .shadow_bias = 0.0012,
             .shadow_normal_offset = self.shadow_renderer.texelSize() * 1.2,
+            // 2 texels of spread: softer shadow edges (3.12). 1.0 restores the
+            // hard 3x3 for an A/B.
+            // 4 texels is about 0.9 blocks at this map resolution: enough to read
+            // as a soft edge at arm's length. 1 texel is the old hard 3x3.
+            .shadow_pcf_radius = if (self.soft_shadows) 1.4 else 1.0,
+            .shadow_kernel = if (self.soft_shadows) 2 else 1,
         });
         var drawn: usize = 0;
         var it = self.meshes.valueIterator();

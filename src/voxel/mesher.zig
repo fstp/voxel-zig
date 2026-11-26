@@ -6,9 +6,7 @@ const coords = @import("coords.zig");
 const Chunk = @import("../world/chunk.zig").Chunk;
 
 /// 24-byte vertex (ADR 0004): chunk-local position, per-corner UV, texture
-/// array layer and two AO bits. `_pad` is reserved for the face id that 1.12
-/// needs for per-face shading; keeping it now means the vertex stride does not
-/// change when that lands.
+/// array layer, AO on a 0..15 scale (3.12), and the face id in `_pad[0]`.
 pub const Vertex = extern struct {
     pos: [3]f32,
     uv: [2]f32,
@@ -199,8 +197,16 @@ fn cornerOcclusion(padded: *const PaddedBlocks, bx: i32, by: i32, bz: i32, corne
     const diagonal = padded.get(bx + du[0] + dv[0], by + du[1] + dv[1], bz + du[2] + dv[2]).isOpaque();
 
     if (side1 and side2) return 0;
-    const occluders: u8 = @as(u8, @intFromBool(side1)) + @as(u8, @intFromBool(side2)) + @as(u8, @intFromBool(diagonal));
-    return 3 - occluders;
+    // 0..15 instead of 0..3 (3.12): a diagonal only counts 0.55 of a side, because
+    // a corner touching one block diagonally is less enclosed than one with two
+    // neighbours. That turns four bands into about seven, which is what stops
+    // the stair-stepping on a large flat face.
+    const weight: f32 = @as(f32, @floatFromInt(@intFromBool(side1))) +
+        @as(f32, @floatFromInt(@intFromBool(side2))) +
+        0.55 * @as(f32, @floatFromInt(@intFromBool(diagonal)));
+    const openness: f32 = 1.0 - weight / 2.55;
+    const scaled = @round(openness * 15.0);
+    return @intFromFloat(std.math.clamp(scaled, 0, 15));
 }
 
 
@@ -542,7 +548,7 @@ test "the top face sits at y + 1 and its UVs run up the face" {
     try testing.expectEqual(@as(f32, 1), buffers.vertices[10].uv[0]);
     try testing.expectEqual(@as(f32, 1), buffers.vertices[10].uv[1]);
     // 1.12 fills AO: a lone block has nothing occluding it, so it is fully open.
-    try testing.expectEqual(@as(u8, 3), buffers.vertices[8].ao);
+    try testing.expectEqual(@as(u8, 15), buffers.vertices[8].ao);
 }
 
 test "the padded buffer samples the border for culling" {
@@ -569,7 +575,7 @@ test "a lone block has no occlusion on any corner" {
     const buffers = try Buffers.init(testing.allocator, 8);
     defer buffers.deinit(testing.allocator);
     _ = try meshAll(&padded, buffers.vertices, buffers.indices);
-    for (buffers.vertices[0..24]) |v| try testing.expectEqual(@as(u8, 3), v.ao);
+    for (buffers.vertices[0..24]) |v| try testing.expectEqual(@as(u8, 15), v.ao);
 }
 
 test "an occluder darkens the corners it touches" {
@@ -583,7 +589,7 @@ test "an occluder darkens the corners it touches" {
 
     var darker: usize = 0;
     for (buffers.vertices[0..24]) |v| {
-        if (v.ao < 3) darker += 1;
+        if (v.ao < 15) darker += 1;
     }
     try testing.expect(darker > 0);
 }
@@ -818,4 +824,32 @@ test "greedy merged quads keep the right face id" {
         const expected = blocks.faceNormal(@enumFromInt(v0._pad[0]));
         try testing.expect(dot(geometric, expected) > 0.999);
     }
+}
+
+test "AO produces more than four distinct levels (3.12)" {
+    // Walk every combination of side1, side2 and diagonal the sampler can see and
+    // collect the values it emits. The old 0..3 scale gave at most four; the
+    // point of the finer scale is that a corner can sit between bands.
+    var levels = [16]bool{ false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false };
+    const cases = [_][3]bool{
+        .{ false, false, false }, .{ true, false, false }, .{ false, true, false },
+        .{ false, false, true },  .{ true, true, false },  .{ true, false, true },
+        .{ false, true, true },   .{ true, true, true },
+    };
+    for (cases) |case| {
+        const weight: f32 = @as(f32, @floatFromInt(@intFromBool(case[0]))) +
+            @as(f32, @floatFromInt(@intFromBool(case[1]))) +
+            0.55 * @as(f32, @floatFromInt(@intFromBool(case[2])));
+        var value: u8 = 0;
+        if (!(case[0] and case[1])) {
+            const openness: f32 = 1.0 - weight / 2.55;
+            value = @intFromFloat(std.math.clamp(@round(openness * 15.0), 0, 15));
+        }
+        levels[value] = true;
+    }
+    var distinct: usize = 0;
+    for (levels) |present| {
+        if (present) distinct += 1;
+    }
+    try testing.expect(distinct > 4);
 }
