@@ -16,43 +16,68 @@ const ChunkPos = coords.ChunkPos;
 pub fn fillPadded(world: *const World, pos: ChunkPos, padded: *mesher.PaddedBlocks) void {
     const origin = pos.blockOrigin();
 
-    var z: i32 = 0;
-    while (z < coords.CHUNK_SIZE) : (z += 1) {
-        var y: i32 = 0;
-        while (y < coords.CHUNK_SIZE) : (y += 1) {
-            var x: i32 = 0;
-            while (x < coords.CHUNK_SIZE) : (x += 1) {
-                padded.set(x, y, z, world.getBlock(origin.x + x, origin.y + y, origin.z + z));
+    var iz: i32 = 0;
+    while (iz < coords.CHUNK_SIZE) : (iz += 1) {
+        var iy: i32 = 0;
+        while (iy < coords.CHUNK_SIZE) : (iy += 1) {
+            var ix: i32 = 0;
+            while (ix < coords.CHUNK_SIZE) : (ix += 1) {
+                padded.set(ix, iy, iz, world.getBlock(origin.x + ix, origin.y + iy, origin.z + iz));
             }
         }
     }
 
-    // The six border planes. Only these matter for face culling; the twelve
-    // edges and eight corners are left as air (1.12's AO will sample them).
+    // The one-block border. A cell whose only out-of-range axis is the face
+    // normal sits on a face plane: there, an unloaded neighbour counts as
+    // opaque so the frontier emits no wall of faces. Cells on an edge or a
+    // corner (two or three axes out of range) only feed 1.12's AO, so they are
+    // sampled when their diagonal chunk is loaded and left as air otherwise,
+    // which keeps a freshly loaded chunk bright instead of shadowed.
+    var plane_loaded = [_]bool{ false, false, false, false, false, false };
     const directions = [_][3]i32{
         .{ -1, 0, 0 }, .{ 1, 0, 0 },
         .{ 0, -1, 0 }, .{ 0, 1, 0 },
         .{ 0, 0, -1 }, .{ 0, 0, 1 },
     };
-    for (directions) |d| {
+    for (directions, 0..) |d, i| {
         const neighbour = pos.offset(d[0], d[1], d[2]);
-        const loaded = neighbour.y >= 0 and neighbour.y < coords.CHUNK_COUNT_Y and world.isLoaded(neighbour);
-        const border_block: BlockId = if (loaded) .air else .stone;
+        plane_loaded[i] = neighbour.y >= 0 and neighbour.y < coords.CHUNK_COUNT_Y and world.isLoaded(neighbour);
+    }
 
-        var a: i32 = 0;
-        while (a < coords.CHUNK_SIZE) : (a += 1) {
-            var b: i32 = 0;
-            while (b < coords.CHUNK_SIZE) : (b += 1) {
-                var cell = [_]i32{ 0, 0, 0 };
-                if (d[0] != 0) {
-                    cell = .{ if (d[0] < 0) -1 else coords.CHUNK_SIZE, a, b };
-                } else if (d[1] != 0) {
-                    cell = .{ a, if (d[1] < 0) -1 else coords.CHUNK_SIZE, b };
+    var bz_i: i32 = -1;
+    while (bz_i <= coords.CHUNK_SIZE) : (bz_i += 1) {
+        var by_i: i32 = -1;
+        while (by_i <= coords.CHUNK_SIZE) : (by_i += 1) {
+            var bx_i: i32 = -1;
+            while (bx_i <= coords.CHUNK_SIZE) : (bx_i += 1) {
+                const x = bx_i;
+                const y = by_i;
+                const z = bz_i;
+                const outside: u8 = @as(u8, @intFromBool(x < 0 or x >= coords.CHUNK_SIZE)) +
+                    @as(u8, @intFromBool(y < 0 or y >= coords.CHUNK_SIZE)) +
+                    @as(u8, @intFromBool(z < 0 or z >= coords.CHUNK_SIZE));
+                if (outside == 0) continue; // interior already copied above
+
+                var block: BlockId = .air;
+                if (outside == 1) {
+                    // Which face plane is this?
+                    const index: usize = if (x < 0) 0 else if (x >= coords.CHUNK_SIZE) 1 else if (y < 0) 2 else if (y >= coords.CHUNK_SIZE) 3 else if (z < 0) 4 else 5;
+                    if (plane_loaded[index]) {
+                        block = world.getBlock(origin.x + x, origin.y + y, origin.z + z);
+                    } else {
+                        block = .stone;
+                    }
                 } else {
-                    cell = .{ a, b, if (d[2] < 0) -1 else coords.CHUNK_SIZE };
+                    const chunk_pos = ChunkPos.init(
+                        @divFloor(origin.x + x, coords.CHUNK_SIZE),
+                        @divFloor(origin.y + y, coords.CHUNK_SIZE),
+                        @divFloor(origin.z + z, coords.CHUNK_SIZE),
+                    );
+                    if (chunk_pos.y >= 0 and chunk_pos.y < coords.CHUNK_COUNT_Y and world.isLoaded(chunk_pos)) {
+                        block = world.getBlock(origin.x + x, origin.y + y, origin.z + z);
+                    }
                 }
-                const block = if (loaded) world.getBlock(origin.x + cell[0], origin.y + cell[1], origin.z + cell[2]) else border_block;
-                padded.set(cell[0], cell[1], cell[2], block);
+                padded.set(x, y, z, block);
             }
         }
     }

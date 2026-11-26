@@ -111,6 +111,7 @@ pub const App = struct {
     meshed_total: usize = 0,
     seed: u32,
     show_wire: bool = false,
+    shading: bool = true,
     highlight: ?raycast.Hit = null,
     selected: block.BlockId = .stone,
     edits: usize = 0,
@@ -255,8 +256,16 @@ pub const App = struct {
         self.markNeighboursDirty(pos);
     }
 
+    /// Marks the chunks whose geometry depends on this one. The six face
+    /// neighbours matter for culling, and the four horizontal diagonals matter
+    /// for 1.12's AO (the corner samples live in them), so both are dirtied:
+    /// without the diagonals a chunk keeps the AO it was meshed with before its
+    /// diagonal arrived, and that shows up as a hard seam on the ground.
     fn markNeighboursDirty(self: *App, pos: ChunkPos) void {
-        const dirs = [_][3]i32{ .{ -1, 0, 0 }, .{ 1, 0, 0 }, .{ 0, -1, 0 }, .{ 0, 1, 0 }, .{ 0, 0, -1 }, .{ 0, 0, 1 } };
+        const dirs = [_][3]i32{
+            .{ -1, 0, 0 },  .{ 1, 0, 0 },   .{ 0, -1, 0 }, .{ 0, 1, 0 }, .{ 0, 0, -1 }, .{ 0, 0, 1 },
+            .{ -1, 0, -1 }, .{ 1, 0, -1 }, .{ -1, 0, 1 }, .{ 1, 0, 1 },
+        };
         for (dirs) |d| {
             const neighbour = pos.offset(d[0], d[1], d[2]);
             if (self.world.getChunk(neighbour)) |chunk| {
@@ -482,6 +491,7 @@ pub const App = struct {
             const dt = @as(f64, @floatFromInt(dt_ns)) / 1e9;
 
             if (self.input.debug_toggle) self.show_wire = !self.show_wire;
+            if (self.input.shading_toggle) self.shading = !self.shading;
             if (self.input.fly_toggle) self.player.flying = !self.player.flying;
 
             self.player.yaw += self.input.mouse_dx * Camera.SENSITIVITY;
@@ -620,7 +630,7 @@ pub const App = struct {
         const vp = self.camera.viewProjection(aspect);
         const frustum = Frustum.fromViewProjection(vp);
 
-        self.chunk_renderer.begin(vp, &self.textures);
+        self.chunk_renderer.begin(vp, &self.textures, self.shading);
         var drawn: usize = 0;
         var it = self.meshes.valueIterator();
         while (it.next()) |mesh| {

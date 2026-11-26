@@ -92,17 +92,20 @@ pub const MeshStats = struct {
 const FaceInfo = struct {
     normal: [3]i32,
     corners: [4][3]f32,
+    /// Tangential axes used for the AO samples (0 = x, 1 = y, 2 = z).
+    u: usize,
+    v: usize,
 };
 
 const CORNER_UV = [4][2]f32{ .{ 0, 0 }, .{ 1, 0 }, .{ 1, 1 }, .{ 0, 1 } };
 
 const faces = [6]FaceInfo{
-    .{ .normal = .{ 1, 0, 0 }, .corners = .{ .{ 1, 0, 1 }, .{ 1, 0, 0 }, .{ 1, 1, 0 }, .{ 1, 1, 1 } } },
-    .{ .normal = .{ -1, 0, 0 }, .corners = .{ .{ 0, 0, 0 }, .{ 0, 0, 1 }, .{ 0, 1, 1 }, .{ 0, 1, 0 } } },
-    .{ .normal = .{ 0, 1, 0 }, .corners = .{ .{ 0, 1, 1 }, .{ 1, 1, 1 }, .{ 1, 1, 0 }, .{ 0, 1, 0 } } },
-    .{ .normal = .{ 0, -1, 0 }, .corners = .{ .{ 0, 0, 0 }, .{ 1, 0, 0 }, .{ 1, 0, 1 }, .{ 0, 0, 1 } } },
-    .{ .normal = .{ 0, 0, 1 }, .corners = .{ .{ 0, 0, 1 }, .{ 1, 0, 1 }, .{ 1, 1, 1 }, .{ 0, 1, 1 } } },
-    .{ .normal = .{ 0, 0, -1 }, .corners = .{ .{ 1, 0, 0 }, .{ 0, 0, 0 }, .{ 0, 1, 0 }, .{ 1, 1, 0 } } },
+    .{ .normal = .{ 1, 0, 0 }, .corners = .{ .{ 1, 0, 1 }, .{ 1, 0, 0 }, .{ 1, 1, 0 }, .{ 1, 1, 1 } }, .u = 1, .v = 2 },
+    .{ .normal = .{ -1, 0, 0 }, .corners = .{ .{ 0, 0, 0 }, .{ 0, 0, 1 }, .{ 0, 1, 1 }, .{ 0, 1, 0 } }, .u = 1, .v = 2 },
+    .{ .normal = .{ 0, 1, 0 }, .corners = .{ .{ 0, 1, 1 }, .{ 1, 1, 1 }, .{ 1, 1, 0 }, .{ 0, 1, 0 } }, .u = 0, .v = 2 },
+    .{ .normal = .{ 0, -1, 0 }, .corners = .{ .{ 0, 0, 0 }, .{ 1, 0, 0 }, .{ 1, 0, 1 }, .{ 0, 0, 1 } }, .u = 0, .v = 2 },
+    .{ .normal = .{ 0, 0, 1 }, .corners = .{ .{ 0, 0, 1 }, .{ 1, 0, 1 }, .{ 1, 1, 1 }, .{ 0, 1, 1 } }, .u = 0, .v = 1 },
+    .{ .normal = .{ 0, 0, -1 }, .corners = .{ .{ 1, 0, 0 }, .{ 0, 0, 0 }, .{ 0, 1, 0 }, .{ 1, 1, 0 } }, .u = 0, .v = 1 },
 };
 
 const face_order = [6]Face{ .px, .nx, .py, .ny, .pz, .nz };
@@ -134,6 +137,7 @@ pub fn mesh(padded: *const PaddedBlocks, out_vertices: []Vertex, out_indices: []
                     // do not (ADR 0004's boundary table).
                     if (!padded.get(x + n[0], y + n[1], z + n[2]).isOpaque()) {
                         if (vertex_count + 4 > out_vertices.len) return error.VertexBufferTooSmall;
+                        const face_id: u8 = @intCast(@intFromEnum(face));
                         const layer = block.layerFor(face);
                         const base: u32 = @intCast(vertex_count);
                         const ox: f32 = @floatFromInt(x);
@@ -144,7 +148,8 @@ pub fn mesh(padded: *const PaddedBlocks, out_vertices: []Vertex, out_indices: []
                                 .pos = .{ ox + c[0], oy + c[1], oz + c[2] },
                                 .uv = CORNER_UV[k],
                                 .layer = layer,
-                                .ao = 0,
+                                .ao = cornerOcclusion(padded, x + n[0], y + n[1], z + n[2], c, info.u, info.v),
+                                ._pad = .{ face_id, 0 },
                             };
                         }
                         out_indices[index_count + 0] = base + 0;
@@ -164,6 +169,24 @@ pub fn mesh(padded: *const PaddedBlocks, out_vertices: []Vertex, out_indices: []
     }
 
     return .{ .quads = quad_count, .vertices = vertex_count, .indices = index_count };
+}
+
+/// Per-corner ambient occlusion, 0 (fully occluded) .. 3 (open). Samples the
+/// two edge neighbours and the diagonal one in the plane just outside the face
+/// (`bx, by, bz` is the neighbour block), which is the classic "0fps" method.
+fn cornerOcclusion(padded: *const PaddedBlocks, bx: i32, by: i32, bz: i32, corner: [3]f32, u: usize, v: usize) u8 {
+    var du = [3]i32{ 0, 0, 0 };
+    var dv = [3]i32{ 0, 0, 0 };
+    du[u] = if (corner[u] == 0) -1 else 1;
+    dv[v] = if (corner[v] == 0) -1 else 1;
+
+    const side1 = padded.get(bx + du[0], by + du[1], bz + du[2]).isOpaque();
+    const side2 = padded.get(bx + dv[0], by + dv[1], bz + dv[2]).isOpaque();
+    const diagonal = padded.get(bx + du[0] + dv[0], by + du[1] + dv[1], bz + du[2] + dv[2]).isOpaque();
+
+    if (side1 and side2) return 0;
+    const occluders: u8 = @as(u8, @intFromBool(side1)) + @as(u8, @intFromBool(side2)) + @as(u8, @intFromBool(diagonal));
+    return 3 - occluders;
 }
 
 /// Upper bound on quads for one chunk. The worst case is not a solid chunk
@@ -319,7 +342,8 @@ test "the top face sits at y + 1 and its UVs run up the face" {
     try testing.expectEqual(@as(f32, 0), buffers.vertices[8].uv[1]);
     try testing.expectEqual(@as(f32, 1), buffers.vertices[10].uv[0]);
     try testing.expectEqual(@as(f32, 1), buffers.vertices[10].uv[1]);
-    try testing.expectEqual(@as(u8, 0), buffers.vertices[8].ao);
+    // 1.12 fills AO: a lone block has nothing occluding it, so it is fully open.
+    try testing.expectEqual(@as(u8, 3), buffers.vertices[8].ao);
 }
 
 test "the padded buffer samples the border for culling" {
@@ -339,6 +363,58 @@ test "a full buffer reports the capacity error instead of overrunning" {
     var vertices: [23]Vertex = undefined;
     var indices: [64]u32 = undefined;
     try testing.expectError(error.VertexBufferTooSmall, mesh(&padded, &vertices, &indices));
+}
+
+test "a lone block has no occlusion on any corner" {
+    const padded = singleBlock(.stone);
+    const buffers = try Buffers.init(testing.allocator, 8);
+    defer buffers.deinit(testing.allocator);
+    _ = try meshAll(&padded, buffers.vertices, buffers.indices);
+    for (buffers.vertices[0..24]) |v| try testing.expectEqual(@as(u8, 3), v.ao);
+}
+
+test "an occluder darkens the corners it touches" {
+    var padded = PaddedBlocks.init();
+    padded.set(0, 0, 0, .stone);
+    // A block diagonally above and to the side of the +y face.
+    padded.set(1, 1, 0, .stone);
+    const buffers = try Buffers.init(testing.allocator, 32);
+    defer buffers.deinit(testing.allocator);
+    _ = try meshAll(&padded, buffers.vertices, buffers.indices);
+
+    var darker: usize = 0;
+    for (buffers.vertices[0..24]) |v| {
+        if (v.ao < 3) darker += 1;
+    }
+    try testing.expect(darker > 0);
+}
+
+test "a corner between two solid neighbours is fully occluded" {
+    var padded = PaddedBlocks.init();
+    padded.set(0, 0, 0, .stone);
+    // Neighbours of the +y face: side at +x, side at +z.
+    padded.set(1, 1, 0, .stone);
+    padded.set(0, 1, 1, .stone);
+    const buffers = try Buffers.init(testing.allocator, 32);
+    defer buffers.deinit(testing.allocator);
+    _ = try meshAll(&padded, buffers.vertices, buffers.indices);
+
+    // The +y quad is vertices 8..11; the corner towards (+x,+z) must be 0.
+    var darkest: u8 = 3;
+    for (buffers.vertices[8..12]) |v| darkest = @min(darkest, v.ao);
+    try testing.expectEqual(@as(u8, 0), darkest);
+}
+
+test "every quad carries its face id in the pad byte" {
+    const padded = singleBlock(.stone);
+    const buffers = try Buffers.init(testing.allocator, 8);
+    defer buffers.deinit(testing.allocator);
+    _ = try meshAll(&padded, buffers.vertices, buffers.indices);
+    // Faces are emitted in order px, nx, py, ny, pz, nz.
+    for (0..6) |face| {
+        const id: u8 = @intCast(face);
+        for (buffers.vertices[face * 4 .. face * 4 + 4]) |v| try testing.expectEqual(id, v._pad[0]);
+    }
 }
 
 test "fillFromChunk copies the body and chunkIsEmpty sees it" {

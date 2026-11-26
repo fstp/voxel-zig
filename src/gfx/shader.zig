@@ -63,6 +63,10 @@ pub const Shader = struct {
         gl.UniformMatrix4fv(self.location(name), 1, gl.FALSE, &rows);
     }
 
+    pub fn setFloat(self: *Shader, name: [:0]const u8, value: f32) void {
+        gl.Uniform1f(self.location(name), value);
+    }
+
     pub fn setInt(self: *Shader, name: [:0]const u8, value: i32) void {
         gl.Uniform1i(self.location(name), value);
     }
