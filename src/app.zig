@@ -26,6 +26,7 @@ const SkyRenderer = @import("gfx/sky_renderer.zig").SkyRenderer;
 const ShadowRenderer = @import("gfx/shadow_renderer.zig").ShadowRenderer;
 const Post = @import("gfx/post.zig").Post;
 const EnvProbe = @import("gfx/env_probe.zig").EnvProbe;
+const Ssao = @import("gfx/ssao.zig").Ssao;
 const net = @import("net/udp.zig");
 const block = @import("voxel/block.zig");
 const coords = @import("voxel/coords.zig");
@@ -196,6 +197,8 @@ pub const App = struct {
     post: Post,
     /// 4.4: sky cube map the materials reflect.
     env_probe: EnvProbe,
+    /// 4.9: screen-space ambient occlusion.
+    ssao: Ssao,
     shadows_enabled: bool = true,
     soft_shadows: bool = true,
     clouds_enabled: bool = true,
@@ -273,6 +276,9 @@ pub const App = struct {
         // 4.4: the sky, as a cube map for reflections.
         var env_probe = try EnvProbe.init();
         errdefer env_probe.deinit();
+
+        var ssao = try Ssao.init(window.width, window.height);
+        errdefer ssao.deinit();
         // 4.1: VOXEL_EXPOSURE pins the starting exposure for screenshots.
         if (config.exposure) |value| {
             post.exposure_base = std.math.clamp(value, 0.05, 8.0);
@@ -359,6 +365,7 @@ pub const App = struct {
             .shadow_renderer = shadow_renderer,
             .post = post,
             .env_probe = env_probe,
+            .ssao = ssao,
             .bodies = undefined,
             .peer = peer,
             .body_items = try gpa.alloc(physics.Body, MAX_BODIES),
@@ -413,6 +420,7 @@ pub const App = struct {
         self.shadow_renderer.deinit();
         self.post.deinit();
         self.env_probe.deinit();
+        self.ssao.deinit();
         self.allocator.free(self.body_items);
         self.hud.deinit();
         self.chunk_renderer.deinit();
@@ -830,6 +838,7 @@ pub const App = struct {
             if (self.input.soft_shadows_toggle) self.soft_shadows = !self.soft_shadows;
             if (self.input.clouds_toggle) self.clouds_enabled = !self.clouds_enabled;
             if (self.input.tonemap_toggle) self.post.tonemap = !self.post.tonemap;
+            if (self.input.ssao_toggle) self.ssao.enabled = !self.ssao.enabled;
             // 4.1: exposure in 1/8-stop-ish steps, clamped so a held key cannot
             // drive the image to black or to white.
             if (self.input.exposure_down) self.post.exposure_base = @max(0.10, self.post.exposure_base * 0.92);
@@ -930,7 +939,7 @@ pub const App = struct {
                 self.recount();
                 const seconds = @as(f64, @floatFromInt(report_dt_ns)) / 1e9;
                 std.debug.print(
-                    "fps {d:6.1} frame {d:5.2}ms worst {d:5.2}ms  loaded {d} meshed {d} drawn {d} quads {d}  jobs {d} boxes {d}  sun t{d:.3} el {d:5.1} az {d:6.1} day {d:.2}{s}  yaw {d:5.2} pitch {d:5.2}  pos ({d:.1},{d:.1},{d:.1}) {s}{s}\n",
+                    "fps {d:6.1} frame {d:5.2}ms worst {d:5.2}ms  loaded {d} meshed {d} drawn {d} quads {d}  jobs {d} boxes {d}  sky {d:.3} shdw {d:.3} ssao {d:.3} post {d:.3}  sun t{d:.3} el {d:5.1} az {d:6.1} day {d:.2}{s}  yaw {d:5.2} pitch {d:5.2}  pos ({d:.1},{d:.1},{d:.1}) {s}{s}\n",
                     .{
                         @as(f64, @floatFromInt(frames)) / seconds,
                         @as(f64, @floatFromInt(report_dt_ns)) / 1e6 / @as(f64, @floatFromInt(frames)),
@@ -941,6 +950,10 @@ pub const App = struct {
                         self.total_quads,
                         self.jobs_run,
                         self.bodies.count,
+                        self.sky_renderer.last_ms,
+                        self.shadow_renderer.last_ms,
+                        self.ssao.last_ms,
+                        self.post.last_ms,
                         self.sun.time,
                         self.sun.elevation(),
                         self.sun.azimuth(),
@@ -1201,6 +1214,17 @@ pub const App = struct {
             }
         }
 
+        // 4.9: occlusion from the depth buffer just written, then hand the blur to
+        // the resolve. Half resolution: AO is low frequency by nature.
+        if (self.ssao.enabled) {
+            const projection = self.camera.projection(aspect);
+            const inv_projection = projection.inverse() orelse Mat4.identity;
+            self.ssao.render(self.post.depth, projection, inv_projection, self.camera.near, self.camera.far, self.window.width, self.window.height);
+            self.post.ao_texture = self.ssao.blur_texture;
+        } else {
+            self.post.ao_texture = 0;
+        }
+
         // Resolve the HDR target to the window before the 2D passes, which draw
         // straight into the default framebuffer.
         self.post.end(self.window.width, self.window.height);
@@ -1229,7 +1253,7 @@ pub const App = struct {
         if (std.fmt.bufPrint(&buffer, "FPS {d:.1}", .{if (self.frame_ms > 0) 1000.0 / self.frame_ms else 0})) |text| {
             self.hud.text(10, 8, text);
         } else |_| {}
-        if (std.fmt.bufPrint(&buffer, "FRAME {d:.2} MS  WORST {d:.2} MS  SKY {d:.3}  SHDW {d:.3}  POST {d:.3} MS  EV {d:.2}{s}", .{ self.frame_ms, self.worst_frame_ms, self.sky_renderer.last_ms, self.shadow_renderer.last_ms, self.post.last_ms, self.post.exposure, if (self.post.tonemap) " ACES" else " CLIP" })) |text| {
+        if (std.fmt.bufPrint(&buffer, "FRAME {d:.2} MS  WORST {d:.2} MS  SKY {d:.3}  SHDW {d:.3}  SSAO {d:.3}  POST {d:.3} MS  EV {d:.2}{s}", .{ self.frame_ms, self.worst_frame_ms, self.sky_renderer.last_ms, self.shadow_renderer.last_ms, self.ssao.last_ms, self.post.last_ms, self.post.exposure, if (self.post.tonemap) " ACES" else " CLIP" })) |text| {
             self.hud.text(10, 26, text);
         } else |_| {}
         line = 2;
@@ -1296,7 +1320,7 @@ pub const App = struct {
             self.hud.text(10, @as(f32, @floatFromInt(self.window.height)) - 66, text);
         }
 
-        const keys = "F1 HUD  F FLY  F3 BOXES  F4 LIGHT A/B  F6 NORMALS  F7 FOG  F8 SHADOWS  F10 CLOUDS  F11 TONEMAP  -/= EXPOSURE  P PAUSE SUN  1-4 TIMES";
+        const keys = "F1 HUD  F FLY  F3 BOXES  F4 LIGHT A/B  F6 NORMALS  F7 FOG  F8 SHADOWS  F10 CLOUDS  F11 TONEMAP  F12 SSAO  -/= EXPOSURE  P PAUSE SUN  1-4 TIMES";
         self.hud.setColour(0.6, 0.6, 0.6);
         self.hud.text(10, @as(f32, @floatFromInt(self.window.height)) - 22, keys);
 

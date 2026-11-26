@@ -18,6 +18,9 @@ const VERT_SRC: [:0]const u8 =
 const FRAG_SRC: [:0]const u8 =
     \\#version 460 core
     \\uniform sampler2D u_hdr;
+    \\uniform sampler2D u_ao;      // blurred SSAO, unit 1 (4.9)
+    \\uniform float u_ao_strength;
+    \\uniform float u_ao_enabled;
     \\uniform float u_exposure;
     \\uniform float u_tonemap; // 0 = clip only, 1 = ACES (F11 A/B)
     \\in vec2 v_uv;
@@ -36,7 +39,16 @@ const FRAG_SRC: [:0]const u8 =
     \\}
     \\
     \\void main() {
-    \\    vec3 hdr = texture(u_hdr, v_uv).rgb * u_exposure;
+    \\    vec3 hdr = texture(u_hdr, v_uv).rgb;
+    \\    // 4.9: ambient occlusion, applied in linear light before exposure. It
+    \\    // multiplies everything rather than just the ambient term, which is the
+    \\    // standard screen-space approximation and the reason the strength is a
+    \\    // knob rather than 1.0.
+    \\    if (u_ao_enabled > 0.5) {
+    \\        float ao = texture(u_ao, v_uv).r;
+    \\        hdr *= mix(1.0, ao, u_ao_strength);
+    \\    }
+    \\    hdr *= u_exposure;
     \\    vec3 mapped = mix(clamp(hdr, 0.0, 1.0), aces(hdr), u_tonemap);
     \\    // Linear out: the default framebuffer has GL_FRAMEBUFFER_SRGB, so the
     \\    // hardware applies the transfer function (ADR 0008).
@@ -54,7 +66,12 @@ const FRAG_SRC: [:0]const u8 =
 pub const Post = struct {
     fbo: gl.uint = 0,
     colour: gl.uint = 0,
+    /// Depth as a texture rather than a renderbuffer, so SSAO can read it.
     depth: gl.uint = 0,
+    /// Set by the app each frame: the blurred AO and how much of it to apply.
+    ao_texture: gl.uint = 0,
+    ao_strength: f32 = 0.85,
+    ao_enabled: bool = true,
     shader: Shader,
     vao: gl.uint = 0,
     width: i32 = 0,
@@ -115,14 +132,18 @@ pub const Post = struct {
         gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
         gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
 
-        gl.GenRenderbuffers(1, @ptrCast(&self.depth));
-        gl.BindRenderbuffer(gl.RENDERBUFFER, self.depth);
-        gl.RenderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT24, self.width, self.height);
+        gl.GenTextures(1, @ptrCast(&self.depth));
+        gl.BindTexture(gl.TEXTURE_2D, self.depth);
+        gl.TexImage2D(gl.TEXTURE_2D, 0, gl.DEPTH_COMPONENT24, self.width, self.height, 0, gl.DEPTH_COMPONENT, gl.FLOAT, null);
+        gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, @intCast(gl.NEAREST));
+        gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, @intCast(gl.NEAREST));
+        gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, @intCast(gl.CLAMP_TO_EDGE));
+        gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, @intCast(gl.CLAMP_TO_EDGE));
 
         gl.GenFramebuffers(1, @ptrCast(&self.fbo));
         gl.BindFramebuffer(gl.FRAMEBUFFER, self.fbo);
         gl.FramebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, self.colour, 0);
-        gl.FramebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, self.depth);
+        gl.FramebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.TEXTURE_2D, self.depth, 0);
 
         const status = gl.CheckFramebufferStatus(gl.FRAMEBUFFER);
         gl.BindFramebuffer(gl.FRAMEBUFFER, 0);
@@ -135,7 +156,7 @@ pub const Post = struct {
     fn destroyTargets(self: *Post) void {
         if (self.fbo != 0) gl.DeleteFramebuffers(1, @ptrCast(&self.fbo));
         if (self.colour != 0) gl.DeleteTextures(1, @ptrCast(&self.colour));
-        if (self.depth != 0) gl.DeleteRenderbuffers(1, @ptrCast(&self.depth));
+        if (self.depth != 0) gl.DeleteTextures(1, @ptrCast(&self.depth));
         self.fbo = 0;
         self.colour = 0;
         self.depth = 0;
@@ -178,6 +199,11 @@ pub const Post = struct {
         gl.ActiveTexture(gl.TEXTURE0);
         gl.BindTexture(gl.TEXTURE_2D, self.colour);
         self.shader.setInt("u_hdr", 0);
+        gl.ActiveTexture(gl.TEXTURE1);
+        gl.BindTexture(gl.TEXTURE_2D, self.ao_texture);
+        self.shader.setInt("u_ao", 1);
+        self.shader.setFloat("u_ao_strength", self.ao_strength);
+        self.shader.setFloat("u_ao_enabled", if (self.ao_enabled and self.ao_texture != 0) 1.0 else 0.0);
         self.shader.setFloat("u_exposure", self.exposure);
         self.shader.setFloat("u_tonemap", if (self.tonemap) 1.0 else 0.0);
 
