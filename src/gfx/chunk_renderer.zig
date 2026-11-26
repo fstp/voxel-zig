@@ -69,7 +69,11 @@ const FRAG_SRC: [:0]const u8 =
     \\uniform float u_shadow_bias;
     \\uniform float u_shadow_normal_offset;
     \\uniform float u_shadow_pcf_radius; // in texels (3.12: soft edges)
-    \\uniform int u_shadow_kernel;       // 1 = 3x3, 2 = 5x5 taps
+    \\uniform int u_shadow_kernel;       // 1 = 3x3, 2 = 5x5 taps (hard mode)
+\\uniform float u_shadow_uv_per_block;   // uv units per block in light space
+\\uniform float u_shadow_depth_range;    // blocks across the 0..1 depth range
+\\uniform float u_shadow_light_size;     // artistic sun size, drives the penumbra
+\\uniform int u_shadow_quality;          // 0 = hard PCF, 1 = PCSS
     \\uniform float u_shadows_enabled;
 \\uniform vec4 u_material[8];   // per layer: x roughness, y metallic, z diffuse, w unused
 \\uniform samplerCube u_env;    // sky probe (4.4), unit 2
@@ -93,6 +97,50 @@ const FRAG_SRC: [:0]const u8 =
     \\    if (id < 4.5) return 0.65; // +z
     \\    return 0.65;               // -z
     \\}
+    \\// 16-point Poisson disc, reused for the blocker search (first 8) and the PCF.
+    \\const vec2 POISSON[16] = vec2[16](
+    \\    vec2(-0.613, 0.617), vec2(0.170, -0.040), vec2(-0.299, -0.792), vec2(0.645, 0.493),
+    \\    vec2(-0.651, -0.110), vec2(0.421, -0.599), vec2(-0.072, 0.888), vec2(0.915, -0.016),
+    \\    vec2(-0.218, 0.328), vec2(0.376, 0.780), vec2(-0.905, -0.421), vec2(0.590, -0.383),
+    \\    vec2(0.043, -0.317), vec2(-0.437, 0.892), vec2(0.870, 0.372), vec2(-0.836, 0.088)
+    \\);
+    \\
+    \\// Percentage-closer soft shadows (5.1): find the average occluder, then widen
+    \\// the filter by how far the receiver is behind it. That is what makes a shadow
+    \\// hard where a block touches the ground and soft where it is metres above it,
+    \\// instead of one fixed blur everywhere.
+    \\float pcss(vec3 p) {
+    \\    float blocker_sum = 0.0;
+    \\    float blockers = 0.0;
+    \\    float search = 7.0; // texels
+    \\    for (int i = 0; i < 8; ++i) {
+    \\        float d = texture(u_shadow, p.xy + POISSON[i] * u_shadow_texel * search).r;
+    \\        if (p.z - u_shadow_bias > d) {
+    \\            blocker_sum += d;
+    \\            blockers += 1.0;
+    \\        }
+    \\    }
+    \\    if (blockers < 0.5) return 1.0;
+    \\
+    \\    float avg_blocker = blocker_sum / blockers;
+    \\    // Similar triangles give penumbra = gap * light_size / blocker_distance, but
+    \\    // with an orthographic light the "blocker distance" is just how far the map
+    \\    // was fitted back (420 blocks), so the textbook form collapses to a fraction
+    \\    // of a texel and every shadow stays hard. Using the gap directly keeps the
+    \\    // property that matters - contact hard, distant soft - with one constant.
+    \\    float gap_blocks = max(p.z - avg_blocker, 0.0) * u_shadow_depth_range;
+    \\    float penumbra_blocks = gap_blocks * u_shadow_light_size;
+    \\    float radius = penumbra_blocks * u_shadow_uv_per_block;
+    \\    radius = clamp(radius, u_shadow_texel.x, 12.0 * u_shadow_texel.x);
+    \\
+    \\    float lit = 0.0;
+    \\    for (int i = 0; i < 16; ++i) {
+    \\        float depth = texture(u_shadow, p.xy + POISSON[i] * radius).r;
+    \\        lit += (p.z - u_shadow_bias <= depth) ? 1.0 : 0.0;
+    \\    }
+    \\    return lit / 16.0;
+    \\}
+    \\
     \\// 3x3 PCF with a normal offset: offsetting along the normal is what kills
     \\// the acne that a depth bias alone leaves on large flat voxel faces.
     \\float sunVisibility(vec3 world, vec3 normal) {
@@ -310,6 +358,11 @@ pub const ChunkRenderer = struct {
         /// 2 = 5x5). Both matter: nine taps spread wider is still nine taps.
         shadow_pcf_radius: f32,
         shadow_kernel: i32,
+        /// 5.1: PCSS inputs.
+        shadow_uv_per_block: f32,
+        shadow_depth_range: f32,
+        shadow_light_size: f32,
+        shadow_quality: i32,
         /// 4.4: the sky probe and the highest mip a roughness-1 surface samples.
         env_texture: gl.uint,
         env_max_mip: f32,
@@ -372,6 +425,10 @@ pub const ChunkRenderer = struct {
         self.shader.setFloat("u_shadow_normal_offset", params.shadow_normal_offset);
         self.shader.setFloat("u_shadow_pcf_radius", params.shadow_pcf_radius);
         self.shader.setInt("u_shadow_kernel", params.shadow_kernel);
+        self.shader.setFloat("u_shadow_uv_per_block", params.shadow_uv_per_block);
+        self.shader.setFloat("u_shadow_depth_range", params.shadow_depth_range);
+        self.shader.setFloat("u_shadow_light_size", params.shadow_light_size);
+        self.shader.setInt("u_shadow_quality", params.shadow_quality);
 
         gl.Enable(gl.DEPTH_TEST);
         // Explicit, not inherited: the sky pass runs with depth writes off and a

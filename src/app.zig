@@ -839,6 +839,7 @@ pub const App = struct {
             if (self.input.clouds_toggle) self.clouds_enabled = !self.clouds_enabled;
             if (self.input.tonemap_toggle) self.post.tonemap = !self.post.tonemap;
             if (self.input.ssao_toggle) self.ssao.enabled = !self.ssao.enabled;
+            if (self.input.fxaa_toggle) self.post.fxaa = !self.post.fxaa;
             // 4.1: exposure in 1/8-stop-ish steps, clamped so a held key cannot
             // drive the image to black or to white.
             if (self.input.exposure_down) self.post.exposure_base = @max(0.10, self.post.exposure_base * 0.92);
@@ -1168,8 +1169,15 @@ pub const App = struct {
             // hard 3x3 for an A/B.
             // 4 texels is about 0.9 blocks at this map resolution: enough to read
             // as a soft edge at arm's length. 1 texel is the old hard 3x3.
-            .shadow_pcf_radius = if (self.soft_shadows) 1.4 else 1.0,
-            .shadow_kernel = if (self.soft_shadows) 2 else 1,
+            .shadow_pcf_radius = 1.0,
+            .shadow_kernel = 1,
+            .shadow_uv_per_block = 1.0 / (2.0 * self.shadow_renderer.half_extent),
+            .shadow_depth_range = self.shadow_renderer.distance * 2.0 - 1.0,
+            // 5.1: softness constant, in blocks of penumbra per block of gap.
+            // 0 = hard edge, 0.35 gives roughly 1.5 texels of penumbra where a
+            // block touches the ground and 8 where it floats a few blocks up.
+            .shadow_light_size = 1.2,
+            .shadow_quality = if (self.soft_shadows) 1 else 0,
         });
         var drawn: usize = 0;
         var it = self.meshes.valueIterator();
@@ -1320,7 +1328,7 @@ pub const App = struct {
             self.hud.text(10, @as(f32, @floatFromInt(self.window.height)) - 66, text);
         }
 
-        const keys = "F1 HUD  F FLY  F3 BOXES  F4 LIGHT A/B  F6 NORMALS  F7 FOG  F8 SHADOWS  F10 CLOUDS  F11 TONEMAP  F12 SSAO  -/= EXPOSURE  P PAUSE SUN  1-4 TIMES";
+        const keys = "F1 HUD  F FLY  F3 BOXES  F4 LIGHT A/B  F6 NORMALS  F7 FOG  F8 SHADOWS  F10 CLOUDS  F11 TONEMAP  F12 SSAO  F13 FXAA  -/= EXPOSURE  P PAUSE SUN  1-4 TIMES";
         self.hud.setColour(0.6, 0.6, 0.6);
         self.hud.text(10, @as(f32, @floatFromInt(self.window.height)) - 22, keys);
 
