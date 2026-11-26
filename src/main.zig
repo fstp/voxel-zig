@@ -30,6 +30,11 @@ pub fn main(init: std.process.Init) !void {
     if (init.environ_map.get("VOXEL_DEBUG_WATER")) |raw| {
         config.debug_water = raw.len > 0 and raw[0] != '0';
     }
+    // ADR 0020: VOXEL_WORLD=dc asks for the dual-contouring path. It announces itself when set
+    // and falls back to blocks, rather than silently doing nothing.
+    if (init.environ_map.get("VOXEL_WORLD")) |raw| {
+        config.dc_world = raw.len >= 2 and raw[0] == 'd' and raw[1] == 'c';
+    }
     // 4.1: VOXEL_EXPOSURE=0.55 pins the scene exposure.
     if (init.environ_map.get("VOXEL_EXPOSURE")) |raw| {
         if (std.fmt.parseFloat(f32, raw)) |value| {

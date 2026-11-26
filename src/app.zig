@@ -55,6 +55,10 @@ pub const Config = struct {
     exposure: ?f32 = null,
     /// 6.3: VOXEL_DEBUG_WATER paints water a flat colour.
     debug_water: bool = false,
+    /// ADR 0020 step 1: route the world through dual contouring instead of blocks. Off by
+    /// default and nothing is removed while it is off, so the blocky path stays the reference.
+    /// The DC renderer itself is not wired yet - this flag is the seam it will hang off.
+    dc_world: bool = false,
 };
 
 /// 1.11 streaming: a cylinder of LOAD_RADIUS chunks around the player, unloaded
@@ -289,6 +293,7 @@ pub const App = struct {
         errdefer env_probe.deinit();
 
         if (config.debug_water) std.debug.print("water debug flat: on from VOXEL_DEBUG_WATER\n", .{});
+        if (config.dc_world) std.debug.print("dc world: requested, but the DC chunk renderer is not wired yet - rendering blocks\n", .{});
 
         var ssao = try Ssao.init(window.width, window.height);
         errdefer ssao.deinit();
