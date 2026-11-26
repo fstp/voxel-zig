@@ -87,9 +87,9 @@ fn materialColour(pos: [3]f32, nrm: [3]f32, out_material: *u8) [3]f32 {
     // 0 = ground, 1 = rock, 2 = scree on the steepest faces. Discrete ids, because that is what a
     // material byte can carry and what a shader can branch on cheaply.
     out_material.* = if (rock > 0.75) 2 else if (rock > 0.35) 1 else 0;
-    const low = palette(h * 1.7, .{ 0.40, 0.34, 0.20 }, .{ 0.12, 0.11, 0.07 }, .{ 1.0, 1.0, 1.0 }, .{ 0.0, 0.05, 0.1 });
-    const high = palette(h * 2.3 + 0.4, .{ 0.30, 0.38, 0.22 }, .{ 0.14, 0.12, 0.09 }, .{ 1.0, 1.0, 1.0 }, .{ 0.15, 0.2, 0.25 });
-    const stone = palette(h * 3.1 + 1.7, .{ 0.30, 0.29, 0.28 }, .{ 0.08, 0.08, 0.08 }, .{ 1.0, 1.0, 1.0 }, .{ 0.3, 0.35, 0.4 });
+    const low = palette(h * 1.7, .{ 0.20, 0.22, 0.10 }, .{ 0.10, 0.10, 0.05 }, .{ 1.0, 1.0, 1.0 }, .{ 0.0, 0.05, 0.1 });
+    const high = palette(h * 2.3 + 0.4, .{ 0.14, 0.20, 0.09 }, .{ 0.10, 0.09, 0.05 }, .{ 1.0, 1.0, 1.0 }, .{ 0.15, 0.2, 0.25 });
+    const stone = palette(h * 3.1 + 1.7, .{ 0.22, 0.21, 0.20 }, .{ 0.06, 0.06, 0.06 }, .{ 1.0, 1.0, 1.0 }, .{ 0.3, 0.35, 0.4 });
     const ground = [3]f32{
         low[0] + (high[0] - low[0]) * @min(h, 1.0),
         low[1] + (high[1] - low[1]) * @min(h, 1.0),
@@ -188,7 +188,11 @@ const fragment_src: [:0]const u8 =
     \\    vec3 albedo = v_col * (0.86 + 0.30 * detail);
     \\    // Lighting is deliberately shy of 1.0: albedo arrives already close to mid grey, and
     \\    // multiplying it by ~1.8 and then gamma-encoding clips the whole surface to white.
-    \\    vec3 c = albedo * (amb * 0.55 + ndl * 0.65);
+    \\    // Exposure + ACES (Narkowicz), the same curve the engine's post pass applies (ADR 0011).
+    \\    // Without it, linear radiance above 1.0 clips to white once the sRGB framebuffer encodes,
+    \\    // which is what turned the surface into a pale sheet the moment FRAMEBUFFER_SRGB went on.
+    \\    vec3 c = albedo * (amb + ndl * 1.15) * 0.16;
+    \\    c = clamp((c * (2.51 * c + 0.03)) / (c * (2.43 * c + 0.59) + 0.14), 0.0, 1.0);
     \\    frag = vec4(pow(c, vec3(0.4545)), 1.0);
     \\}
 ;
@@ -362,6 +366,10 @@ pub fn main(init: std.process.Init) !void {
     gl.VertexAttribPointer(3, 1, gl.FLOAT, gl.FALSE, @sizeOf(Coloured), @sizeOf([3]f32) * 3);
     gl.BindVertexArray(0);
 
+    // ADR 0008: the engine draws into an sRGB framebuffer and every shader writes LINEAR, so the
+    // hardware does the encode. The spike omitted this line, which is why its terrain looked washed
+    // out while the sky looked right - the sky does its own encode, the terrain does not.
+    gl.Enable(gl.FRAMEBUFFER_SRGB);
     gl.Enable(gl.DEPTH_TEST);
     // Culling is off deliberately: with it on, quads whose winding heuristic had to
     // guess (near-degenerate cells) vanish into the background and read as holes.
