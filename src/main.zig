@@ -14,8 +14,8 @@ pub fn main(init: std.process.Init) !void {
 
     var config: engine.Config = .{
         .title = "voxel-zig",
-        .width = 1920,
-        .height = 1080,
+        .width = 2560,
+        .height = 1440,
         .vsync = true,
     };
     // 2.4 spike: VOXEL_NET_PORT binds a UDP socket, VOXEL_PEER points at the

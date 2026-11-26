@@ -12,5 +12,5 @@ pub const advance: f32 = 12.05;
 pub const first_char: u8 = 32;
 pub const glyph_count: u32 = 96;
 /// Screen pixels per atlas pixel at the default scale.
-pub const default_scale: f32 = 1.0;
+pub const default_scale: f32 = 0.78;
 pub const line_height: f32 = 32.0;
