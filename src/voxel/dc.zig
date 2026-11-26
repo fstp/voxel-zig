@@ -398,18 +398,30 @@ fn emitEdge(
     const quad_n = cross(sub(pb, pa), sub(pc, pa));
     var avg: [3]f32 = .{ 0, 0, 0 };
     for (idx) |vi| avg = add(avg, verts[vi].normal);
-    // Split along the SHORTER diagonal. These quads are generally non-planar, and splitting a
-    // twisted one along the long diagonal folds two triangles over each other, leaving a sliver
-    // where the background shows through - which is what the scattered blue specks were. The
-    // skip counters proved no quad is missing (skipped_missing_cell == 0), so the defect had to
-    // be here.
-    //
-    // Both splits keep the quad's cycle direction: AC gives (a,b,c)+(a,c,d), BD gives
-    // (b,c,d)+(b,d,a). Rotating the cycle this way preserves winding by construction; an earlier
-    // attempt swapped endpoints instead and reversed one triangle of the pair.
-    const d_ac = sub(verts[idx[2]].pos, verts[idx[0]].pos);
-    const d_bd = sub(verts[idx[3]].pos, verts[idx[1]].pos);
-    const split_bd = dot(d_ac, d_ac) > dot(d_bd, d_bd);
+    // Choose the split that keeps BOTH triangles fat. Two failures led here:
+    //  - a fixed diagonal leaves a fold on a twisted quad (delta -0 measured, so not the cause);
+    //  - the shorter diagonal can pick the split where one triangle collapses to zero area,
+    //    which draws as a triangular gap of background - the blue wedge visible at the centre
+    //    of the rendered patch.
+    // Maximising the smaller triangle's area rules out both: a collapsed triangle scores zero and
+    // the other split wins.
+    const p0 = verts[idx[0]].pos;
+    const p1 = verts[idx[1]].pos;
+    const p2 = verts[idx[2]].pos;
+    const p3 = verts[idx[3]].pos;
+    const area = struct {
+        // Named x/y/z rather than a/b/c: `a` is already the field value at the edge's first
+        // sample in this function, and Zig rejects the shadowing.
+        fn tri(x: [3]f32, y: [3]f32, z: [3]f32) f32 {
+            const u = sub(y, x);
+            const v = sub(z, x);
+            const crs = cross(u, v); // `n` is taken: it is cells-per-axis in this function
+            return 0.5 * @sqrt(dot(crs, crs));
+        }
+    }.tri;
+    const ac_min = @min(area(p0, p1, p2), area(p0, p2, p3));
+    const bd_min = @min(area(p1, p2, p3), area(p1, p3, p0));
+    const split_bd = bd_min > ac_min;
     const backwards = dot(quad_n, avg) < 0;
 
     if (!split_bd and !backwards) {
