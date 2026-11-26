@@ -107,6 +107,17 @@ pub fn localOf(world: i32, chunk_size: i32) i32 { return @mod(world, chunk_size)
 and one test that asserts `@divTrunc(-1, 32) == 0` to document the bug this replaces.
 `zig build test` is at 12 tests after this task.
 
+## Implemented (1.5)
+
+`World` owns a `ChunkSlab` (`src/world/chunk_slab.zig`) instead of calling the
+allocator per chunk: fixed blocks of 32 chunk slots (~1.05 MiB each, one `create` per
+block), a `u32` bitmask of used slots per block, and freed slots reused before a new
+block is allocated. The 676-chunk load set therefore costs **22 block allocations
+instead of 676 mallocs** (asserted by `the 676-chunk load set costs 22 slab blocks, not
+676 mallocs`), and the per-slot payload is the chunk itself, so the +12.4 % page
+overhead is gone. Slot addresses never move while a chunk is loaded, which is what lets
+the world map hold a raw `*Chunk`.
+
 ## Consequences
 
 - 1.5 implements `Chunk` (32 KB buffer, state, generation) and the world map, lifting

@@ -25,6 +25,15 @@ pub const math = struct {
 pub const voxel = struct {
     pub const BlockId = @import("voxel/block.zig").BlockId;
     pub const coords = @import("voxel/coords.zig");
+    pub const BlockPos = coords.BlockPos;
+    pub const ChunkPos = coords.ChunkPos;
+};
+
+pub const world = struct {
+    pub const World = @import("world/world.zig").World;
+    pub const Chunk = @import("world/chunk.zig").Chunk;
+    pub const ChunkState = @import("world/chunk.zig").ChunkState;
+    pub const ChunkSlab = @import("world/chunk_slab.zig").ChunkSlab;
 };
 
 pub const gfx = struct {
@@ -44,5 +53,8 @@ test {
     _ = @import("camera.zig");
     _ = @import("voxel/block.zig");
     _ = @import("voxel/coords.zig");
+    _ = @import("world/chunk.zig");
+    _ = @import("world/chunk_slab.zig");
+    _ = @import("world/world.zig");
     _ = @import("app.zig");
 }
