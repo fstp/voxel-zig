@@ -29,7 +29,7 @@ const SEED: u32 = 1337;
 
 /// Bumped whenever the field or the mesher changes. Printed at startup so a stale binary cannot be
 /// mistaken for a change that "made no difference" - which is what the last commit could not rule out.
-const BUILD_TAG = "incremental-v5";
+const BUILD_TAG = "hud-live-v6";
 // 8x8 chunks (64 chunks, 256 m^2), re-meshed as the camera crosses a chunk border:: at PATCH=4 the boundary was visible in frame and accounted for
 // 99.6% of the background pixels counted as "holes". A bigger patch pushes the world edge out of
 // shot, which is the honest way to separate a mesher defect from the edge of the world.
@@ -544,11 +544,14 @@ pub fn main(init: std.process.Init) !void {
         const elapsed = nowNs() - window_start;
         if (elapsed >= 1_000_000_000) {
             const fps = @as(f64, @floatFromInt(frames)) * 1e9 / @as(f64, @floatFromInt(elapsed));
+            // Live counts, not the startup ones: after a streaming swap the slice captured at
+            // startup describes a patch that is no longer on screen. Quads come from the index
+            // buffer (6 indices per quad) so there is no second number to keep in sync.
             std.debug.print("fps {d:.1}  worst frame {d:.2} ms  verts {d}  quads {d}\n", .{
                 fps,
                 @as(f64, @floatFromInt(worst_ns)) / 1e6,
-                all_verts_s.len,
-                quads,
+                all_verts.items.len,
+                all_idx.items.len / 6,
             });
             frames = 0;
             worst_ns = 0;
