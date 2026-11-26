@@ -1265,6 +1265,10 @@ pub const App = struct {
     /// and draw timings, a rough memory figure and the player's position.
     fn drawHud(self: *App, drawn: usize) void {
         self.hud.begin(self.window.width, self.window.height);
+        // A dark panel behind the text: white-on-sky was half of why the HUD was
+        // hard to read, and no font fixes that on its own.
+        self.hud.panel(0, 0, 1120, 8 + 7 * self.hud.lineHeight(), 0.55);
+        self.hud.panel(0, @as(f32, @floatFromInt(self.window.height)) - 78, 1120, 78, 0.55);
         self.hud.scale = 2.0;
 
         const world_mb = @as(f64, @floatFromInt(self.world.count())) * @as(f64, @floatFromInt(coords.CHUNK_VOLUME)) / (1024.0 * 1024.0);
@@ -1278,26 +1282,26 @@ pub const App = struct {
             self.hud.text(10, 8, text);
         } else |_| {}
         if (std.fmt.bufPrint(&buffer, "FRAME {d:.2} MS  WORST {d:.2} MS  SKY {d:.3}  SHDW {d:.3}  SSAO {d:.3}  POST {d:.3} MS  EV {d:.2}{s}", .{ self.frame_ms, self.worst_frame_ms, self.sky_renderer.last_ms, self.shadow_renderer.last_ms, self.ssao.last_ms, self.post.last_ms, self.post.exposure, if (self.post.tonemap) " ACES" else " CLIP" })) |text| {
-            self.hud.text(10, 26, text);
+            self.hud.text(10, 8 + self.hud.lineHeight(), text);
         } else |_| {}
         line = 2;
 
         const counts = std.fmt.bufPrint(&buffer, "CHUNKS {d} LOADED {d} MESHED {d} DRAWN", .{ self.world.count(), self.meshed_chunks, drawn }) catch "";
         self.hud.setColour(0.85, 0.95, 1.0);
-        self.hud.text(10, 8 + @as(f32, @floatFromInt(line)) * 18, counts);
+        self.hud.text(10, 8 + @as(f32, @floatFromInt(line)) * self.hud.lineHeight(), counts);
         line += 1;
 
         const geometry = std.fmt.bufPrint(&buffer, "QUADS {d} TRIS {d}", .{ self.total_quads, self.total_quads * 2 }) catch "";
-        self.hud.text(10, 8 + @as(f32, @floatFromInt(line)) * 18, geometry);
+        self.hud.text(10, 8 + @as(f32, @floatFromInt(line)) * self.hud.lineHeight(), geometry);
         line += 1;
 
         const mem = std.fmt.bufPrint(&buffer, "MEM WORLD {d:.1}MB MESH {d:.1}MB JOBS {d}", .{ world_mb, mesh_mb, self.jobs_run }) catch "";
-        self.hud.text(10, 8 + @as(f32, @floatFromInt(line)) * 18, mem);
+        self.hud.text(10, 8 + @as(f32, @floatFromInt(line)) * self.hud.lineHeight(), mem);
         line += 1;
 
         const timings = std.fmt.bufPrint(&buffer, "STREAM {d:.2} DRAW {d:.2} HUD {d:.2} MS", .{ self.t_stream_ms, self.t_draw_ms, self.t_hud_ms }) catch "";
         self.hud.setColour(0.7, 1.0, 0.7);
-        self.hud.text(10, 8 + @as(f32, @floatFromInt(line)) * 18, timings);
+        self.hud.text(10, 8 + @as(f32, @floatFromInt(line)) * self.hud.lineHeight(), timings);
         line += 1;
 
         const where = std.fmt.bufPrint(&buffer, "POS {d:.1} {d:.1} {d:.1} {s}{s}", .{
@@ -1308,7 +1312,7 @@ pub const App = struct {
             if (self.player.on_ground) "GROUND" else "AIR",
         }) catch "";
         self.hud.setColour(0.8, 0.8, 0.8);
-        self.hud.text(10, 8 + @as(f32, @floatFromInt(line)) * 18, where);
+        self.hud.text(10, 8 + @as(f32, @floatFromInt(line)) * self.hud.lineHeight(), where);
         line += 1;
 
         if (self.peer != null) {
