@@ -59,8 +59,11 @@ pub const Post = struct {
     vao: gl.uint = 0,
     width: i32 = 0,
     height: i32 = 0,
-    /// Scene exposure, multiplied before the tone curve. 1.0 is the value the
+    /// Exposure the player sets, before eye adaptation. 1.0 is the value the
     /// light rig was tuned around; less is darker.
+    exposure_base: f32 = 0.62,
+    /// Effective exposure used by the resolve: `exposure_base` times the night
+    /// adaptation written each frame by the app.
     exposure: f32 = 0.62,
     tonemap: bool = true,
     query: gl.uint = 0,

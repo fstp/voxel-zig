@@ -259,8 +259,9 @@ pub const App = struct {
         errdefer post.deinit();
         // 4.1: VOXEL_EXPOSURE pins the starting exposure for screenshots.
         if (config.exposure) |value| {
-            post.exposure = std.math.clamp(value, 0.05, 8.0);
-            std.debug.print("exposure: {d:.3} from VOXEL_EXPOSURE\n", .{post.exposure});
+            post.exposure_base = std.math.clamp(value, 0.05, 8.0);
+            post.exposure = post.exposure_base;
+            std.debug.print("exposure: {d:.3} from VOXEL_EXPOSURE\n", .{post.exposure_base});
         }
 
         gl.gl.Enable(gl.gl.DEPTH_TEST);
@@ -720,6 +721,12 @@ pub const App = struct {
         self.player.update(&self.world, @floatCast(dt), self.wishVector(), up, sprint);
         self.bodies.step(&self.world, @floatCast(dt));
         self.sun.update(@floatCast(dt));
+        // 4.3: eye adaptation. The exposure control and the ACES toe together
+        // left night at p95 = 4/255 - technically visible, practically black.
+        // Night gets up to 6x the exposure; daylight is untouched (daylight()
+        // reaches 1.0 by -6 degrees, so dawn and dusk keep their look).
+        const adaptation = 1.0 + 5.0 * (1.0 - self.sun.daylight());
+        self.post.exposure = self.post.exposure_base * adaptation;
         // Clouds drift east at about 6 blocks a second: slow enough to read as
         // weather, fast enough to notice over a minute.
         self.cloud_shift = self.cloud_shift.add(Vec3.init(6.0 * @as(f32, @floatCast(dt)) * 0.01, 0, 0));
@@ -803,8 +810,8 @@ pub const App = struct {
             if (self.input.tonemap_toggle) self.post.tonemap = !self.post.tonemap;
             // 4.1: exposure in 1/8-stop-ish steps, clamped so a held key cannot
             // drive the image to black or to white.
-            if (self.input.exposure_down) self.post.exposure = @max(0.10, self.post.exposure * 0.92);
-            if (self.input.exposure_up) self.post.exposure = @min(4.00, self.post.exposure * 1.08);
+            if (self.input.exposure_down) self.post.exposure_base = @max(0.10, self.post.exposure_base * 0.92);
+            if (self.input.exposure_up) self.post.exposure_base = @min(4.00, self.post.exposure_base * 1.08);
             if (self.input.sun_pin_toggle) {
                 if (self.sun.mode == .pinned) {
                     self.sun.unpin();
