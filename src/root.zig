@@ -51,6 +51,7 @@ pub const world = struct {
     pub const terrain = @import("world/terrain.zig");
     pub const noise = @import("world/noise.zig");
     pub const save = @import("world/save.zig");
+    pub const sun = @import("world/sun.zig");
     pub const brush = @import("world/brush.zig");
     pub const undo = @import("world/undo.zig");
 };
@@ -81,6 +82,7 @@ test {
     _ = @import("world/terrain.zig");
     _ = @import("world/noise.zig");
     _ = @import("world/save.zig");
+    _ = @import("world/sun.zig");
     _ = @import("world/brush.zig");
     _ = @import("world/undo.zig");
     _ = @import("voxel/raycast.zig");

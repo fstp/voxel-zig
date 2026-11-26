@@ -19,6 +19,7 @@ const terrain = @import("world/terrain.zig");
 const save = @import("world/save.zig");
 const brush = @import("world/brush.zig");
 const undo_mod = @import("world/undo.zig");
+const sun_mod = @import("world/sun.zig");
 const physics = @import("physics/bodies.zig");
 const BlockRenderer = @import("gfx/block_renderer.zig").BlockRenderer;
 const net = @import("net/udp.zig");
@@ -160,6 +161,7 @@ pub const App = struct {
     show_wire: bool = false,
     shading: bool = true,
     show_normals: bool = false,
+    sun: sun_mod.Sun = sun_mod.Sun.init(),
     hud: Hud,
     show_hud: bool = true,
     t_stream_ms: f64 = 0,
@@ -643,6 +645,7 @@ pub const App = struct {
         const sprint = self.input.down(sdl.SDL_SCANCODE_LSHIFT);
         self.player.update(&self.world, @floatCast(dt), self.wishVector(), up, sprint);
         self.bodies.step(&self.world, @floatCast(dt));
+        self.sun.update(@floatCast(dt));
         self.stepNetwork(@floatCast(dt));
     }
 
@@ -715,6 +718,15 @@ pub const App = struct {
             if (self.input.debug_toggle) self.show_wire = !self.show_wire;
             if (self.input.shading_toggle) self.shading = !self.shading;
             if (self.input.normals_toggle) self.show_normals = !self.show_normals;
+            if (self.input.pause_time) self.sun.togglePaused();
+            if (self.input.time_scrub != 0) {
+                const delta = @as(f32, @floatFromInt(self.input.time_scrub)) * 0.01;
+                self.sun.setTime(self.sun.time + delta);
+            }
+            if (self.input.time_jump) |t| {
+                self.sun.setTime(t);
+                self.sun.paused = true;
+            }
             if (self.input.hud_toggle) self.show_hud = !self.show_hud;
             if (self.input.brush_cycle) self.cycleBrush();
             if (self.input.throw_pressed) self.throwBoxes(THROW_BATCH);
@@ -791,7 +803,7 @@ pub const App = struct {
                 self.recount();
                 const seconds = @as(f64, @floatFromInt(report_dt_ns)) / 1e9;
                 std.debug.print(
-                    "fps {d:6.1} frame {d:5.2}ms worst {d:5.2}ms  loaded {d} meshed {d} drawn {d} quads {d}  jobs {d} boxes {d}  pos ({d:.1},{d:.1},{d:.1}) {s}{s}\n",
+                    "fps {d:6.1} frame {d:5.2}ms worst {d:5.2}ms  loaded {d} meshed {d} drawn {d} quads {d}  jobs {d} boxes {d}  sun t{d:.3} el {d:5.1} az {d:6.1} day {d:.2}{s}  pos ({d:.1},{d:.1},{d:.1}) {s}{s}\n",
                     .{
                         @as(f64, @floatFromInt(frames)) / seconds,
                         @as(f64, @floatFromInt(report_dt_ns)) / 1e6 / @as(f64, @floatFromInt(frames)),
@@ -802,6 +814,11 @@ pub const App = struct {
                         self.total_quads,
                         self.jobs_run,
                         self.bodies.count,
+                        self.sun.time,
+                        self.sun.elevation(),
+                        self.sun.azimuth(),
+                        self.sun.daylight(),
+                        if (self.sun.paused) " PAUSED" else "",
                         self.player.position.x,
                         self.player.position.y,
                         self.player.position.z,
@@ -941,7 +958,11 @@ pub const App = struct {
 
     fn render(self: *App) usize {
         gl.gl.Viewport(0, 0, self.window.width, self.window.height);
-        gl.gl.ClearColor(0.53, 0.72, 0.92, 1.0);
+        // Until the sky pass lands (3.6), the clear colour is the sun's horizon
+        // colour. Note this is an sRGB value and the pipeline is not sRGB yet;
+        // 3.5 turns on FRAMEBUFFER_SRGB and must revisit this line.
+        const horizon = sun_mod.toSrgb(self.sun.ramp().horizon);
+        gl.gl.ClearColor(horizon.x, horizon.y, horizon.z, 1.0);
         gl.gl.Clear(gl.gl.COLOR_BUFFER_BIT | gl.gl.DEPTH_BUFFER_BIT);
 
         self.camera.position = self.player.eyePosition();
@@ -1068,7 +1089,25 @@ pub const App = struct {
             self.hud.text(10, @as(f32, @floatFromInt(self.window.height)) - 44, text);
         }
 
-        const keys = "F1 HUD  F FLY  F3 BOXES  F4 SHADING  F6 NORMALS  F5 SAVE";
+        {
+            const hours = self.sun.clockHours();
+            const whole: u32 = @intFromFloat(hours);
+            const minutes: u32 = @intFromFloat((hours - @as(f32, @floatFromInt(whole))) * 60.0);
+            var sun_line: [160]u8 = undefined;
+            const text = std.fmt.bufPrint(&sun_line, "SUN {d:0>2}:{d:0>2}  el {d:5.1}  az {d:5.1}  day {d:.2}  cycle {d}s{s}", .{
+                whole,
+                minutes,
+                self.sun.elevation(),
+                self.sun.azimuth(),
+                self.sun.daylight(),
+                @as(u32, @intFromFloat(self.sun.cycle_seconds)),
+                if (self.sun.paused) "  PAUSED" else "",
+            }) catch "";
+            self.hud.setColour(0.95, 0.9, 0.6);
+            self.hud.text(10, @as(f32, @floatFromInt(self.window.height)) - 66, text);
+        }
+
+        const keys = "F1 HUD  F FLY  F3 BOXES  F4 SHADING  F6 NORMALS  P PAUSE SUN  1-4 TIMES";
         self.hud.setColour(0.6, 0.6, 0.6);
         self.hud.text(10, @as(f32, @floatFromInt(self.window.height)) - 22, keys);
 
