@@ -280,7 +280,7 @@ pub fn extract(alloc: std.mem.Allocator, field: Field) !Surface {
         var cj: usize = 0;
         while (cj < cpa) : (cj += 1) {
             var ck: usize = 0;
-            while (ck < cpay) : (ck += 1) {
+            while (ck < cpa) : (ck += 1) { // z, not y: at() is i + sx*(j + sy*k)
                 var v: [8]f32 = undefined;
                 var mask: u8 = 0;
                 for (corners, 0..) |c, idx| {
