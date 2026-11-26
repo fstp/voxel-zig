@@ -26,6 +26,10 @@ fn nowNs() i64 {
     return ts.tv_sec * 1_000_000_000 + ts.tv_nsec;
 }
 const SEED: u32 = 1337;
+
+/// Bumped whenever the field or the mesher changes. Printed at startup so a stale binary cannot be
+/// mistaken for a change that "made no difference" - which is what the last commit could not rule out.
+const BUILD_TAG = "column-cache-v3";
 // 8x8 chunks (64 chunks, 256 m^2), re-meshed as the camera crosses a chunk border:: at PATCH=4 the boundary was visible in frame and accounted for
 // 99.6% of the background pixels counted as "holes". A bigger patch pushes the world edge out of
 // shot, which is the honest way to separate a mesher defect from the edge of the world.
@@ -263,33 +267,47 @@ fn meshPatch(
     const n = CHUNK;
     const side = n + 3; // owned cells + 2 skirt cells
     var quads: usize = 0;
+    var sample_ns: i64 = 0;
+    var extract_ns: i64 = 0;
 
     var cz: i32 = 0;
     while (cz < PATCH) : (cz += 1) {
         var cx: i32 = 0;
         while (cx < PATCH) : (cx += 1) {
+            const t_sample = nowNs();
             const vals = try alloc.alloc(f32, side * side * side);
             defer alloc.free(vals);
             const ox: f32 = @floatFromInt((patch_origin + cx) * @as(i32, @intCast(CHUNK)));
             const oz: f32 = @floatFromInt((patch_origin + cz) * @as(i32, @intCast(CHUNK)));
+            // The field is a HEIGHT field: y - height(x, z) depends on the column only. Evaluating
+            // heightAt once per (x, z) column and reusing it across all 35 y samples cuts the field
+            // cost by that factor - measured 140 ms -> a few ms per patch, which is the difference
+            // between "sampling dominates" and "sampling is noise".
+            var heights: [side * side]f32 = undefined;
+            var ck: usize = 0;
+            while (ck < side) : (ck += 1) {
+                var ci: usize = 0;
+                while (ci < side) : (ci += 1) {
+                    const gx: i32 = (patch_origin + cx) * @as(i32, @intCast(CHUNK)) + @as(i32, @intCast(ci)) - 1;
+                    const gz: i32 = (patch_origin + cz) * @as(i32, @intCast(CHUNK)) + @as(i32, @intCast(ck)) - 1;
+                    heights[ci + side * ck] = heightAt(
+                        @as(f32, @floatFromInt(gx)) * CELL,
+                        @as(f32, @floatFromInt(gz)) * CELL,
+                    );
+                }
+            }
             var k: usize = 0;
             while (k < side) : (k += 1) {
                 var j: usize = 0;
                 while (j < side) : (j += 1) {
                     var i: usize = 0;
                     while (i < side) : (i += 1) {
-                        // Integer space, converted once: two chunks must evaluate a shared sample
-                        // to the same float, or their border vertices differ and hairline.
-                        const gx: i32 = (patch_origin + cx) * @as(i32, @intCast(CHUNK)) + @as(i32, @intCast(i)) - 1;
-                        const gy: i32 = @as(i32, @intCast(j)) - 1;
-                        const gz: i32 = (patch_origin + cz) * @as(i32, @intCast(CHUNK)) + @as(i32, @intCast(k)) - 1;
-                        const x = @as(f32, @floatFromInt(gx)) * CELL;
-                        const y = 40.0 + @as(f32, @floatFromInt(gy)) * CELL;
-                        const z = @as(f32, @floatFromInt(gz)) * CELL;
-                        vals[i + side * (j + side * k)] = y - heightAt(x, z);
+                        const y = 40.0 + (@as(f32, @floatFromInt(j)) - 1.0) * CELL;
+                        vals[i + side * (j + side * k)] = y - heights[i + side * k];
                     }
                 }
             }
+            sample_ns += nowNs() - t_sample;
             const field = dc.Field{
                 .values = vals,
                 .n = CHUNK,
@@ -297,7 +315,9 @@ fn meshPatch(
                 .origin = .{ ox, 40.0, oz },
                 .cell = CELL,
             };
+            const t_extract = nowNs();
             const surf = try dc.extract(alloc, field);
+            extract_ns += nowNs() - t_extract;
             defer surf.deinit(alloc);
             quads += surf.quadCount();
             const base: u32 = @intCast(verts.items.len);
@@ -309,6 +329,11 @@ fn meshPatch(
             for (surf.indices) |v| try idx.append(alloc, base + v);
         }
     }
+    std.debug.print("  meshPatch: sample {d:.1} ms, extract {d:.1} ms, {d} quads\n", .{
+        @as(f64, @floatFromInt(sample_ns)) / 1e6,
+        @as(f64, @floatFromInt(extract_ns)) / 1e6,
+        quads,
+    });
     return quads;
 }
 
@@ -321,6 +346,8 @@ pub fn main(init: std.process.Init) !void {
     var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
     defer _ = debug_allocator.deinit();
     const alloc = debug_allocator.allocator();
+
+    std.debug.print("dc spike {s}\n", .{BUILD_TAG});
 
     var window = try gfx.Window.init(.{
         .title = "voxel-zig dc spike",
