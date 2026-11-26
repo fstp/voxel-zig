@@ -187,6 +187,9 @@ pub const App = struct {
     shadow_renderer: ShadowRenderer,
     shadows_enabled: bool = true,
     soft_shadows: bool = true,
+    clouds_enabled: bool = true,
+    /// Wind offset in cloud space, advanced on the fixed step (3.11).
+    cloud_shift: Vec3 = Vec3.init(0, 0, 0),
     bodies: physics.Bodies,
     body_items: []physics.Body,
     rng: u32 = 0x1234_5678,
@@ -701,6 +704,9 @@ pub const App = struct {
         self.player.update(&self.world, @floatCast(dt), self.wishVector(), up, sprint);
         self.bodies.step(&self.world, @floatCast(dt));
         self.sun.update(@floatCast(dt));
+        // Clouds drift east at about 6 blocks a second: slow enough to read as
+        // weather, fast enough to notice over a minute.
+        self.cloud_shift = self.cloud_shift.add(Vec3.init(6.0 * @as(f32, @floatCast(dt)) * 0.01, 0, 0));
         if (self.sun_warning_seconds > 0) self.sun_warning_seconds -= @floatCast(dt);
         self.stepNetwork(@floatCast(dt));
     }
@@ -777,6 +783,7 @@ pub const App = struct {
             if (self.input.fog_toggle) self.fog_enabled = !self.fog_enabled;
             if (self.input.shadows_toggle) self.shadows_enabled = !self.shadows_enabled;
             if (self.input.soft_shadows_toggle) self.soft_shadows = !self.soft_shadows;
+            if (self.input.clouds_toggle) self.clouds_enabled = !self.clouds_enabled;
             if (self.input.sun_pin_toggle) {
                 if (self.sun.mode == .pinned) {
                     self.sun.unpin();
@@ -1058,7 +1065,7 @@ pub const App = struct {
         }
 
         // Sky first, over the cleared colour buffer, then terrain on top of it.
-        self.sky_renderer.draw(vp, self.camera.position, &self.sun);
+        self.sky_renderer.draw(vp, self.camera.position, &self.sun, self.clouds_enabled, self.cloud_shift);
 
         const sky_ramp = self.sun.ramp();
         // Fog ends just inside the load radius so chunks fade in behind it rather
@@ -1224,7 +1231,7 @@ pub const App = struct {
             self.hud.text(10, @as(f32, @floatFromInt(self.window.height)) - 66, text);
         }
 
-        const keys = "F1 HUD  F FLY  F3 BOXES  F4 LIGHT A/B  F6 NORMALS  F7 FOG  F8 SUN SHADOWS  P PAUSE SUN  1-4 TIMES";
+        const keys = "F1 HUD  F FLY  F3 BOXES  F4 LIGHT A/B  F6 NORMALS  F7 FOG  F8 SHADOWS  F10 CLOUDS  P PAUSE SUN  1-4 TIMES";
         self.hud.setColour(0.6, 0.6, 0.6);
         self.hud.text(10, @as(f32, @floatFromInt(self.window.height)) - 22, keys);
 

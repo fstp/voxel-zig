@@ -33,6 +33,8 @@ pub const Input = struct {
     shadows_toggle: bool = false,
     /// F9 toggles soft (2-texel PCF) versus hard (1-texel) shadow edges.
     soft_shadows_toggle: bool = false,
+    /// F10 toggles the volumetric cloud layer (3.11).
+    clouds_toggle: bool = false,
     /// 3.10: O pins the sun at an explicit angle or hands it back to the clock;
     /// the arrow keys move a pinned sun.
     sun_pin_toggle: bool = false,
@@ -70,6 +72,7 @@ pub const Input = struct {
                     if (ev.key.key == sdl.SDLK_F7) self.fog_toggle = true;
                     if (ev.key.key == sdl.SDLK_F8) self.shadows_toggle = true;
                     if (ev.key.key == sdl.SDLK_F9) self.soft_shadows_toggle = true;
+                    if (ev.key.key == sdl.SDLK_F10) self.clouds_toggle = true;
                     if (ev.key.key == sdl.SDLK_O) self.sun_pin_toggle = true;
                     if (ev.key.key == sdl.SDLK_LEFT) self.sun_azimuth_delta -= 2.0;
                     if (ev.key.key == sdl.SDLK_RIGHT) self.sun_azimuth_delta += 2.0;
@@ -128,6 +131,7 @@ pub const Input = struct {
         self.fog_toggle = false;
         self.shadows_toggle = false;
         self.soft_shadows_toggle = false;
+        self.clouds_toggle = false;
         self.sun_pin_toggle = false;
         self.sun_azimuth_delta = 0;
         self.sun_elevation_delta = 0;

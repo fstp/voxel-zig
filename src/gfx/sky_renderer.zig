@@ -34,6 +34,12 @@ const FRAG_SRC: [:0]const u8 =
     \\uniform vec3 u_horizon;
     \\uniform vec3 u_sun_colour;
     \\uniform float u_stars; // 0 day, 1 night
+    \\uniform float u_clouds;        // 0 off, 1 on (3.11)
+    \\uniform float u_cloud_coverage;// 0..1, higher = fewer gaps
+    \\uniform vec3 u_cloud_shift;    // wind offset in cloud space
+    \\uniform float u_cloud_bottom;
+    \\uniform float u_cloud_top;
+    \\uniform vec3 u_cloud_light;    // sun colour at cloud height
     \\in vec2 v_ndc;
     \\out vec4 f_colour;
     \\
@@ -41,6 +47,69 @@ const FRAG_SRC: [:0]const u8 =
     \\    p = fract(p * 0.1031);
     \\    p += dot(p, p.yzx + 33.33);
     \\    return fract((p.x + p.y) * p.z);
+    \\}
+    \\
+    \\float hash31(vec3 p) {
+    \\    p = fract(p * 0.3183099 + vec3(0.11, 0.23, 0.37));
+    \\    p *= 17.0;
+    \\    return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+    \\}
+    \\
+    \\float vnoise(vec3 x) {
+    \\    vec3 i = floor(x);
+    \\    vec3 f = fract(x);
+    \\    f = f * f * (3.0 - 2.0 * f);
+    \\    return mix(
+    \\        mix(mix(hash31(i), hash31(i + vec3(1,0,0)), f.x),
+    \\            mix(hash31(i + vec3(0,1,0)), hash31(i + vec3(1,1,0)), f.x), f.y),
+    \\        mix(mix(hash31(i + vec3(0,0,1)), hash31(i + vec3(1,0,1)), f.x),
+    \\            mix(hash31(i + vec3(0,1,1)), hash31(i + vec3(1,1,1)), f.x), f.y),
+    \\        f.z);
+    \\}
+    \\
+    \\float cloudDensity(vec3 p) {
+    \\    vec3 q = p * 0.0042 + u_cloud_shift;
+    \\    float n = vnoise(q) * 0.62 + vnoise(q * 2.7) * 0.38;
+    \\    // Fade the slab edges so the layer has no visible ceiling or floor.
+    \\    float vertical = smoothstep(u_cloud_bottom, u_cloud_bottom + 60.0, p.y)
+    \\                   * (1.0 - smoothstep(u_cloud_top - 60.0, u_cloud_top, p.y));
+    \\    return clamp((n - u_cloud_coverage) / max(1.0 - u_cloud_coverage, 0.05), 0.0, 1.0) * vertical;
+    \\}
+    \\
+    \\// Single scattering through one slab: 20 march steps, two light taps each.
+    \\// Hash noise instead of a 3D texture keeps it self-contained.
+    \\vec4 clouds(vec3 dir) {
+    \\    if (u_clouds < 0.5 || dir.y < 0.02) return vec4(0.0, 0.0, 0.0, 1.0);
+    \\    float t0 = max((u_cloud_bottom - u_eye.y) / dir.y, 0.0);
+    \\    float t1 = (u_cloud_top - u_eye.y) / dir.y;
+    \\    if (t1 <= t0) return vec4(0.0, 0.0, 0.0, 1.0);
+    \\
+    \\    const int STEPS = 20;
+    \\    float dt = (t1 - t0) / float(STEPS);
+    \\    float cos_angle = dot(dir, u_sun_dir);
+    \\    // Henyey-Greenstein, forward peaked: thin edges glow when backlit.
+    \\    float g = 0.55;
+    \\    float phase = (1.0 - g * g) / (4.0 * 3.14159 * pow(1.0 + g * g - 2.0 * g * cos_angle, 1.5));
+    \\
+    \\    float transmittance = 1.0;
+    \\    vec3 scattered = vec3(0.0);
+    \\    // Per-pixel offset on the march: without it the fixed step shows as
+    \\    // banding rings near the horizon, which is the classic raymarch tell.
+    \\    float jitter = hash31(vec3(gl_FragCoord.xy, 7.0));
+    \\    for (int i = 0; i < STEPS; ++i) {
+    \\        vec3 p = u_eye + dir * (t0 + (float(i) + jitter) * dt);
+    \\        float density = cloudDensity(p);
+    \\        if (density > 0.002) {
+    \\            float shadow = cloudDensity(p + u_sun_dir * 45.0)
+    \\                         + cloudDensity(p + u_sun_dir * 110.0) * 0.6;
+    \\            float light = exp(-shadow * 2.2);
+    \\            float extinction = exp(-density * dt * 0.02);
+    \\            vec3 lit = u_cloud_light * light * phase * 9.0 + u_zenith * 0.7;
+    \\            scattered += transmittance * (1.0 - extinction) * lit;
+    \\            transmittance *= extinction;
+    \\        }
+    \\    }
+    \\    return vec4(scattered, transmittance);
     \\}
     \\
     \\void main() {
@@ -56,6 +125,11 @@ const FRAG_SRC: [:0]const u8 =
     \\    float disc = smoothstep(0.99985, 0.99995, c);
     \\    float glow = pow(max(c, 0.0), 220.0) * 0.55;
     \\    col += u_sun_colour * (disc * 3.0 + glow);
+    \\
+    \\    // Clouds composite over the gradient and the disc: a cloud in front of the
+    \\    // sun dims it, which is the whole point of drawing them here.
+    \\    vec4 cloud = clouds(dir);
+    \\    col = col * cloud.a + cloud.rgb;
     \\
     \\    if (u_stars > 0.01) {
     \\        // Sparse point stars: one candidate per cell, drawn as a soft dot.
@@ -101,7 +175,16 @@ pub const SkyRenderer = struct {
     }
 
     /// Draws the sky over whatever is already in the colour buffer.
-    pub fn draw(self: *SkyRenderer, view_projection: Mat4, eye: Vec3, sun: *const sun_mod.Sun) void {
+    /// `cloud_shift` is the wind offset in cloud space, advanced by the caller on
+    /// the fixed step so the drift does not depend on frame rate.
+    pub fn draw(
+        self: *SkyRenderer,
+        view_projection: Mat4,
+        eye: Vec3,
+        sun: *const sun_mod.Sun,
+        clouds_enabled: bool,
+        cloud_shift: Vec3,
+    ) void {
         const inv = view_projection.inverse() orelse return;
         const ramp = sun.ramp();
         const lighting = sun.lighting();
@@ -121,6 +204,21 @@ pub const SkyRenderer = struct {
         // Stars only once the sun is well down; smoothstep keeps the fade clean.
         const elevation = sun.elevation();
         self.shader.setFloat("u_stars", 1.0 - smoothstep(-8.0, -2.0, elevation));
+
+        // 3.11: clouds sit in a 380..700 block slab, so from the ground they are
+        // well above the terrain and from a hilltop still overhead.
+        const cloud_ramp = sun.ramp();
+        self.shader.setFloat("u_clouds", if (clouds_enabled) 1.0 else 0.0);
+        self.shader.setFloat("u_cloud_coverage", 0.47);
+        self.shader.setVec3("u_cloud_shift", .{ cloud_shift.x, cloud_shift.y, cloud_shift.z });
+        self.shader.setFloat("u_cloud_bottom", 380.0);
+        self.shader.setFloat("u_cloud_top", 700.0);
+        // Cloud light is the sun colour warmed by the phase term, plus the sky.
+        self.shader.setVec3("u_cloud_light", .{
+            cloud_ramp.sun.x + 0.15,
+            cloud_ramp.sun.y + 0.14,
+            cloud_ramp.sun.z + 0.12,
+        });
 
         gl.BindVertexArray(self.vao);
         if (self.query != 0) gl.BeginQuery(gl.TIME_ELAPSED, self.query);
