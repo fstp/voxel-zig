@@ -86,6 +86,27 @@ pub fn distanceSq(a: ChunkPos, b: ChunkPos) f32 {
 
 const INITIAL_QUAD_CAPACITY: usize = 4096;
 
+/// 1.13: generation runs on the io pool. A job owns its own 32 KB block buffer,
+/// so the worker never touches the world map (ADR 0006's ownership rule); the
+/// main thread inserts the finished buffer. Meshing stays on the main thread -
+/// it reads nine chunks at once, and copying those for a worker costs more than
+/// the 52 us the mesh itself takes.
+pub const JOBS_PER_FRAME: usize = 4;
+
+pub const GenerateJob = struct {
+    pos: ChunkPos,
+    seed: u32,
+    /// Player chunk when the job was submitted, used to drop stale results.
+    origin_centre: ChunkPos,
+    blocks: [coords.CHUNK_VOLUME]block.BlockId = undefined,
+    done: bool = false,
+};
+
+fn runGenerateJob(job: *GenerateJob) void {
+    terrain.generateInto(&job.blocks, job.pos, job.seed);
+    job.done = true;
+}
+
 pub const App = struct {
     io: std.Io,
     window: Window,
@@ -109,6 +130,9 @@ pub const App = struct {
     meshed_this_frame: usize = 0,
     generated_total: usize = 0,
     meshed_total: usize = 0,
+    jobs: [JOBS_PER_FRAME]GenerateJob = @splat(.{ .pos = ChunkPos.init(0, 0, 0), .seed = 0, .origin_centre = ChunkPos.init(0, 0, 0) }),
+    jobs_run: usize = 0,
+    jobs_dropped: usize = 0,
     seed: u32,
     show_wire: bool = false,
     shading: bool = true,
@@ -354,13 +378,37 @@ pub const App = struct {
 
         var work: [8]ChunkPos = undefined;
         self.generated_this_frame = 0;
-        const gen_count = self.collectNearest(centre, .generate, work[0..GEN_PER_FRAME]);
-        for (work[0..gen_count]) |pos| {
-            self.generateChunk(pos) catch |err| {
-                std.debug.print("generate failed: {s}\n", .{@errorName(err)});
-                continue;
-            };
-            self.generated_this_frame += 1;
+
+        // 1.13: the nearest missing chunks go to the io pool, and the finished
+        // block buffers are inserted here on the main thread. Bounded by the
+        // pool size, so a frame never waits on more than JOBS_PER_FRAME jobs.
+        const gen_count = self.collectNearest(centre, .generate, work[0..JOBS_PER_FRAME]);
+        if (gen_count > 0) {
+            for (work[0..gen_count], 0..) |pos, index| {
+                self.jobs[index] = .{ .pos = pos, .seed = self.seed, .origin_centre = centre };
+            }
+            var group: std.Io.Group = .init;
+            for (self.jobs[0..gen_count]) |*job| group.async(self.io, runGenerateJob, .{job});
+            group.await(self.io) catch {};
+            self.jobs_run += gen_count;
+
+            for (self.jobs[0..gen_count]) |job| {
+                if (!job.done) continue;
+                // Stale result: the player has moved out of range since this job
+                // was queued, so inserting it would only be unloaded again.
+                if (!chunkInRange(self.playerChunk(), job.pos, UNLOAD_RADIUS)) {
+                    self.jobs_dropped += 1;
+                    continue;
+                }
+                if (self.world.isLoaded(job.pos)) continue;
+                const chunk = self.world.getOrCreateChunk(job.pos) catch continue;
+                chunk.blocks = job.blocks;
+                chunk.state = .ready;
+                chunk.revision +%= 1;
+                self.markNeighboursDirty(job.pos);
+                self.generated_this_frame += 1;
+                self.generated_total += 1;
+            }
         }
 
         self.meshed_this_frame = 0;
@@ -544,7 +592,7 @@ pub const App = struct {
                 self.recount();
                 const seconds = @as(f64, @floatFromInt(report_dt_ns)) / 1e9;
                 std.debug.print(
-                    "fps {d:6.1} frame {d:5.2}ms worst {d:5.2}ms  loaded {d} meshed {d} drawn {d} quads {d}  work gen {d} mesh {d}  pos ({d:.1},{d:.1},{d:.1}) {s}{s}\n",
+                    "fps {d:6.1} frame {d:5.2}ms worst {d:5.2}ms  loaded {d} meshed {d} drawn {d} quads {d}  jobs {d} dropped {d}  pos ({d:.1},{d:.1},{d:.1}) {s}{s}\n",
                     .{
                         @as(f64, @floatFromInt(frames)) / seconds,
                         @as(f64, @floatFromInt(report_dt_ns)) / 1e6 / @as(f64, @floatFromInt(frames)),
@@ -553,8 +601,8 @@ pub const App = struct {
                         self.meshed_chunks,
                         drawn,
                         self.total_quads,
-                        self.generated_total,
-                        self.meshed_total,
+                        self.jobs_run,
+                        self.jobs_dropped,
                         self.player.position.x,
                         self.player.position.y,
                         self.player.position.z,

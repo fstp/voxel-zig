@@ -41,10 +41,19 @@ pub fn blockAt(seed: u32, wx: i32, wy: i32, wz: i32) BlockId {
 }
 
 /// Fills one chunk. Pure in `(seed, chunk.pos)`: one height sample per column,
-/// then the layer fill. This is the single function 1.13 will run on a worker.
+/// then the layer fill.
 pub fn generateChunk(chunk: *Chunk, seed: u32) void {
-    const origin = chunk.pos.blockOrigin();
-    @memset(&chunk.blocks, .air);
+    generateInto(&chunk.blocks, chunk.pos, seed);
+    chunk.state = .ready;
+    chunk.revision +%= 1;
+}
+
+/// The worker-safe half of generation: fills a raw 32^3 buffer for `pos` and
+/// touches nothing else, so it can run off the main thread (1.13) while the
+/// world map stays owned by the main thread.
+pub fn generateInto(blocks: *[coords.CHUNK_VOLUME]BlockId, pos: coords.ChunkPos, seed: u32) void {
+    const origin = pos.blockOrigin();
+    @memset(blocks, .air);
 
     var lz: i32 = 0;
     while (lz < coords.CHUNK_SIZE) : (lz += 1) {
@@ -58,13 +67,10 @@ pub fn generateChunk(chunk: *Chunk, seed: u32) void {
 
             var ly: i32 = 0;
             while (ly <= last) : (ly += 1) {
-                chunk.blocks[coords.localIndex(lx, ly, lz)] = blockForHeight(origin.y + ly, surface);
+                blocks[coords.localIndex(lx, ly, lz)] = blockForHeight(origin.y + ly, surface);
             }
         }
     }
-
-    chunk.state = .ready;
-    chunk.revision +%= 1;
 }
 
 /// True when every column of the chunk sits below nothing at all: a cheap
