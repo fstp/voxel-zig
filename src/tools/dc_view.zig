@@ -29,7 +29,7 @@ const SEED: u32 = 1337;
 
 /// Bumped whenever the field or the mesher changes. Printed at startup so a stale binary cannot be
 /// mistaken for a change that "made no difference" - which is what the last commit could not rule out.
-const BUILD_TAG = "stream-v4";
+const BUILD_TAG = "incremental-v5";
 // 8x8 chunks (64 chunks, 256 m^2), re-meshed as the camera crosses a chunk border:: at PATCH=4 the boundary was visible in frame and accounted for
 // 99.6% of the background pixels counted as "holes". A bigger patch pushes the world edge out of
 // shot, which is the honest way to separate a mesher defect from the edge of the world.
@@ -255,6 +255,75 @@ fn mul(a: [16]f32, b: [16]f32) [16]f32 {
 }
 
 
+
+/// Meshes ONE chunk of the patch into the given buffers. Split out so a rebuild can be spread across
+/// frames: 64 chunks x ~0.6 ms is a 40 ms hitch if done at once, and a fraction of a millisecond per
+/// frame if done a few at a time - which removes the need for a worker thread entirely.
+fn meshChunkInto(
+    alloc: std.mem.Allocator,
+    patch_origin: i32,
+    patch_origin_z: i32,
+    cx: i32,
+    cz: i32,
+    verts: *std.ArrayList(Coloured),
+    idx: *std.ArrayList(u32),
+) !usize {
+    const n = CHUNK;
+    const side = n + 3; // owned cells + 2 skirt cells
+    const vals = try alloc.alloc(f32, side * side * side);
+    defer alloc.free(vals);
+
+    // The field is a HEIGHT field: y - height(x, z) depends on the column only, so the height is
+    // evaluated once per (x, z) and reused across all 35 y samples. Doing it per sample cost 140 ms
+    // per patch against 5.7 ms this way.
+    var heights: [side * side]f32 = undefined;
+    var ck: usize = 0;
+    while (ck < side) : (ck += 1) {
+        var ci: usize = 0;
+        while (ci < side) : (ci += 1) {
+            const gx: i32 = (patch_origin + cx) * @as(i32, @intCast(CHUNK)) + @as(i32, @intCast(ci)) - 1;
+            const gz: i32 = (patch_origin_z + cz) * @as(i32, @intCast(CHUNK)) + @as(i32, @intCast(ck)) - 1;
+            heights[ci + side * ck] = heightAt(
+                @as(f32, @floatFromInt(gx)) * CELL,
+                @as(f32, @floatFromInt(gz)) * CELL,
+            );
+        }
+    }
+    var k: usize = 0;
+    while (k < side) : (k += 1) {
+        var j: usize = 0;
+        while (j < side) : (j += 1) {
+            var i: usize = 0;
+            while (i < side) : (i += 1) {
+                const y = 40.0 + (@as(f32, @floatFromInt(j)) - 1.0) * CELL;
+                vals[i + side * (j + side * k)] = y - heights[i + side * k];
+            }
+        }
+    }
+
+    const field = dc.Field{
+        .values = vals,
+        .n = CHUNK,
+        .skirt = 1,
+        .origin = .{
+            @as(f32, @floatFromInt((patch_origin + cx) * @as(i32, @intCast(CHUNK)))),
+            40.0,
+            @as(f32, @floatFromInt((patch_origin_z + cz) * @as(i32, @intCast(CHUNK)))),
+        },
+        .cell = CELL,
+    };
+    const surf = try dc.extract(alloc, field);
+    defer surf.deinit(alloc);
+    const base: u32 = @intCast(verts.items.len);
+    for (surf.verts) |v| {
+        var mat: u8 = 0;
+        const col = materialColour(v.pos, v.normal, &mat);
+        try verts.append(alloc, .{ .pos = v.pos, .normal = v.normal, .colour = col, .material = @floatFromInt(mat) });
+    }
+    for (surf.indices) |v| try idx.append(alloc, base + v);
+    return surf.quadCount();
+}
+
 /// Meshes a PATCH x PATCH block of chunks with the one-cell skirt. Factored out of `main` so a
 /// rebuild is possible at all: without this the world could only ever be meshed once, and streaming
 /// is exactly "call this again with a different origin".
@@ -265,77 +334,16 @@ fn meshPatch(
     verts: *std.ArrayList(Coloured),
     idx: *std.ArrayList(u32),
 ) !usize {
-    const n = CHUNK;
-    const side = n + 3; // owned cells + 2 skirt cells
     var quads: usize = 0;
-    var sample_ns: i64 = 0;
-    var extract_ns: i64 = 0;
 
     var cz: i32 = 0;
     while (cz < PATCH) : (cz += 1) {
         var cx: i32 = 0;
         while (cx < PATCH) : (cx += 1) {
-            const t_sample = nowNs();
-            const vals = try alloc.alloc(f32, side * side * side);
-            defer alloc.free(vals);
-            const ox: f32 = @floatFromInt((patch_origin + cx) * @as(i32, @intCast(CHUNK)));
-            const oz: f32 = @floatFromInt((patch_origin_z + cz) * @as(i32, @intCast(CHUNK)));
-            // The field is a HEIGHT field: y - height(x, z) depends on the column only. Evaluating
-            // heightAt once per (x, z) column and reusing it across all 35 y samples cuts the field
-            // cost by that factor - measured 140 ms -> a few ms per patch, which is the difference
-            // between "sampling dominates" and "sampling is noise".
-            var heights: [side * side]f32 = undefined;
-            var ck: usize = 0;
-            while (ck < side) : (ck += 1) {
-                var ci: usize = 0;
-                while (ci < side) : (ci += 1) {
-                    const gx: i32 = (patch_origin + cx) * @as(i32, @intCast(CHUNK)) + @as(i32, @intCast(ci)) - 1;
-                    const gz: i32 = (patch_origin_z + cz) * @as(i32, @intCast(CHUNK)) + @as(i32, @intCast(ck)) - 1;
-                    heights[ci + side * ck] = heightAt(
-                        @as(f32, @floatFromInt(gx)) * CELL,
-                        @as(f32, @floatFromInt(gz)) * CELL,
-                    );
-                }
-            }
-            var k: usize = 0;
-            while (k < side) : (k += 1) {
-                var j: usize = 0;
-                while (j < side) : (j += 1) {
-                    var i: usize = 0;
-                    while (i < side) : (i += 1) {
-                        const y = 40.0 + (@as(f32, @floatFromInt(j)) - 1.0) * CELL;
-                        vals[i + side * (j + side * k)] = y - heights[i + side * k];
-                    }
-                }
-            }
-            sample_ns += nowNs() - t_sample;
-            const field = dc.Field{
-                .values = vals,
-                .n = CHUNK,
-                .skirt = 1,
-                .origin = .{ ox, 40.0, oz },
-                .cell = CELL,
-            };
-            const t_extract = nowNs();
-            const surf = try dc.extract(alloc, field);
-            extract_ns += nowNs() - t_extract;
-            defer surf.deinit(alloc);
-            quads += surf.quadCount();
-            const base: u32 = @intCast(verts.items.len);
-            for (surf.verts) |v| {
-                var mat: u8 = 0;
-                const col = materialColour(v.pos, v.normal, &mat);
-                try verts.append(alloc, .{ .pos = v.pos, .normal = v.normal, .colour = col, .material = @floatFromInt(mat) });
-            }
-            for (surf.indices) |v| try idx.append(alloc, base + v);
+            quads += try meshChunkInto(alloc, patch_origin, patch_origin_z, cx, cz, verts, idx);
         }
     }
-    std.debug.print("  meshPatch: sample {d:.1} ms, extract {d:.1} ms, {d} quads\n", .{
-        @as(f64, @floatFromInt(sample_ns)) / 1e6,
-        @as(f64, @floatFromInt(extract_ns)) / 1e6,
-        quads,
-    });
-    return quads;
+return quads;
 }
 
 
@@ -404,8 +412,18 @@ pub fn main(init: std.process.Init) !void {
     var patch_origin: i32 = -PATCH / 2;
     var patch_origin_z: i32 = -PATCH / 2;
     var sim_time: f32 = 0.0;
+    // Double buffering: the new patch is built a few chunks per frame into `next_*` while the old
+    // one keeps rendering. Swapping only when it is complete means no frame ever sees a half-built
+    // patch, and no frame pays the full 40-50 ms.
+    var next_verts: std.ArrayList(Coloured) = .empty;
+    defer next_verts.deinit(alloc);
+    var next_idx: std.ArrayList(u32) = .empty;
+    defer next_idx.deinit(alloc);
+    var pending = false;
+    var pending_x: i32 = 0;
+    var pending_z: i32 = 0;
+    var pending_cursor: i32 = 0;
     var rebuilds: usize = 0;
-    var rebuild_ms_total: f64 = 0;
     const quads = try meshPatch(alloc, patch_origin, patch_origin_z, &all_verts, &all_idx);
     const all_verts_s = all_verts.items;
     const all_idx_s = all_idx.items;
@@ -441,7 +459,6 @@ pub fn main(init: std.process.Init) !void {
     // guess (near-degenerate cells) vanish into the background and read as holes.
     gl.Disable(gl.CULL_FACE);
 
-    const index_count: u32 = @intCast(all_idx_s.len);
 
     var frames: u64 = 0;
     var window_start = nowNs();
@@ -470,20 +487,40 @@ pub fn main(init: std.process.Init) !void {
         const cur_cz: i32 = @divFloor(@as(i32, @intFromFloat(eye[2])), @as(i32, @intCast(CHUNK)));
         const want_x = cur_cx - @divFloor(PATCH, 2);
         const want_z = cur_cz - @divFloor(PATCH, 2);
-        if (want_x != patch_origin or want_z != patch_origin_z) {
-            patch_origin = want_x;
-            patch_origin_z = want_z;
-            all_verts.clearRetainingCapacity();
-            all_idx.clearRetainingCapacity();
-            const t_stream = nowNs();
-            const rebuilt_quads = try meshPatch(alloc, patch_origin, patch_origin_z, &all_verts, &all_idx);
-            const ms = @as(f64, @floatFromInt(nowNs() - t_stream)) / 1e6;
-            rebuilds += 1;
-            rebuild_ms_total += ms;
-            uploadMesh(&vao, &vbo, &ebo, all_verts.items, all_idx.items);
-            std.debug.print("stream: origin ({d},{d}) {d} quads, {d:.1} ms (rebuild #{d}, mean {d:.1} ms)\n", .{
-                patch_origin, patch_origin_z, rebuilt_quads, ms, rebuilds, rebuild_ms_total / @as(f64, @floatFromInt(rebuilds)),
-            });
+        if (!pending and (want_x != patch_origin or want_z != patch_origin_z)) {
+            pending = true;
+            pending_x = want_x;
+            pending_z = want_z;
+            pending_cursor = 0;
+            next_verts.clearRetainingCapacity();
+            next_idx.clearRetainingCapacity();
+        }
+        if (pending) {
+            // Four chunks per frame is ~2.4 ms of meshing: enough to finish a 64-chunk patch in 16
+            // frames (a quarter second) while the old patch stays on screen.
+            const t_slice = nowNs();
+            var done: i32 = 0;
+            while (done < 4 and pending_cursor < PATCH * PATCH) : (done += 1) {
+                const cx = @divTrunc(pending_cursor, PATCH);
+                const cz = @mod(pending_cursor, PATCH);
+                _ = try meshChunkInto(alloc, pending_x, pending_z, cx, cz, &next_verts, &next_idx);
+                pending_cursor += 1;
+            }
+            if (pending_cursor >= PATCH * PATCH) {
+                // Complete: swap the buffers and upload both at once. Uploading is the only part that
+                // must not be interrupted, and it is ~2 MB of vertex data.
+                std.mem.swap(std.ArrayList(Coloured), &all_verts, &next_verts);
+                std.mem.swap(std.ArrayList(u32), &all_idx, &next_idx);
+                uploadMesh(&vao, &vbo, &ebo, all_verts.items, all_idx.items);
+                patch_origin = pending_x;
+                patch_origin_z = pending_z;
+                pending = false;
+                rebuilds += 1;
+                std.debug.print("stream: patch ({d},{d}) ready, {d} verts, {d} rebuilds, {d:.2} ms this slice\n", .{
+                    patch_origin, patch_origin_z, all_verts.items.len, rebuilds,
+                    @as(f64, @floatFromInt(nowNs() - t_slice)) / 1e6,
+                });
+            }
         }
         const look_x: f32 = @as(f32, @floatFromInt(patch_origin + @divFloor(PATCH, 2))) * @as(f32, @floatFromInt(CHUNK));
         const look_z: f32 = @as(f32, @floatFromInt(patch_origin_z + @divFloor(PATCH, 2))) * @as(f32, @floatFromInt(CHUNK));
@@ -497,7 +534,8 @@ pub fn main(init: std.process.Init) !void {
         shader.use();
         shader.setMat4("u_view_proj", vp_m);
         gl.BindVertexArray(vao);
-        gl.DrawElements(gl.TRIANGLES, @intCast(index_count), gl.UNSIGNED_INT, 0);
+        // Read the live index count: after a streaming swap the startup slice is stale.
+        gl.DrawElements(gl.TRIANGLES, @intCast(all_idx.items.len), gl.UNSIGNED_INT, 0);
         window.swap();
 
         const frame_ns = nowNs() - frame_start;
