@@ -48,6 +48,22 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(exe);
 
+    // ADR 0018 spike: headless dual-contouring benchmark over the real terrain.
+    const dc_bench = b.addExecutable(.{
+        .name = "dc-bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/tools/dc_bench.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "voxel_zig", .module = engine },
+            },
+        }),
+    });
+    const dc_step = b.step("dc-bench", "Run the dual-contouring benchmark");
+    const dc_run = b.addRunArtifact(dc_bench);
+    dc_step.dependOn(&dc_run.step);
+
     const run_step = b.step("run", "Run voxel-zig");
     const run_cmd = b.addRunArtifact(exe);
     run_step.dependOn(&run_cmd.step);
