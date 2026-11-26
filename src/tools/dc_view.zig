@@ -147,33 +147,57 @@ pub fn main(init: std.process.Init) !void {
     // below is a null pointer, which is what segfaulted the first build.
     try vz.gl.init();
 
-    // The whole patch as ONE field. Meshing chunk-by-chunk leaves each chunk's outer quad
-    // ring missing - that ring is what a neighbour completes - and the cracks are plainly
-    // visible in the screenshot of the first build. One field has no interior borders.
-    const n = CHUNK * @as(usize, @intCast(PATCH));
-    const side = n + 1;
-    const vals = try alloc.alloc(f32, side * side * side);
-    defer alloc.free(vals);
-    var k: usize = 0;
-    while (k < side) : (k += 1) {
-        var j: usize = 0;
-        while (j < side) : (j += 1) {
-            var i: usize = 0;
-            while (i < side) : (i += 1) {
-                const x = @as(f32, @floatFromInt(i)) * CELL;
-                const y = 40.0 + @as(f32, @floatFromInt(j)) * CELL;
-                const z = @as(f32, @floatFromInt(k)) * CELL;
-                vals[i + side * (j + side * k)] = y - heightAt(x, z);
+    // Chunk-by-chunk, each with a one-cell skirt. Ownership is a half-open cube of sample
+    // indices, so each border quad is emitted exactly once - by the chunk that owns it -
+    // using a skirt vertex its neighbour computes identically. That is what closes the
+    // seams the single-field version was hiding.
+    const n = CHUNK;
+    const side = n + 3; // owned cells + 2 skirt cells
+    var all_verts: std.ArrayList(dc.Vertex) = .empty;
+    defer all_verts.deinit(alloc);
+    var all_idx: std.ArrayList(u32) = .empty;
+    defer all_idx.deinit(alloc);
+
+    var quads: usize = 0;
+    var cz: i32 = 0;
+    while (cz < PATCH) : (cz += 1) {
+        var cx: i32 = 0;
+        while (cx < PATCH) : (cx += 1) {
+            const vals = try alloc.alloc(f32, side * side * side);
+            defer alloc.free(vals);
+            const ox: f32 = @floatFromInt(cx * @as(i32, @intCast(CHUNK)));
+            const oz: f32 = @floatFromInt(cz * @as(i32, @intCast(CHUNK)));
+            var k: usize = 0;
+            while (k < side) : (k += 1) {
+                var j: usize = 0;
+                while (j < side) : (j += 1) {
+                    var i: usize = 0;
+                    while (i < side) : (i += 1) {
+                        const x = ox + (@as(f32, @floatFromInt(i)) - 1.0) * CELL;
+                        const y = 40.0 + (@as(f32, @floatFromInt(j)) - 1.0) * CELL;
+                        const z = oz + (@as(f32, @floatFromInt(k)) - 1.0) * CELL;
+                        vals[i + side * (j + side * k)] = y - heightAt(x, z);
+                    }
+                }
             }
+            const field = dc.Field{
+                .values = vals,
+                .n = CHUNK,
+                .skirt = 1,
+                .origin = .{ ox, 40.0, oz },
+                .cell = CELL,
+            };
+            const surf = try dc.extract(alloc, field);
+            defer surf.deinit(alloc);
+            quads += surf.quadCount();
+            const base: u32 = @intCast(all_verts.items.len);
+            try all_verts.appendSlice(alloc, surf.verts);
+            for (surf.indices) |idx| try all_idx.append(alloc, base + idx);
         }
     }
-    const field = dc.Field{ .values = vals, .n = n, .origin = .{ 0, 40.0, 0 }, .cell = CELL };
-    const surf = try dc.extract(alloc, field);
-    defer surf.deinit(alloc);
-    std.debug.print("DC viewer: {d} verts, {d} quads over one {d}^3 field\n", .{ surf.verts.len, surf.quadCount(), n });
-
-    const all_verts = surf.verts;
-    const all_idx = surf.indices;
+    const all_verts_s = all_verts.items;
+    const all_idx_s = all_idx.items;
+    std.debug.print("DC viewer: {d} verts, {d} quads over {d} skirted chunks\n", .{ all_verts_s.len, quads, PATCH * PATCH });
 
     var shader = try gfx.Shader.init(vertex_src, fragment_src);
     defer shader.deinit();
@@ -186,9 +210,9 @@ pub fn main(init: std.process.Init) !void {
     gl.GenBuffers(1, @ptrCast(&ebo));
     gl.BindVertexArray(vao);
     gl.BindBuffer(gl.ARRAY_BUFFER, vbo);
-    gl.BufferData(gl.ARRAY_BUFFER, @intCast(all_verts.len * @sizeOf(dc.Vertex)), all_verts.ptr, gl.STATIC_DRAW);
+    gl.BufferData(gl.ARRAY_BUFFER, @intCast(all_verts_s.len * @sizeOf(dc.Vertex)), all_verts_s.ptr, gl.STATIC_DRAW);
     gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, ebo);
-    gl.BufferData(gl.ELEMENT_ARRAY_BUFFER, @intCast(all_idx.len * @sizeOf(u32)), all_idx.ptr, gl.STATIC_DRAW);
+    gl.BufferData(gl.ELEMENT_ARRAY_BUFFER, @intCast(all_idx_s.len * @sizeOf(u32)), all_idx_s.ptr, gl.STATIC_DRAW);
     gl.EnableVertexAttribArray(0);
     gl.VertexAttribPointer(0, 3, gl.FLOAT, gl.FALSE, @sizeOf(dc.Vertex), 0);
     gl.EnableVertexAttribArray(1);
@@ -201,7 +225,7 @@ pub fn main(init: std.process.Init) !void {
     gl.Disable(gl.CULL_FACE);
 
     const centre: f32 = @floatFromInt(@as(usize, @intCast(PATCH)) * CHUNK / 2);
-    const index_count: u32 = @intCast(all_idx.len);
+    const index_count: u32 = @intCast(all_idx_s.len);
 
     frame: while (true) {
         var ev: sdl.SDL_Event = undefined;

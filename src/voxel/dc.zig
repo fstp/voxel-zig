@@ -33,12 +33,16 @@ pub const Field = struct {
     values: []const f32,
     /// Cells per axis.
     n: usize,
+    /// Extra cells meshed beyond the owned range on every side. A chunk meshes these so
+    /// the cells straddling its border exist locally; because the field is deterministic,
+    /// the neighbour computes the same vertices for them and the border quad welds exactly.
+    skirt: usize = 0,
     /// World position of sample (0,0,0).
     origin: [3]f32,
     cell: f32,
 
     pub fn side(self: Field) usize {
-        return self.n + 1;
+        return self.n + 1 + 2 * self.skirt;
     }
 
     pub fn at(self: Field, i: usize, j: usize, k: usize) f32 {
@@ -47,17 +51,18 @@ pub const Field = struct {
     }
 
     pub fn samplePos(self: Field, i: usize, j: usize, k: usize) [3]f32 {
+        const sk: f32 = @floatFromInt(self.skirt);
         return .{
-            self.origin[0] + @as(f32, @floatFromInt(i)) * self.cell,
-            self.origin[1] + @as(f32, @floatFromInt(j)) * self.cell,
-            self.origin[2] + @as(f32, @floatFromInt(k)) * self.cell,
+            self.origin[0] + (@as(f32, @floatFromInt(i)) - sk) * self.cell,
+            self.origin[1] + (@as(f32, @floatFromInt(j)) - sk) * self.cell,
+            self.origin[2] + (@as(f32, @floatFromInt(k)) - sk) * self.cell,
         };
     }
 
     /// Gradient by central differences on the sampled grid, falling back to a one-sided
     /// difference at the border. Normalised; zero if the field is locally flat.
     pub fn gradient(self: Field, i: usize, j: usize, k: usize) [3]f32 {
-        const n = self.n;
+        const n = self.side() - 1;
         var g: [3]f32 = undefined;
         inline for (0..3) |axis| {
             const idx: [3]usize = .{ i, j, k };
@@ -196,8 +201,16 @@ const edges: [12][2]u8 = .{
 
 /// Extract the isosurface at value 0 (negative is inside).
 pub fn extract(alloc: std.mem.Allocator, field: Field) !Surface {
-    const n = field.n;
-    const cells = n * n * n;
+    // Cells cover the whole sample grid, skirts included, so the cells straddling a chunk
+    // border exist locally.
+    const cpa = field.side() - 1;
+    const cells = cpa * cpa * cpa;
+    const sk = field.skirt;
+    // Owned edges: the along-axis cell index must sit in [sk, sk + n - 1], which makes the
+    // ownership ranges of adjacent chunks disjoint - so each border quad is emitted once,
+    // by the chunk that owns it, using a skirt vertex its neighbour computes identically.
+    const own_lo = sk;
+    const own_hi = sk + field.n - 1;
 
     var verts: std.ArrayList(Vertex) = .empty;
     errdefer verts.deinit(alloc);
@@ -216,11 +229,11 @@ pub fn extract(alloc: std.mem.Allocator, field: Field) !Surface {
     // Pass 1: one vertex per crossed cell.
     var qef = Qef{};
     var ci: usize = 0;
-    while (ci < n) : (ci += 1) {
+    while (ci < cpa) : (ci += 1) {
         var cj: usize = 0;
-        while (cj < n) : (cj += 1) {
+        while (cj < cpa) : (cj += 1) {
             var ck: usize = 0;
-            while (ck < n) : (ck += 1) {
+            while (ck < cpa) : (ck += 1) {
                 var v: [8]f32 = undefined;
                 var mask: u8 = 0;
                 for (corners, 0..) |c, idx| {
@@ -261,8 +274,11 @@ pub fn extract(alloc: std.mem.Allocator, field: Field) !Surface {
                     .{ lo[0] + inset, lo[1] + inset, lo[2] + inset },
                     .{ hi[0] - inset, hi[1] - inset, hi[2] - inset },
                 );
-                const nrm = normalize(qef.nsum) orelse .{ 0.0, 1.0, 0.0 };
-                cell_vert[cellIndex(ci, cj, ck, n)] = @intCast(verts.items.len);
+                // When a cell's crossing normals cancel out, qef.nsum is zero and a
+                // hard-coded up vector gives the quad the wrong side - which renders as a
+                // dark speck, not as an obvious bug. Fall back to the field gradient.
+                const nrm = normalize(qef.nsum) orelse (normalize(field.gradient(ci, cj, ck)) orelse .{ 0.0, 1.0, 0.0 });
+                cell_vert[cellIndex(ci, cj, ck, cpa)] = @intCast(verts.items.len);
                 try verts.append(alloc, .{ .pos = pos, .normal = nrm });
             }
         }
@@ -270,18 +286,19 @@ pub fn extract(alloc: std.mem.Allocator, field: Field) !Surface {
 
     // Pass 2: one quad per crossed grid edge, wound so its geometric normal agrees with
     // the vertex normals it joins.
-    var i: usize = 0;
-    while (i <= n) : (i += 1) {
-        var j: usize = 1;
-        while (j < n) : (j += 1) {
-            var k: usize = 1;
-            while (k < n) : (k += 1) {
-                // x edges
-                if (i < n) try emitEdge(field, cell_vert, verts.items, &tris, alloc, .x, i, j, k);
-                // y edges
-                if (j < n) try emitEdge(field, cell_vert, verts.items, &tris, alloc, .y, i, j, k);
-                // z edges
-                if (k < n) try emitEdge(field, cell_vert, verts.items, &tris, alloc, .z, i, j, k);
+    // Ownership is a half-open cube of *sample* indices, so every grid edge belongs to
+    // exactly one chunk: the one whose owned cube contains that edge. The chunk then pulls
+    // the cells on both sides of the border from its skirt, and because the field is
+    // deterministic its neighbour computes the same vertices for them.
+    var i: usize = own_lo;
+    while (i <= own_hi) : (i += 1) {
+        var j: usize = own_lo;
+        while (j <= own_hi) : (j += 1) {
+            var k: usize = own_lo;
+            while (k <= own_hi) : (k += 1) {
+                try emitEdge(field, cell_vert, verts.items, &tris, alloc, cpa, .x, i, j, k);
+                try emitEdge(field, cell_vert, verts.items, &tris, alloc, cpa, .y, i, j, k);
+                try emitEdge(field, cell_vert, verts.items, &tris, alloc, cpa, .z, i, j, k);
             }
         }
     }
@@ -300,12 +317,13 @@ fn emitEdge(
     verts: []const Vertex,
     tris: *std.ArrayList(u32),
     alloc: std.mem.Allocator,
+    cpa: usize,
     axis: Axis,
     i: usize,
     j: usize,
     k: usize,
 ) !void {
-    const n = field.n;
+    const n = cpa;
     // A grid edge crosses the surface when its two corner samples disagree in sign.
     const a = switch (axis) {
         .x => field.at(i, j, k),
@@ -523,4 +541,134 @@ test "dual contouring: a uniform field yields nothing" {
     defer surf.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 0), surf.verts.len);
     try std.testing.expectEqual(@as(usize, 0), surf.indices.len);
+}
+
+test "dual contouring: two skirted chunks tile without a crack" {
+    const alloc = std.testing.allocator;
+    const n = 8;
+    const cell: f32 = 1.0;
+
+    const plane = struct {
+        fn f(x: f32, y: f32, z: f32) f32 {
+            return 0.35 * x - 0.6 * y + 0.25 * z + 0.5;
+        }
+    }.f;
+
+    const build = struct {
+        fn g(alloc2: std.mem.Allocator, nn: usize, c: f32, ox: f32, sk: usize) ![]f32 {
+            const side = nn + 1 + 2 * sk;
+            const vals = try alloc2.alloc(f32, side * side * side);
+            const skf: f32 = @floatFromInt(sk);
+            var k: usize = 0;
+            while (k < side) : (k += 1) {
+                var j: usize = 0;
+                while (j < side) : (j += 1) {
+                    var i: usize = 0;
+                    while (i < side) : (i += 1) {
+                        const x = ox + (@as(f32, @floatFromInt(i)) - skf) * c;
+                        const y = (@as(f32, @floatFromInt(j)) - skf) * c;
+                        const z = (@as(f32, @floatFromInt(k)) - skf) * c;
+                        vals[i + side * (j + side * k)] = plane(x, y, z);
+                    }
+                }
+            }
+            return vals;
+        }
+    }.g;
+
+    const a_vals = try build(alloc, n, cell, 0.0, 1);
+    defer alloc.free(a_vals);
+    const b_vals = try build(alloc, n, cell, @as(f32, @floatFromInt(n)) * cell, 1);
+    defer alloc.free(b_vals);
+
+    const fa = Field{ .values = a_vals, .n = n, .skirt = 1, .origin = .{ 0, 0, 0 }, .cell = cell };
+    const fb = Field{ .values = b_vals, .n = n, .skirt = 1, .origin = .{ @as(f32, @floatFromInt(n)) * cell, 0, 0 }, .cell = cell };
+    const sa = try extract(alloc, fa);
+    defer sa.deinit(alloc);
+    const sb = try extract(alloc, fb);
+    defer sb.deinit(alloc);
+
+    try std.testing.expect(sa.verts.len > 0 and sb.verts.len > 0);
+
+    // Merge and weld by position, then demand that every edge is shared by exactly two
+    // triangles. A missing border quad shows up as edges counted once; a duplicated one as
+    // edges counted four times - both are what a visible crack or a z-fight looks like.
+    var pos = std.AutoHashMap([3]i64, u32).init(alloc);
+    defer pos.deinit();
+    var merged: std.ArrayList(Vertex) = .empty;
+    defer merged.deinit(alloc);
+    var idx: std.ArrayList(u32) = .empty;
+    defer idx.deinit(alloc);
+
+    const addSurface = struct {
+        fn f(
+            al: std.mem.Allocator,
+            surf: Surface,
+            map: *std.AutoHashMap([3]i64, u32),
+            verts: *std.ArrayList(Vertex),
+            indices: *std.ArrayList(u32),
+        ) !void {
+            var remap = try al.alloc(u32, surf.verts.len);
+            defer al.free(remap);
+            for (surf.verts, 0..) |v, vi| {
+                const key = [3]i64{
+                    @intFromFloat(@round(v.pos[0] * 4096.0)),
+                    @intFromFloat(@round(v.pos[1] * 4096.0)),
+                    @intFromFloat(@round(v.pos[2] * 4096.0)),
+                };
+                const gop = try map.getOrPut(key);
+                if (!gop.found_existing) {
+                    gop.value_ptr.* = @intCast(verts.items.len);
+                    try verts.append(al, v);
+                }
+                remap[vi] = gop.value_ptr.*;
+            }
+            for (surf.indices) |src_idx| try indices.append(al, remap[src_idx]);
+        }
+    }.f;
+
+    try addSurface(alloc, sa, &pos, &merged, &idx);
+    try addSurface(alloc, sb, &pos, &merged, &idx);
+
+    var counts = std.AutoHashMap([2]u32, u32).init(alloc);
+    defer counts.deinit();
+    var t: usize = 0;
+    while (t < idx.items.len) : (t += 3) {
+        const tri = idx.items[t .. t + 3];
+        for (0..3) |e| {
+            var a = tri[e];
+            var b = tri[(e + 1) % 3];
+            if (a > b) {
+                const tmp = a;
+                a = b;
+                b = tmp;
+            }
+            if (a == b) continue;
+            const gop = try counts.getOrPut(.{ a, b });
+            if (!gop.found_existing) gop.value_ptr.* = 0;
+            gop.value_ptr.* += 1;
+        }
+    }
+    // Only the seam band is meaningful here: the surface legitimately runs out of the
+    // domain at the union's outer faces, and open edges there are not a crack.
+    var it = counts.iterator();
+    var bad: usize = 0;
+    var checked: usize = 0;
+    const seam_lo: f32 = @as(f32, @floatFromInt(n)) - 2.0;
+    const seam_hi: f32 = @as(f32, @floatFromInt(n)) + 2.0;
+    while (it.next()) |entry| {
+        const pa = merged.items[entry.key_ptr.*[0]].pos;
+        const pb = merged.items[entry.key_ptr.*[1]].pos;
+        if (pa[0] < seam_lo or pa[0] > seam_hi or pb[0] < seam_lo or pb[0] > seam_hi) continue;
+        // The plane leaves the box at the y and z faces, where there is no neighbour chunk
+        // to close the surface - open edges there are the domain, not a crack.
+        const inner: f32 = 1.5;
+        const outer: f32 = @as(f32, @floatFromInt(n)) - 1.5;
+        if (pa[1] < inner or pa[1] > outer or pb[1] < inner or pb[1] > outer) continue;
+        if (pa[2] < inner or pa[2] > outer or pb[2] < inner or pb[2] > outer) continue;
+        checked += 1;
+        if (entry.value_ptr.* != 2) bad += 1;
+    }
+    try std.testing.expect(checked > 20);
+    try std.testing.expectEqual(@as(usize, 0), bad);
 }
