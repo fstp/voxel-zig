@@ -53,7 +53,7 @@ const Coloured = extern struct {
     pos: [3]f32,
     normal: [3]f32,
     colour: [3]f32,
-    material: u32, // widened so the GL attribute is a clean 4-byte upload
+    material: f32, // uploaded as a float attribute; the id itself is discrete
 };
 
 /// IQ-style cosine palette: a + b*cos(2*pi*(c*t + d)). Four vectors give a whole material
@@ -96,14 +96,17 @@ const vertex_src: [:0]const u8 =
     \\layout(location = 0) in vec3 a_pos;
     \\layout(location = 1) in vec3 a_nrm;
     \\layout(location = 2) in vec3 a_col;
+    \\layout(location = 3) in float a_mat;
     \\uniform mat4 u_view_proj;
     \\out vec3 v_nrm;
     \\out vec3 v_pos;
     \\out vec3 v_col;
+    \\out float v_mat;
     \\void main() {
     \\    v_nrm = a_nrm;
     \\    v_pos = a_pos;
     \\    v_col = a_col;
+    \\    v_mat = a_mat;
     \\    gl_Position = u_view_proj * vec4(a_pos, 1.0);
     \\}
 ;
@@ -113,15 +116,65 @@ const fragment_src: [:0]const u8 =
     \\in vec3 v_nrm;
     \\in vec3 v_pos;
     \\in vec3 v_col;
+    \\in float v_mat;
+
+    \\float hash13(vec3 p) {
+    \\    p = fract(p * 0.3183099 + vec3(0.1, 0.2, 0.3));
+    \\    p *= 17.0;
+    \\    return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+    \\}
+
+    \\// Inigo Quilez's value noise with analytic derivatives (articles/morenoise): the trilinear
+    \\// interpolation is expanded into the k0..k7 polynomial and differentiated, so the value and its
+    \\// gradient come out of ONE evaluation. Quintic interpolation is mandatory - with the cubic
+    \\// the second derivative breaks and the analytic normal shows facets.
+    \\vec4 noised(vec3 x) {
+    \\    vec3 p = floor(x);
+    \\    vec3 w = fract(x);
+    \\    vec3 u = w * w * w * (w * (w * 6.0 - 15.0) + 10.0);
+    \\    vec3 du = 30.0 * w * w * (w * (w - 2.0) + 1.0);
+    \\    float a = hash13(p + vec3(0, 0, 0));
+    \\    float b = hash13(p + vec3(1, 0, 0));
+    \\    float c = hash13(p + vec3(0, 1, 0));
+    \\    float d = hash13(p + vec3(1, 1, 0));
+    \\    float e = hash13(p + vec3(0, 0, 1));
+    \\    float f = hash13(p + vec3(1, 0, 1));
+    \\    float g = hash13(p + vec3(0, 1, 1));
+    \\    float h = hash13(p + vec3(1, 1, 1));
+    \\    float k0 = a;
+    \\    float k1 = b - a;
+    \\    float k2 = c - a;
+    \\    float k3 = e - a;
+    \\    float k4 = a - b - c + d;
+    \\    float k5 = a - c - e + g;
+    \\    float k6 = a - b - e + f;
+    \\    float k7 = -a + b + c - d + e - f - g + h;
+    \\    float v = k0 + k1*u.x + k2*u.y + k3*u.z + k4*u.x*u.y + k5*u.y*u.z + k6*u.z*u.x + k7*u.x*u.y*u.z;
+    \\    vec3 gr = du * vec3(k1 + k4*u.y + k6*u.z + k7*u.y*u.z,
+    \\                        k2 + k5*u.z + k4*u.x + k7*u.z*u.x,
+    \\                        k3 + k6*u.x + k5*u.y + k7*u.x*u.y);
+    \\    return vec4(v, gr);
+    \\}
     \\out vec4 frag;
     \\void main() {
-    \\    vec3 n = normalize(v_nrm);
+    \\    // Two octaves of value noise in WORLD space: world-space means the pattern is continuous
+    \\    // across every chunk border and stable through LOD, which blocky textures never were.
+    \\    vec3 wp = v_pos * 0.35;
+    \\    vec4 o1 = noised(wp);
+    \\    vec4 o2 = noised(wp * 2.7 + 11.0);
+    \\    float detail = o1.x * 0.65 + o2.x * 0.35;
+    \\    vec3 grad = o1.yzw * 0.65 + o2.yzw * 2.7 * 0.35;
+    \\
+    \\    // Bump without a normal map: surface normal plus a scaled noise gradient, IQ's form.
+    \\    // bump is per material - rock is rougher than ground, scree roughest.
+    \\    float bump = v_mat < 0.5 ? 0.10 : (v_mat < 1.5 ? 0.22 : 0.34);
+    \\    vec3 n = normalize(v_nrm + grad * bump);
     \\    vec3 l = normalize(vec3(0.45, 0.75, 0.40));
     \\    float ndl = max(dot(n, l), 0.0);
     \\    vec3 sky = vec3(0.36, 0.48, 0.62);
     \\    vec3 ground = vec3(0.16, 0.18, 0.14);
     \\    vec3 amb = mix(ground, sky, n.y * 0.5 + 0.5);
-    \\    vec3 albedo = v_col;
+    \\    vec3 albedo = v_col * (0.86 + 0.30 * detail);
     \\    // Lighting is deliberately shy of 1.0: albedo arrives already close to mid grey, and
     \\    // multiplying it by ~1.8 and then gamma-encoding clips the whole surface to white.
     \\    vec3 c = albedo * (amb * 0.55 + ndl * 0.65);
@@ -252,7 +305,7 @@ pub fn main(init: std.process.Init) !void {
             for (surf.verts) |v| {
                 var mat: u8 = 0;
                 const col = materialColour(v.pos, v.normal, &mat);
-                try all_verts.append(alloc, .{ .pos = v.pos, .normal = v.normal, .colour = col, .material = mat });
+                try all_verts.append(alloc, .{ .pos = v.pos, .normal = v.normal, .colour = col, .material = @floatFromInt(mat) });
             }
             for (surf.indices) |idx| try all_idx.append(alloc, base + idx);
         }
