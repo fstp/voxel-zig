@@ -15,7 +15,10 @@ const gl = @import("gl");
 
 const CHUNK: usize = 32;
 const SEED: u32 = 1337;
-const PATCH: i32 = 4; // chunks per axis
+// 10x10 chunks: at PATCH=4 the 16-chunk boundary was visible in frame and accounted for
+// 99.6% of the background pixels counted as "holes". A bigger patch pushes the world edge out of
+// shot, which is the honest way to separate a mesher defect from the edge of the world.
+const PATCH: i32 = 10;
 const CELL: f32 = 1.0;
 
 fn heightAt(x: f32, z: f32) f32 {
@@ -50,6 +53,7 @@ const Coloured = extern struct {
     pos: [3]f32,
     normal: [3]f32,
     colour: [3]f32,
+    material: u32, // widened so the GL attribute is a clean 4-byte upload
 };
 
 /// IQ-style cosine palette: a + b*cos(2*pi*(c*t + d)). Four vectors give a whole material
@@ -65,11 +69,13 @@ fn palette(t: f32, a: [3]f32, b: [3]f32, c: [3]f32, d: [3]f32) [3]f32 {
 /// Material from geometry alone: slope picks rock, height picks sand/grass/alpine tints.
 /// A pure function of world position and normal, which is what keeps it stable across chunk
 /// borders and future LOD levels.
-fn materialColour(pos: [3]f32, nrm: [3]f32, out_rock: *f32) [3]f32 {
+fn materialColour(pos: [3]f32, nrm: [3]f32, out_material: *u8) [3]f32 {
     const slope: f32 = 1.0 - @abs(nrm[1]);
     const h: f32 = (pos[1] - 45.0) / 30.0;
     const rock = @min(@max((slope - 0.35) / 0.25, 0.0), 1.0);
-    out_rock.* = rock;
+    // 0 = ground, 1 = rock, 2 = scree on the steepest faces. Discrete ids, because that is what a
+    // material byte can carry and what a shader can branch on cheaply.
+    out_material.* = if (rock > 0.75) 2 else if (rock > 0.35) 1 else 0;
     const low = palette(h * 1.7, .{ 0.40, 0.34, 0.20 }, .{ 0.12, 0.11, 0.07 }, .{ 1.0, 1.0, 1.0 }, .{ 0.0, 0.05, 0.1 });
     const high = palette(h * 2.3 + 0.4, .{ 0.30, 0.38, 0.22 }, .{ 0.14, 0.12, 0.09 }, .{ 1.0, 1.0, 1.0 }, .{ 0.15, 0.2, 0.25 });
     const stone = palette(h * 3.1 + 1.7, .{ 0.30, 0.29, 0.28 }, .{ 0.08, 0.08, 0.08 }, .{ 1.0, 1.0, 1.0 }, .{ 0.3, 0.35, 0.4 });
@@ -244,9 +250,9 @@ pub fn main(init: std.process.Init) !void {
             quads += surf.quadCount();
             const base: u32 = @intCast(all_verts.items.len);
             for (surf.verts) |v| {
-                var rock: f32 = 0;
-                const col = materialColour(v.pos, v.normal, &rock);
-                try all_verts.append(alloc, .{ .pos = v.pos, .normal = v.normal, .colour = col });
+                var mat: u8 = 0;
+                const col = materialColour(v.pos, v.normal, &mat);
+                try all_verts.append(alloc, .{ .pos = v.pos, .normal = v.normal, .colour = col, .material = mat });
             }
             for (surf.indices) |idx| try all_idx.append(alloc, base + idx);
         }
@@ -275,6 +281,8 @@ pub fn main(init: std.process.Init) !void {
     gl.VertexAttribPointer(1, 3, gl.FLOAT, gl.FALSE, @sizeOf(Coloured), @sizeOf([3]f32));
     gl.EnableVertexAttribArray(2);
     gl.VertexAttribPointer(2, 3, gl.FLOAT, gl.FALSE, @sizeOf(Coloured), @sizeOf([3]f32) * 2);
+    gl.EnableVertexAttribArray(3);
+    gl.VertexAttribPointer(3, 1, gl.FLOAT, gl.FALSE, @sizeOf(Coloured), @sizeOf([3]f32) * 3);
     gl.BindVertexArray(0);
 
     gl.Enable(gl.DEPTH_TEST);

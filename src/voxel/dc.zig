@@ -19,6 +19,9 @@ pub var emitted_quads: usize = 0;
 pub const Vertex = extern struct {
     pos: [3]f32,
     normal: [3]f32,
+    /// Material id, carried through from the caller (ADR 0019). The mesher never interprets it:
+    /// materials belong to the field, not to a block face, so the kernel stays agnostic.
+    material: u8 = 0,
 };
 
 pub const Surface = struct {
