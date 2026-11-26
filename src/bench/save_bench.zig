@@ -38,7 +38,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     const save_start = std.Io.Timestamp.now(init.io, .awake);
-    const stats = try save.save(allocator, init.io, "bench-save.vxz", &world, seed, .{ .x = 0, .y = 70, .z = 0 });
+    const stats = try save.save(allocator, init.io, "bench-save.vxz", &world, seed, .{ .x = 0, .y = 70, .z = 0 }, null);
     const save_ms = @as(f64, @floatFromInt(std.Io.Timestamp.now(init.io, .awake).nanoseconds - save_start.nanoseconds)) / 1e6;
 
     const load_start = std.Io.Timestamp.now(init.io, .awake);

@@ -245,7 +245,7 @@ pub const App = struct {
 
     fn saveWorld(self: *App) void {
         const start = std.Io.Timestamp.now(self.io, .awake);
-        const stats = save.save(self.allocator, self.io, self.save_path, &self.world, self.seed, self.player.position) catch |err| {
+        const stats = save.save(self.allocator, self.io, self.save_path, &self.world, self.seed, self.player.position, &self.saved.chunks) catch |err| {
             std.debug.print("save failed: {s}\n", .{@errorName(err)});
             return;
         };
@@ -346,6 +346,11 @@ pub const App = struct {
     }
 
     fn removeChunk(self: *App, pos: ChunkPos) void {
+        // An edited chunk must outlive its unload or the edit is lost when the
+        // player flies away before quitting.
+        if (self.world.getChunk(pos)) |chunk| {
+            if (chunk.edited) self.saved.rememberBlocks(pos, &chunk.blocks) catch {};
+        }
         if (self.meshes.fetchRemove(pos)) |kv| {
             var mesh = kv.value;
             self.chunk_renderer.destroyMesh(&mesh);

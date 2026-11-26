@@ -46,6 +46,17 @@ pub const Loaded = struct {
         return self.chunks.get(pos);
     }
 
+    /// Remembers an edited chunk that is about to be unloaded, so its edits are
+    /// still written by the next save.
+    pub fn rememberBlocks(self: *Loaded, pos: ChunkPos, blocks: *const [coords.CHUNK_VOLUME]BlockId) !void {
+        const entry = try self.chunks.getOrPut(self.allocator, pos);
+        if (!entry.found_existing) {
+            const copy = try self.allocator.create([coords.CHUNK_VOLUME]BlockId);
+            entry.value_ptr.* = copy;
+        }
+        entry.value_ptr.*.* = blocks.*;
+    }
+
     pub fn count(self: *const Loaded) usize {
         return self.chunks.count();
     }
@@ -86,7 +97,10 @@ pub fn rleDecode(encoded: []const u8, output: []BlockId) !void {
     if (out != output.len) return error.CorruptRle;
 }
 
-/// Writes the seed, the player position and every chunk flagged edited.
+/// Writes the seed, the player position and every chunk flagged edited - both
+/// the ones still loaded and the ones that were unloaded after being edited
+/// (`extra` holds their buffers; without it, flying away from an edit before
+/// quitting would lose it).
 pub fn save(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -94,6 +108,7 @@ pub fn save(
     world: *const World,
     seed: u32,
     player: Vec3,
+    extra: ?*const std.HashMapUnmanaged(ChunkPos, *[coords.CHUNK_VOLUME]BlockId, ChunkPos.Context, 80),
 ) !SaveStats {
     var file = try std.Io.Dir.cwd().createFile(io, path, .{});
     defer file.close(io);
@@ -114,6 +129,12 @@ pub fn save(
     while (it.next()) |chunk_ptr| {
         if (!chunk_ptr.*.edited) continue;
         edited += 1;
+    }
+    if (extra) |map| {
+        var extra_it = map.keyIterator();
+        while (extra_it.next()) |key| {
+            if (!world.isLoaded(key.*)) edited += 1;
+        }
     }
     try w.writeInt(u32, @intCast(edited), .little);
 
@@ -146,6 +167,32 @@ pub fn save(
             packed_bytes += chunk.blocks.len;
         }
         raw_bytes += chunk.blocks.len;
+    }
+
+    if (extra) |map| {
+        var extra_it = map.iterator();
+        while (extra_it.next()) |entry| {
+            const pos = entry.key_ptr.*;
+            if (world.isLoaded(pos)) continue; // written above, fresher
+            const blocks = entry.value_ptr.*;
+            const encoded = try rleEncode(allocator, blocks);
+            defer allocator.free(encoded);
+            try w.writeInt(i32, pos.x, .little);
+            try w.writeInt(i32, pos.y, .little);
+            try w.writeInt(i32, pos.z, .little);
+            if (encoded.len < blocks.len) {
+                try w.writeInt(u8, @intFromEnum(Mode.rle), .little);
+                try w.writeInt(u32, @intCast(encoded.len), .little);
+                try w.writeAll(encoded);
+                packed_bytes += encoded.len;
+            } else {
+                try w.writeInt(u8, @intFromEnum(Mode.raw), .little);
+                try w.writeInt(u32, @intCast(blocks.len), .little);
+                try w.writeAll(std.mem.sliceAsBytes(blocks));
+                packed_bytes += blocks.len;
+            }
+            raw_bytes += blocks.len;
+        }
     }
     try w.flush();
     return .{ .chunks = edited, .raw_bytes = raw_bytes, .packed_bytes = packed_bytes };
