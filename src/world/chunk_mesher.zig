@@ -65,7 +65,7 @@ pub fn fillPadded(world: *const World, pos: ChunkPos, padded: *mesher.PaddedBloc
                     if (plane_loaded[index]) {
                         block = world.getBlock(origin.x + x, origin.y + y, origin.z + z);
                     } else {
-                        block = .stone;
+                        block = .unknown;
                     }
                 } else {
                     const chunk_pos = ChunkPos.init(
@@ -142,7 +142,10 @@ test "the world floor is opaque and costs no quads" {
 
     var padded = mesher.PaddedBlocks.init();
     fillPadded(&world, ChunkPos.init(0, 0, 0), &padded);
-    try testing.expectEqual(BlockId.stone, padded.get(4, -1, 4));
+    // Below the world there is no chunk, so the border cell is the unknown marker;
+    // it is opaque, which is what keeps the frontier from emitting a wall of faces.
+    try testing.expectEqual(BlockId.unknown, padded.get(4, -1, 4));
+    try testing.expect(padded.get(4, -1, 4).isOpaque());
 }
 
 test "an interior border block culls the chunk's face" {

@@ -295,6 +295,10 @@ pub const App = struct {
             std.debug.print("exposure: {d:.3} from VOXEL_EXPOSURE\n", .{post.exposure_base});
         }
 
+        // 6.3: seam-free cube filtering. The water mirrors the sky probe at high mip
+        // levels, and without this the filter taps clamp at each cube face, which
+        // draws faint straight lines across a large reflective plane.
+        gl.gl.Enable(gl.gl.TEXTURE_CUBE_MAP_SEAMLESS);
         gl.gl.Enable(gl.gl.DEPTH_TEST);
         gl.gl.Enable(gl.gl.CULL_FACE);
         gl.gl.CullFace(gl.gl.BACK);

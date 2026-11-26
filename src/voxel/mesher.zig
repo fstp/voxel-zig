@@ -114,7 +114,10 @@ const face_order = [6]Face{ .px, .nx, .py, .ny, .pz, .nz };
 /// where it meets air: no faces inside a water body, and none against terrain.
 fn faceVisible(block: BlockId, neighbour: BlockId) bool {
     if (block.isSolid()) return !neighbour.isOpaque();
-    if (block == .water) return neighbour == .air;
+    // Water emits against air and against an unloaded neighbour: the frontier is
+    // unknown, not solid, and skipping it leaves a gap in the sea surface that is
+    // invisible from above but draws as a bright line at a grazing angle.
+    if (block == .water) return neighbour == .air or neighbour == .unknown;
     return false;
 }
 
@@ -852,4 +855,22 @@ test "AO produces more than four distinct levels (3.12)" {
         if (present) distinct += 1;
     }
     try testing.expect(distinct > 4);
+}
+
+test "water at an unloaded frontier still emits its surface (6.3)" {
+    // The bug: the border sampler used to write `.stone` for a neighbour chunk that
+    // was not loaded, and water only emits against air - so every frontier water
+    // block lost its top face and the sea carried a one-block hole along each chunk
+    // border, invisible from above and a bright line at a grazing angle.
+    var padded = PaddedBlocks.init();
+    padded.set(0, 0, 0, .water);
+    padded.set(1, 0, 0, .unknown); // neighbour chunk is not loaded
+    padded.set(0, 1, 0, .air); // open sky above
+
+    try testing.expect(faceVisible(.water, .unknown));
+    try testing.expect(faceVisible(.water, .air));
+    // An unknown neighbour must still cull a solid face, or the frontier would emit
+    // a wall of stone faces into nothing.
+    try testing.expect(!faceVisible(.stone, .unknown));
+    try testing.expect(!faceVisible(.stone, .stone));
 }

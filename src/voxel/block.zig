@@ -11,11 +11,15 @@ pub const BlockId = enum(u8) {
     wood,
     leaves,
     water,
+    /// Never stored in a chunk: the mesher's border sampler uses it for a cell whose
+    /// chunk is not loaded. It culls like stone for solid faces, but water treats it
+    /// as air, so the sea surface is not left with a one-block hole along a frontier.
+    unknown,
 
     /// Collides with the player and culls neighbour faces.
     pub fn isSolid(self: BlockId) bool {
         return switch (self) {
-            .air, .water => false,
+            .air, .water, .unknown => false,
             else => true,
         };
     }
@@ -31,7 +35,7 @@ pub const BlockId = enum(u8) {
 
     pub fn faceTextures(self: BlockId) FaceTextures {
         return switch (self) {
-            .air => .{ .top = LAYER_STONE, .side = LAYER_STONE, .bottom = LAYER_STONE },
+            .air, .unknown => .{ .top = LAYER_STONE, .side = LAYER_STONE, .bottom = LAYER_STONE },
             .stone => .{ .top = LAYER_STONE, .side = LAYER_STONE, .bottom = LAYER_STONE },
             .dirt => .{ .top = LAYER_DIRT, .side = LAYER_DIRT, .bottom = LAYER_DIRT },
             .grass => .{ .top = LAYER_GRASS_TOP, .side = LAYER_GRASS_SIDE, .bottom = LAYER_DIRT },
@@ -150,8 +154,12 @@ test "leaves are solid but not opaque" {
 }
 
 test "ids fit in a byte" {
-    try std.testing.expectEqual(@as(usize, 8), std.enums.values(BlockId).len);
+    // Nine values now, but only eight are storable: `unknown` is the mesher's
+    // marker for an unloaded neighbour and never reaches a chunk or a save file.
+    try std.testing.expectEqual(@as(usize, 9), std.enums.values(BlockId).len);
     try std.testing.expect(@sizeOf(BlockId) == 1);
+    try std.testing.expect(BlockId.unknown.isOpaque());
+    try std.testing.expect(!BlockId.unknown.isSolid());
 }
 
 test "grass uses grass top, grass side and dirt bottom" {
