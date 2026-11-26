@@ -398,24 +398,47 @@ fn emitEdge(
     const quad_n = cross(sub(pb, pa), sub(pc, pa));
     var avg: [3]f32 = .{ 0, 0, 0 };
     for (idx) |vi| avg = add(avg, verts[vi].normal);
-    // Split along a fixed diagonal for now. The shorter-diagonal variant was tried to fix the
-    // scattered blue specks (which the counters proved are NOT missing quads: skipped_missing_cell
-    // is 0), but the flipped branch reverses the quad's cycle and breaks the winding invariant that
-    // the closed-mesh tests rely on - 12 tests failed. Reverted; the correct version has to rotate
-    // the cycle rather than swap endpoints, and that needs its own pass.
-    if (dot(quad_n, avg) < 0) {
+    // Split along the SHORTER diagonal. These quads are generally non-planar, and splitting a
+    // twisted one along the long diagonal folds two triangles over each other, leaving a sliver
+    // where the background shows through - which is what the scattered blue specks were. The
+    // skip counters proved no quad is missing (skipped_missing_cell == 0), so the defect had to
+    // be here.
+    //
+    // Both splits keep the quad's cycle direction: AC gives (a,b,c)+(a,c,d), BD gives
+    // (b,c,d)+(b,d,a). Rotating the cycle this way preserves winding by construction; an earlier
+    // attempt swapped endpoints instead and reversed one triangle of the pair.
+    const d_ac = sub(verts[idx[2]].pos, verts[idx[0]].pos);
+    const d_bd = sub(verts[idx[3]].pos, verts[idx[1]].pos);
+    const split_bd = dot(d_ac, d_ac) > dot(d_bd, d_bd);
+    const backwards = dot(quad_n, avg) < 0;
+
+    if (!split_bd and !backwards) {
+        try tris.append(alloc, idx[0]);
+        try tris.append(alloc, idx[1]);
+        try tris.append(alloc, idx[2]);
+        try tris.append(alloc, idx[0]);
+        try tris.append(alloc, idx[2]);
+        try tris.append(alloc, idx[3]);
+    } else if (!split_bd and backwards) {
         try tris.append(alloc, idx[0]);
         try tris.append(alloc, idx[2]);
         try tris.append(alloc, idx[1]);
         try tris.append(alloc, idx[0]);
         try tris.append(alloc, idx[3]);
         try tris.append(alloc, idx[2]);
-    } else {
-        try tris.append(alloc, idx[0]);
+    } else if (split_bd and !backwards) {
         try tris.append(alloc, idx[1]);
         try tris.append(alloc, idx[2]);
+        try tris.append(alloc, idx[3]);
+        try tris.append(alloc, idx[1]);
+        try tris.append(alloc, idx[3]);
         try tris.append(alloc, idx[0]);
+    } else {
+        try tris.append(alloc, idx[1]);
+        try tris.append(alloc, idx[3]);
         try tris.append(alloc, idx[2]);
+        try tris.append(alloc, idx[1]);
+        try tris.append(alloc, idx[0]);
         try tris.append(alloc, idx[3]);
     }
 }
