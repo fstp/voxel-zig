@@ -54,6 +54,25 @@ pub const BlockId = enum(u8) {
 
 pub const Face = enum(u3) { px, nx, py, ny, pz, nz };
 
+/// Outward normal of a face, in the vertex ordering the mesher emits:
+/// px, nx, py, ny, pz, nz.
+///
+/// This is the single source of truth for the mapping. The chunk shader carries
+/// the same six-entry table (`normalFromFace`), because 3.3's whole point is to
+/// light geometry without growing the 24-byte vertex - the face id already rides
+/// in `_pad[0]`. Keep the two in step; the mesher test asserts this table and
+/// the mesher's own per-face normals agree.
+pub fn faceNormal(face: Face) [3]f32 {
+    return switch (face) {
+        .px => .{ 1, 0, 0 },
+        .nx => .{ -1, 0, 0 },
+        .py => .{ 0, 1, 0 },
+        .ny => .{ 0, -1, 0 },
+        .pz => .{ 0, 0, 1 },
+        .nz => .{ 0, 0, -1 },
+    };
+}
+
 pub const FaceTextures = struct { top: u8, side: u8, bottom: u8 };
 
 // Layer indices must match the order of `texture_paths`.

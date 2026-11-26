@@ -1,6 +1,7 @@
 const std = @import("std");
 const BlockId = @import("block.zig").BlockId;
 const Face = @import("block.zig").Face;
+const blocks = @import("block.zig");
 const coords = @import("coords.zig");
 const Chunk = @import("../world/chunk.zig").Chunk;
 
@@ -519,13 +520,12 @@ test "grass uses the top layer above and the side layer around" {
     try testing.expectEqual(@as(usize, 6), stats.quads);
 
     // Face order is px, nx, py, ny, pz, nz: the third quad is the top.
-    const block = @import("block.zig");
-    try testing.expectEqual(block.LAYER_GRASS_SIDE, buffers.vertices[0].layer); // +x
-    try testing.expectEqual(block.LAYER_GRASS_SIDE, buffers.vertices[4].layer); // -x
-    try testing.expectEqual(block.LAYER_GRASS_TOP, buffers.vertices[8].layer); // +y
-    try testing.expectEqual(block.LAYER_DIRT, buffers.vertices[12].layer); // -y
-    try testing.expectEqual(block.LAYER_GRASS_SIDE, buffers.vertices[16].layer); // +z
-    try testing.expectEqual(block.LAYER_GRASS_SIDE, buffers.vertices[20].layer); // -z
+    try testing.expectEqual(blocks.LAYER_GRASS_SIDE, buffers.vertices[0].layer); // +x
+    try testing.expectEqual(blocks.LAYER_GRASS_SIDE, buffers.vertices[4].layer); // -x
+    try testing.expectEqual(blocks.LAYER_GRASS_TOP, buffers.vertices[8].layer); // +y
+    try testing.expectEqual(blocks.LAYER_DIRT, buffers.vertices[12].layer); // -y
+    try testing.expectEqual(blocks.LAYER_GRASS_SIDE, buffers.vertices[16].layer); // +z
+    try testing.expectEqual(blocks.LAYER_GRASS_SIDE, buffers.vertices[20].layer); // -z
 }
 
 test "the top face sits at y + 1 and its UVs run up the face" {
@@ -691,4 +691,131 @@ test "fillFromChunk copies the body and chunkIsEmpty sees it" {
     try testing.expectEqual(BlockId.sand, padded.get(3, 7, 11));
     try testing.expectEqual(BlockId.wood, padded.get(31, 31, 31));
     try testing.expectEqual(BlockId.air, padded.get(-1, 7, 11));
+}
+
+// ------------------------------------------------------------ normals (3.3)
+
+/// Geometric normal of the triangle (v0, v1, v2), normalized.
+fn triangleNormal(v0: Vertex, v1: Vertex, v2: Vertex) [3]f32 {
+    const ax = v1.pos[0] - v0.pos[0];
+    const ay = v1.pos[1] - v0.pos[1];
+    const az = v1.pos[2] - v0.pos[2];
+    const bx = v2.pos[0] - v0.pos[0];
+    const by = v2.pos[1] - v0.pos[1];
+    const bz = v2.pos[2] - v0.pos[2];
+    const nx = ay * bz - az * by;
+    const ny = az * bx - ax * bz;
+    const nz = ax * by - ay * bx;
+    const len = std.math.sqrt(nx * nx + ny * ny + nz * nz);
+    return .{ nx / len, ny / len, nz / len };
+}
+
+fn dot(a: [3]f32, b: [3]f32) f32 {
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
+
+test "faceNormal is a unit outward normal with opposite pairs" {
+    const all = [_]blocks.Face{ .px, .nx, .py, .ny, .pz, .nz };
+    for (all) |face| {
+        const n = blocks.faceNormal(face);
+        const length_sq = n[0] * n[0] + n[1] * n[1] + n[2] * n[2];
+        try testing.expectApproxEqAbs(@as(f32, 1.0), length_sq, 1e-6);
+        // Exactly one axis set.
+        var nonzero: usize = 0;
+        for (n) |component| {
+            if (component != 0) nonzero += 1;
+        }
+        try testing.expectEqual(@as(usize, 1), nonzero);
+    }
+    // px + nx = 0, and so on: the six are three opposite pairs, all distinct.
+    for (0..3) |axis| {
+        const positive = blocks.faceNormal(all[axis * 2]);
+        const negative = blocks.faceNormal(all[axis * 2 + 1]);
+        try testing.expectApproxEqAbs(@as(f32, 0.0), positive[0] + negative[0], 1e-6);
+        try testing.expectApproxEqAbs(@as(f32, 0.0), positive[1] + negative[1], 1e-6);
+        try testing.expectApproxEqAbs(@as(f32, 0.0), positive[2] + negative[2], 1e-6);
+    }
+}
+
+test "the mesher's own normal table matches block.faceNormal" {
+    // Two tables exist for one mapping (the mesher needs a normal per face for
+    // its own bookkeeping, the shader needs the same six entries). This test is
+    // the thing that stops them drifting apart.
+    for (faces, face_order) |info, face| {
+        const expected = blocks.faceNormal(face);
+        // FaceInfo.normal is [3]i32, faceNormal returns [3]f32: compare as floats.
+        try testing.expectEqual(expected[0], @as(f32, @floatFromInt(info.normal[0])));
+        try testing.expectEqual(expected[1], @as(f32, @floatFromInt(info.normal[1])));
+        try testing.expectEqual(expected[2], @as(f32, @floatFromInt(info.normal[2])));
+    }
+}
+
+test "one block emits six distinct face ids, four vertices each" {
+    const padded = singleBlock(.stone);
+    const buffers = try Buffers.init(testing.allocator, 8);
+    defer buffers.deinit(testing.allocator);
+    const stats = try meshAll(&padded, buffers.vertices, buffers.indices);
+
+    var counts = [6]usize{ 0, 0, 0, 0, 0, 0 };
+    for (buffers.vertices[0..stats.vertices]) |vertex| {
+        const id = vertex._pad[0];
+        try testing.expect(id < 6);
+        counts[id] += 1;
+    }
+    for (counts) |count| try testing.expectEqual(@as(usize, 4), count);
+}
+
+test "every quad's winding agrees with its face id (naive)" {
+    // A cube plus a step, so more than one face direction is present and the
+    // geometry is not all axis-aligned to the origin.
+    var padded = PaddedBlocks.init();
+    padded.set(4, 4, 4, .stone);
+    padded.set(5, 4, 4, .stone);
+    padded.set(4, 5, 4, .stone);
+
+    // Three blocks reach 18 faces at most; 32 quads is comfortably enough.
+    const buffers = try Buffers.init(testing.allocator, 32);
+    defer buffers.deinit(testing.allocator);
+    const stats = try meshAll(&padded, buffers.vertices, buffers.indices);
+    try testing.expect(stats.quads > 0);
+
+    var quad: usize = 0;
+    while (quad < stats.quads) : (quad += 1) {
+        const v0 = buffers.vertices[quad * 4];
+        const v1 = buffers.vertices[quad * 4 + 1];
+        const v2 = buffers.vertices[quad * 4 + 2];
+        const id = v0._pad[0];
+        // All four vertices of a quad share the face id.
+        try testing.expectEqual(id, v1._pad[0]);
+        try testing.expectEqual(id, v2._pad[0]);
+        try testing.expectEqual(id, buffers.vertices[quad * 4 + 3]._pad[0]);
+
+        const geometric = triangleNormal(v0, v1, v2);
+        const expected = blocks.faceNormal(@enumFromInt(id));
+        try testing.expect(dot(geometric, expected) > 0.999);
+    }
+}
+
+test "greedy merged quads keep the right face id" {
+    // The 32x32 slab merges each face into a single quad; a merged quad must
+    // still carry the face id its geometry points along.
+    var padded = PaddedBlocks.init();
+    var z: i32 = 0;
+    while (z < coords.CHUNK_SIZE) : (z += 1) {
+        var x: i32 = 0;
+        while (x < coords.CHUNK_SIZE) : (x += 1) padded.set(x, 0, z, .stone);
+    }
+    const buffers = try Buffers.init(testing.allocator, 8);
+    defer buffers.deinit(testing.allocator);
+    const stats = try meshGreedy(&padded, buffers.vertices, buffers.indices);
+
+    var quad: usize = 0;
+    while (quad < stats.quads) : (quad += 1) {
+        const v0 = buffers.vertices[quad * 4];
+        const v1 = buffers.vertices[quad * 4 + 1];
+        const v2 = buffers.vertices[quad * 4 + 2];
+        const geometric = triangleNormal(v0, v1, v2);
+        const expected = blocks.faceNormal(@enumFromInt(v0._pad[0]));
+        try testing.expect(dot(geometric, expected) > 0.999);
+    }
 }

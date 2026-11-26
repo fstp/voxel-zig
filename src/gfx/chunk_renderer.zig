@@ -20,11 +20,22 @@ const VERT_SRC: [:0]const u8 =
     \\out float v_layer;
     \\out float v_ao;
     \\out float v_face;
+    \\out vec3 v_normal;
+    \\// Face id -> outward normal (3.3). Same order as block.faceNormal().
+    \\vec3 normalFromFace(float id) {
+    \\    if (id < 0.5) return vec3(1.0, 0.0, 0.0);
+    \\    if (id < 1.5) return vec3(-1.0, 0.0, 0.0);
+    \\    if (id < 2.5) return vec3(0.0, 1.0, 0.0);
+    \\    if (id < 3.5) return vec3(0.0, -1.0, 0.0);
+    \\    if (id < 4.5) return vec3(0.0, 0.0, 1.0);
+    \\    return vec3(0.0, 0.0, -1.0);
+    \\}
     \\void main() {
     \\    v_uv = a_uv;
     \\    v_layer = a_layer;
     \\    v_ao = a_ao;
     \\    v_face = a_face;
+    \\    v_normal = normalFromFace(a_face);
     \\    gl_Position = u_vp * u_model * vec4(a_pos, 1.0);
     \\}
 ;
@@ -33,10 +44,12 @@ const FRAG_SRC: [:0]const u8 =
     \\#version 460 core
     \\uniform sampler2DArray u_tex;
     \\uniform float u_shading; // 1 = AO + face shading, 0 = flat (A/B toggle)
+    \\uniform float u_normals; // 1 = debug view: colour by normal (F6)
     \\in vec2 v_uv;
     \\in float v_layer;
     \\in float v_ao;
     \\in float v_face;
+    \\in vec3 v_normal;
     \\out vec4 f_colour;
     \\
     \\// Cheap directional stand-in for lighting: face order is px, nx, py, ny, pz, nz.
@@ -53,6 +66,11 @@ const FRAG_SRC: [:0]const u8 =
     \\    if (c.a < 0.5) discard; // alpha cutout (leaves, ADR 0002)
     \\    // AO 0..3 -> 0.45..1.0, the concave-corner darkening from 1.12.
     \\    float ao = mix(0.45, 1.0, v_ao / 3.0);
+    \\    if (u_normals > 0.5) {
+    \\        // Debug: -1..1 mapped to 0..1, so +Y is green, +X red, +Z blue.
+    \\        f_colour = vec4(v_normal * 0.5 + 0.5, 1.0);
+    \\        return;
+    \\    }
     \\    float lit = mix(1.0, faceBrightness(v_face) * ao, u_shading);
     \\    f_colour = vec4(c.rgb * lit, c.a);
     \\}
@@ -87,11 +105,12 @@ pub const ChunkRenderer = struct {
     /// array on unit 0. Depth test and backface culling are enabled here so a
     /// missing GL state setup cannot produce the "see the inside of the world"
     /// bug.
-    pub fn begin(self: *ChunkRenderer, view_projection: Mat4, textures: *const TextureArray, shading: bool) void {
+    pub fn begin(self: *ChunkRenderer, view_projection: Mat4, textures: *const TextureArray, shading: bool, normals: bool) void {
         self.shader.use();
         self.shader.setMat4("u_vp", view_projection.m);
         self.shader.setInt("u_tex", 0);
         self.shader.setFloat("u_shading", if (shading) 1.0 else 0.0);
+        self.shader.setFloat("u_normals", if (normals) 1.0 else 0.0);
         textures.bind(0);
 
         gl.Enable(gl.DEPTH_TEST);

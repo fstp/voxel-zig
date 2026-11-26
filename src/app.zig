@@ -159,6 +159,7 @@ pub const App = struct {
     save_path: []const u8 = SAVE_PATH,
     show_wire: bool = false,
     shading: bool = true,
+    show_normals: bool = false,
     hud: Hud,
     show_hud: bool = true,
     t_stream_ms: f64 = 0,
@@ -713,6 +714,7 @@ pub const App = struct {
 
             if (self.input.debug_toggle) self.show_wire = !self.show_wire;
             if (self.input.shading_toggle) self.shading = !self.shading;
+            if (self.input.normals_toggle) self.show_normals = !self.show_normals;
             if (self.input.hud_toggle) self.show_hud = !self.show_hud;
             if (self.input.brush_cycle) self.cycleBrush();
             if (self.input.throw_pressed) self.throwBoxes(THROW_BATCH);
@@ -950,7 +952,7 @@ pub const App = struct {
         const vp = self.camera.viewProjection(aspect);
         const frustum = Frustum.fromViewProjection(vp);
 
-        self.chunk_renderer.begin(vp, &self.textures, self.shading);
+        self.chunk_renderer.begin(vp, &self.textures, self.shading, self.show_normals);
         var drawn: usize = 0;
         var it = self.meshes.valueIterator();
         while (it.next()) |mesh| {
@@ -1066,7 +1068,7 @@ pub const App = struct {
             self.hud.text(10, @as(f32, @floatFromInt(self.window.height)) - 44, text);
         }
 
-        const keys = "F1 HUD  F FLY  F3 BOXES  F4 SHADING  F5 SAVE";
+        const keys = "F1 HUD  F FLY  F3 BOXES  F4 SHADING  F6 NORMALS  F5 SAVE";
         self.hud.setColour(0.6, 0.6, 0.6);
         self.hud.text(10, @as(f32, @floatFromInt(self.window.height)) - 22, keys);
 

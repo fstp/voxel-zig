@@ -22,6 +22,8 @@ pub const Input = struct {
     save_toggle: bool = false,
     /// Set on the frame F1 goes down (debug HUD).
     hud_toggle: bool = false,
+    /// F6 shows the normal debug view (3.3).
+    normals_toggle: bool = false,
     /// Scripting: B cycles the brush, brackets resize it, ctrl+z/y undo/redo.
     brush_cycle: bool = false,
     throw_pressed: bool = false,
@@ -49,6 +51,7 @@ pub const Input = struct {
                     if (ev.key.key == sdl.SDLK_F3) self.debug_toggle = true;
                     if (ev.key.key == sdl.SDLK_F) self.fly_toggle = true;
                     if (ev.key.key == sdl.SDLK_F4) self.shading_toggle = true;
+                    if (ev.key.key == sdl.SDLK_F6) self.normals_toggle = true;
                     if (ev.key.key == sdl.SDLK_F5) self.save_toggle = true;
                     if (ev.key.key == sdl.SDLK_F1) self.hud_toggle = true;
                     if (ev.key.key == sdl.SDLK_B) self.brush_cycle = true;
@@ -91,6 +94,7 @@ pub const Input = struct {
         self.fly_toggle = false;
         self.debug_toggle = false;
         self.shading_toggle = false;
+        self.normals_toggle = false;
         self.save_toggle = false;
         self.hud_toggle = false;
         self.brush_cycle = false;
