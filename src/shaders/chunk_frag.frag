@@ -267,7 +267,11 @@ void main() {
 
     // u_sun_colour is scaled for the old Lambert path, so it carries an implicit
     // PI: multiply it back here rather than retuning the sky that shares it.
-    float visibility = sunVisibility(v_world, geoN);
+    // Water takes no shadow lookup: its map covers 230 blocks around the player, and
+    // the boundary of that coverage draws a straight line across an otherwise flat
+    // sea. Water gains almost nothing from self-shadowing, so skipping it costs the
+    // look nothing and removes the seam.
+    float visibility = is_water ? 1.0 : sunVisibility(v_world, geoN);
     vec3 direct = (diffuse + specular) * u_sun_colour * PI * ndl * visibility;
 
     vec3 hemi = mix(u_ambient_ground, u_ambient_sky, N.y * 0.5 + 0.5);
