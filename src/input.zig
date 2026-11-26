@@ -18,6 +18,10 @@ pub const Input = struct {
     fly_toggle: bool = false,
     /// Set on the frame F4 goes down (AO/face-shading toggle, for A/B shots).
     shading_toggle: bool = false,
+    /// Set on the frame F5 goes down (write the world save now).
+    save_toggle: bool = false,
+    /// Set on the frame F1 goes down (debug HUD).
+    hud_toggle: bool = false,
     /// One-frame mouse button edges: left = break, right = place, middle = pick.
     primary_click: bool = false,
     secondary_click: bool = false,
@@ -39,6 +43,8 @@ pub const Input = struct {
                     if (ev.key.key == sdl.SDLK_F3) self.debug_toggle = true;
                     if (ev.key.key == sdl.SDLK_F) self.fly_toggle = true;
                     if (ev.key.key == sdl.SDLK_F4) self.shading_toggle = true;
+                    if (ev.key.key == sdl.SDLK_F5) self.save_toggle = true;
+                    if (ev.key.key == sdl.SDLK_F1) self.hud_toggle = true;
                 },
                 sdl.SDL_EVENT_MOUSE_MOTION => {
                     self.mouse_dx += ev.motion.xrel;
@@ -72,6 +78,8 @@ pub const Input = struct {
         self.fly_toggle = false;
         self.debug_toggle = false;
         self.shading_toggle = false;
+        self.save_toggle = false;
+        self.hud_toggle = false;
     }
 
     pub fn setRelativeMouse(self: *Input, window: *Window, enabled: bool) void {

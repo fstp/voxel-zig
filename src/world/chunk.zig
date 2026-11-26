@@ -24,6 +24,9 @@ pub const Chunk = struct {
     /// Bumped on every block write. The mesher compares it before uploading so
     /// geometry built from stale blocks is discarded (ADR 0006).
     revision: u32 = 0,
+    /// Set by the first player edit. Only edited chunks are written to disk
+    /// (1.14); everything else is reproducible from the seed.
+    edited: bool = false,
 
     pub fn init(pos: ChunkPos) Chunk {
         return .{

@@ -40,6 +40,7 @@ pub const world = struct {
     pub const chunk_mesher = @import("world/chunk_mesher.zig");
     pub const terrain = @import("world/terrain.zig");
     pub const noise = @import("world/noise.zig");
+    pub const save = @import("world/save.zig");
 };
 
 pub const gfx = struct {
@@ -67,6 +68,7 @@ test {
     _ = @import("world/chunk_mesher.zig");
     _ = @import("world/terrain.zig");
     _ = @import("world/noise.zig");
+    _ = @import("world/save.zig");
     _ = @import("voxel/raycast.zig");
     _ = @import("player/player.zig");
     _ = @import("app.zig");

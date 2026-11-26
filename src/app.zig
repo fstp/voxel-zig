@@ -7,6 +7,7 @@ const Input = @import("input.zig").Input;
 const Camera = @import("camera.zig").Camera;
 const TextureArray = @import("gfx/texture.zig").TextureArray;
 const ChunkRenderer = @import("gfx/chunk_renderer.zig").ChunkRenderer;
+const Hud = @import("gfx/hud.zig").Hud;
 const Frustum = @import("math/frustum.zig").Frustum;
 const Aabb = @import("math/aabb.zig").Aabb;
 const Vec3 = @import("math/vec.zig").Vec3;
@@ -14,6 +15,7 @@ const World = @import("world/world.zig").World;
 const chunk_mesher = @import("world/chunk_mesher.zig");
 const mesher = @import("voxel/mesher.zig");
 const terrain = @import("world/terrain.zig");
+const save = @import("world/save.zig");
 const block = @import("voxel/block.zig");
 const coords = @import("voxel/coords.zig");
 const raycast = @import("voxel/raycast.zig");
@@ -42,6 +44,7 @@ pub const PRELOAD_RADIUS: i32 = 2;
 pub const PRELOAD_MESH_RADIUS: i32 = 1;
 
 pub const REACH: f32 = 6.0;
+pub const SAVE_PATH = "world.vxz";
 pub const HOTBAR = [_]block.BlockId{ .stone, .dirt, .grass, .sand, .wood, .leaves };
 
 pub const Step = struct {
@@ -134,8 +137,17 @@ pub const App = struct {
     jobs_run: usize = 0,
     jobs_dropped: usize = 0,
     seed: u32,
+    saved: save.Loaded,
+    save_path: []const u8 = SAVE_PATH,
     show_wire: bool = false,
     shading: bool = true,
+    hud: Hud,
+    show_hud: bool = true,
+    t_stream_ms: f64 = 0,
+    t_draw_ms: f64 = 0,
+    t_hud_ms: f64 = 0,
+    frame_ms: f64 = 0,
+    worst_frame_ms: f64 = 0,
     highlight: ?raycast.Hit = null,
     selected: block.BlockId = .stone,
     edits: usize = 0,
@@ -169,6 +181,9 @@ pub const App = struct {
         var chunk_renderer = try ChunkRenderer.init();
         errdefer chunk_renderer.deinit();
 
+        var hud = try Hud.init();
+        errdefer hud.deinit();
+
         gl.gl.Enable(gl.gl.DEPTH_TEST);
         gl.gl.Enable(gl.gl.CULL_FACE);
         gl.gl.CullFace(gl.gl.BACK);
@@ -176,6 +191,14 @@ pub const App = struct {
 
         var input = Input.init();
         input.setRelativeMouse(&window, true);
+
+        // 1.14: edits survive a restart. A missing file is a fresh world, and a
+        // saved chunk is never regenerated over.
+        const load_start = std.Io.Timestamp.now(io, .awake);
+        var saved = try save.load(gpa, io, SAVE_PATH);
+        errdefer saved.deinit();
+        const load_ms = @as(f64, @floatFromInt(std.Io.Timestamp.now(io, .awake).nanoseconds - load_start.nanoseconds)) / 1e6;
+        std.debug.print("save: {d} edited chunks loaded in {d:.2} ms from {s}\n", .{ saved.count(), load_ms, SAVE_PATH });
 
         const spawn_x: i32 = 144;
         const spawn_z: i32 = 144;
@@ -187,7 +210,7 @@ pub const App = struct {
             .frame_arena = std.heap.ArenaAllocator.init(gpa),
             .camera = .{ .fov_y_deg = 70, .near = 0.1, .far = 1000 },
             .player = .{
-                .position = Vec3.init(@floatFromInt(spawn_x), @floatFromInt(surface + 3), @floatFromInt(spawn_z)),
+                .position = if (saved.count() > 0) saved.player else Vec3.init(@floatFromInt(spawn_x), @floatFromInt(surface + 3), @floatFromInt(spawn_z)),
                 .yaw = 0,
                 .pitch = -0.2,
             },
@@ -195,8 +218,10 @@ pub const App = struct {
             .debug = debug,
             .textures = textures,
             .seed = config.seed,
+            .saved = saved,
             .world = world,
             .chunk_renderer = chunk_renderer,
+            .hud = hud,
             .meshes = .{},
             .scratch_vertices = try gpa.alloc(mesher.Vertex, INITIAL_QUAD_CAPACITY * 4),
             .scratch_indices = try gpa.alloc(u32, INITIAL_QUAD_CAPACITY * 6),
@@ -218,13 +243,28 @@ pub const App = struct {
         return app;
     }
 
+    fn saveWorld(self: *App) void {
+        const start = std.Io.Timestamp.now(self.io, .awake);
+        const stats = save.save(self.allocator, self.io, self.save_path, &self.world, self.seed, self.player.position) catch |err| {
+            std.debug.print("save failed: {s}\n", .{@errorName(err)});
+            return;
+        };
+        const ms = @as(f64, @floatFromInt(std.Io.Timestamp.now(self.io, .awake).nanoseconds - start.nanoseconds)) / 1e6;
+        std.debug.print(
+            "save: wrote {d} chunks, {d} KB raw -> {d} KB packed ({d:.1}x) in {d:.2} ms to {s}\n",
+            .{ stats.chunks, stats.raw_bytes / 1024, stats.packed_bytes / 1024, stats.ratio(), ms, self.save_path },
+        );
+    }
+
     pub fn deinit(self: *App) void {
         var it = self.meshes.valueIterator();
         while (it.next()) |mesh| self.chunk_renderer.destroyMesh(mesh);
         self.meshes.deinit(self.allocator);
         self.allocator.free(self.scratch_vertices);
         self.allocator.free(self.scratch_indices);
+        self.hud.deinit();
         self.chunk_renderer.deinit();
+        self.saved.deinit();
         self.world.deinit();
         self.textures.deinit();
         self.debug.deinit();
@@ -274,7 +314,14 @@ pub const App = struct {
     fn generateChunk(self: *App, pos: ChunkPos) !void {
         if (self.world.isLoaded(pos)) return;
         const chunk = try self.world.getOrCreateChunk(pos);
-        terrain.generateChunk(chunk, self.seed);
+        if (self.saved.savedBlocks(pos)) |blocks| {
+            chunk.blocks = blocks.*;
+            chunk.state = .ready;
+            chunk.revision +%= 1;
+            chunk.edited = true;
+        } else {
+            terrain.generateChunk(chunk, self.seed);
+        }
         // The frontier faces of the neighbours open up now that this chunk
         // exists, so they owe a rebuild (ADR 0004's remesh-on-arrival rule).
         self.markNeighboursDirty(pos);
@@ -402,7 +449,14 @@ pub const App = struct {
                 }
                 if (self.world.isLoaded(job.pos)) continue;
                 const chunk = self.world.getOrCreateChunk(job.pos) catch continue;
-                chunk.blocks = job.blocks;
+                // A saved chunk wins over the freshly generated one: the world
+                // must come back exactly as it was left.
+                if (self.saved.savedBlocks(job.pos)) |blocks| {
+                    chunk.blocks = blocks.*;
+                    chunk.edited = true;
+                } else {
+                    chunk.blocks = job.blocks;
+                }
                 chunk.state = .ready;
                 chunk.revision +%= 1;
                 self.markNeighboursDirty(job.pos);
@@ -532,6 +586,7 @@ pub const App = struct {
         while (true) {
             self.input.pump(&self.window);
             if (self.input.quit) break;
+            if (self.input.save_toggle) self.saveWorld();
 
             const now = std.Io.Timestamp.now(self.io, .awake);
             const dt_ns = now.nanoseconds - last.nanoseconds;
@@ -540,6 +595,7 @@ pub const App = struct {
 
             if (self.input.debug_toggle) self.show_wire = !self.show_wire;
             if (self.input.shading_toggle) self.shading = !self.shading;
+            if (self.input.hud_toggle) self.show_hud = !self.show_hud;
             if (self.input.fly_toggle) self.player.flying = !self.player.flying;
 
             self.player.yaw += self.input.mouse_dx * Camera.SENSITIVITY;
@@ -564,7 +620,9 @@ pub const App = struct {
                 self.sim_ticks += 1;
             }
 
+            const stream_start = std.Io.Timestamp.now(self.io, .awake);
             self.streamChunks();
+            self.t_stream_ms = @as(f64, @floatFromInt(std.Io.Timestamp.now(self.io, .awake).nanoseconds - stream_start.nanoseconds)) / 1e6;
 
             self.updateHighlight();
             if (self.input.primary_click) self.breakBlock();
@@ -573,7 +631,9 @@ pub const App = struct {
             self.input.endFrame();
 
             _ = self.frame_arena.reset(.retain_capacity);
+            const draw_start = std.Io.Timestamp.now(self.io, .awake);
             drawn = self.render();
+            self.t_draw_ms = @as(f64, @floatFromInt(std.Io.Timestamp.now(self.io, .awake).nanoseconds - draw_start.nanoseconds)) / 1e6;
             self.window.swap();
 
             if (first_frame) {
@@ -586,6 +646,8 @@ pub const App = struct {
             frames += 1;
             const frame_ms = @as(f64, @floatFromInt(dt_ns)) / 1e6;
             worst_ms = @max(worst_ms, frame_ms);
+            self.frame_ms = frame_ms;
+            self.worst_frame_ms = worst_ms;
 
             const report_dt_ns = now.nanoseconds - report_at.nanoseconds;
             if (report_dt_ns >= std.time.ns_per_s) {
@@ -615,6 +677,9 @@ pub const App = struct {
                 report_at = now;
             }
         }
+
+        // Save on exit so a restart resumes the edited chunks.
+        self.saveWorld();
     }
 
     fn hotbarIndex(self: *App) usize {
@@ -707,7 +772,70 @@ pub const App = struct {
                 self.debug.box(mesh.bounds, .{ 0.9, 0.85, 0.4 });
             }
         }
+
+        if (self.show_hud) {
+            const hud_start = std.Io.Timestamp.now(self.io, .awake);
+            self.drawHud(drawn);
+            self.t_hud_ms = @as(f64, @floatFromInt(std.Io.Timestamp.now(self.io, .awake).nanoseconds - hud_start.nanoseconds)) / 1e6;
+        }
         return drawn;
+    }
+
+    /// 1.15 overlay: fps, frame time, chunk and geometry counts, the streaming
+    /// and draw timings, a rough memory figure and the player's position.
+    fn drawHud(self: *App, drawn: usize) void {
+        self.hud.begin(self.window.width, self.window.height);
+        self.hud.scale = 2.0;
+
+        const world_mb = @as(f64, @floatFromInt(self.world.count())) * @as(f64, @floatFromInt(coords.CHUNK_VOLUME)) / (1024.0 * 1024.0);
+        const mesh_mb = @as(f64, @floatFromInt(self.total_quads)) * 120.0 / (1024.0 * 1024.0);
+
+        var buffer: [128]u8 = undefined;
+        var line: usize = 0;
+
+        self.hud.setColour(1.0, 1.0, 0.6);
+        if (std.fmt.bufPrint(&buffer, "FPS {d:.1}", .{if (self.frame_ms > 0) 1000.0 / self.frame_ms else 0})) |text| {
+            self.hud.text(10, 8, text);
+        } else |_| {}
+        if (std.fmt.bufPrint(&buffer, "FRAME {d:.2} MS  WORST {d:.2} MS", .{ self.frame_ms, self.worst_frame_ms })) |text| {
+            self.hud.text(10, 26, text);
+        } else |_| {}
+        line = 2;
+
+        const counts = std.fmt.bufPrint(&buffer, "CHUNKS {d} LOADED {d} MESHED {d} DRAWN", .{ self.world.count(), self.meshed_chunks, drawn }) catch "";
+        self.hud.setColour(0.85, 0.95, 1.0);
+        self.hud.text(10, 8 + @as(f32, @floatFromInt(line)) * 18, counts);
+        line += 1;
+
+        const geometry = std.fmt.bufPrint(&buffer, "QUADS {d} TRIS {d}", .{ self.total_quads, self.total_quads * 2 }) catch "";
+        self.hud.text(10, 8 + @as(f32, @floatFromInt(line)) * 18, geometry);
+        line += 1;
+
+        const mem = std.fmt.bufPrint(&buffer, "MEM WORLD {d:.1}MB MESH {d:.1}MB JOBS {d}", .{ world_mb, mesh_mb, self.jobs_run }) catch "";
+        self.hud.text(10, 8 + @as(f32, @floatFromInt(line)) * 18, mem);
+        line += 1;
+
+        const timings = std.fmt.bufPrint(&buffer, "STREAM {d:.2} DRAW {d:.2} HUD {d:.2} MS", .{ self.t_stream_ms, self.t_draw_ms, self.t_hud_ms }) catch "";
+        self.hud.setColour(0.7, 1.0, 0.7);
+        self.hud.text(10, 8 + @as(f32, @floatFromInt(line)) * 18, timings);
+        line += 1;
+
+        const where = std.fmt.bufPrint(&buffer, "POS {d:.1} {d:.1} {d:.1} {s}{s}", .{
+            self.player.position.x,
+            self.player.position.y,
+            self.player.position.z,
+            if (self.player.flying) "FLY " else "WALK ",
+            if (self.player.on_ground) "GROUND" else "AIR",
+        }) catch "";
+        self.hud.setColour(0.8, 0.8, 0.8);
+        self.hud.text(10, 8 + @as(f32, @floatFromInt(line)) * 18, where);
+        line += 1;
+
+        const keys = "F1 HUD  F FLY  F3 BOXES  F4 SHADING  F5 SAVE";
+        self.hud.setColour(0.6, 0.6, 0.6);
+        self.hud.text(10, @as(f32, @floatFromInt(self.window.height)) - 22, keys);
+
+        self.hud.end();
     }
 };
 

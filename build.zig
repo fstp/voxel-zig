@@ -78,4 +78,19 @@ pub fn build(b: *std.Build) void {
     });
     const bench_run = b.addRunArtifact(bench_exe);
     bench_step.dependOn(&bench_run.step);
+
+    // Save/load benchmark (1.14): 100 edited chunks, RLE packed.
+    const save_bench_step = b.step("bench-save", "Run the save/load benchmark (use -Doptimize=ReleaseFast)");
+    const save_bench_exe = b.addExecutable(.{
+        .name = "save-bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/bench/save_bench.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "voxel_zig", .module = engine },
+            },
+        }),
+    });
+    save_bench_step.dependOn(&b.addRunArtifact(save_bench_exe).step);
 }

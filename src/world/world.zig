@@ -84,6 +84,7 @@ pub const World = struct {
         if (chunk.getBlock(local.x, local.y, local.z) == block) return false;
 
         chunk.setBlock(local.x, local.y, local.z, block);
+        chunk.edited = true;
         self.edits += 1;
 
         // A block on a chunk boundary contributes faces to the neighbour's
