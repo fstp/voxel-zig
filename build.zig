@@ -60,7 +60,26 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    b.installArtifact(dc_bench);
     const dc_step = b.step("dc-bench", "Run the dual-contouring benchmark");
+
+    const dc_view = b.addExecutable(.{
+        .name = "dc-view",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/tools/dc_view.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "voxel_zig", .module = engine },
+                .{ .name = "sdl3", .module = sdl.module("sdl3") },
+                .{ .name = "gl", .module = gl },
+            },
+        }),
+    });
+    b.installArtifact(dc_view);
+    const view_step = b.step("dc-view", "Run the dual-contouring viewer");
+    const view_run = b.addRunArtifact(dc_view);
+    view_step.dependOn(&view_run.step);
     const dc_run = b.addRunArtifact(dc_bench);
     dc_step.dependOn(&dc_run.step);
 

@@ -57,6 +57,10 @@ pub const world = struct {
     pub const undo = @import("world/undo.zig");
 };
 
+/// The GL ProcTable owner: any code outside the engine that draws must call `init()`
+/// after the context exists, or every entry point is a null pointer.
+pub const gl = @import("gfx/gl.zig");
+
 pub const gfx = struct {
     pub const Window = @import("gfx/window.zig").Window;
     pub const DebugDraw = @import("gfx/debug_draw.zig").DebugDraw;
