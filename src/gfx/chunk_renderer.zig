@@ -22,6 +22,11 @@ const VERT_SRC: [:0]const u8 =
     \\layout(location = 4) in float a_face;
     \\uniform mat4 u_vp;
     \\uniform mat4 u_model;
+    \\uniform float u_time;
+    \\uniform float u_water_layer;
+    \\uniform float u_wave_amp;
+    \\uniform float u_waves;
+    \\out float v_wave;
     \\out vec2 v_uv;
     \\out float v_layer;
     \\out float v_ao;
@@ -37,14 +42,30 @@ const VERT_SRC: [:0]const u8 =
     \\    if (id < 4.5) return vec3(0.0, 0.0, 1.0);
     \\    return vec3(0.0, 0.0, -1.0);
     \\}
+    \\// Two crossing swells plus a ripple, sampled in WORLD space: neighbouring water
+    \\// quads share their corner positions, so a position-only function keeps the
+    \\// surface watertight however many chunks meet at that corner.
+    \\float waveHeight(vec2 p, float t) {
+    \\    return sin(p.x * 0.19 + t * 1.15) * 0.55
+    \\         + sin(p.y * 0.24 - t * 0.95) * 0.35
+    \\         + sin((p.x + p.y) * 0.43 + t * 1.8) * 0.15;
+    \\}
+    \\
     \\void main() {
     \\    v_uv = a_uv;
     \\    v_layer = a_layer;
     \\    v_ao = a_ao;
     \\    v_face = a_face;
     \\    v_normal = normalFromFace(a_face);
-    \\    v_world = (u_model * vec4(a_pos, 1.0)).xyz;
-    \\    gl_Position = u_vp * u_model * vec4(a_pos, 1.0);
+    \\    vec3 world = (u_model * vec4(a_pos, 1.0)).xyz;
+    \\    float height = 0.0;
+    \\    if (u_waves > 0.5 && abs(a_layer - u_water_layer) < 0.5) {
+    \\        height = waveHeight(world.xz, u_time) * u_wave_amp;
+    \\        world.y += height;
+    \\    }
+    \\    v_wave = height;
+    \\    v_world = world;
+    \\    gl_Position = u_vp * vec4(world, 1.0);
     \\}
 ;
 
@@ -70,23 +91,43 @@ const FRAG_SRC: [:0]const u8 =
     \\uniform float u_shadow_normal_offset;
     \\uniform float u_shadow_pcf_radius; // in texels (3.12: soft edges)
     \\uniform int u_shadow_kernel;       // 1 = 3x3, 2 = 5x5 taps (hard mode)
-\\uniform float u_shadow_uv_per_block;   // uv units per block in light space
-\\uniform float u_shadow_depth_range;    // blocks across the 0..1 depth range
-\\uniform float u_shadow_light_size;     // artistic sun size, drives the penumbra
-\\uniform int u_shadow_quality;          // 0 = hard PCF, 1 = PCSS
+    \\uniform float u_shadow_uv_per_block;   // uv units per block in light space
+    \\uniform float u_shadow_depth_range;    // blocks across the 0..1 depth range
+    \\uniform float u_shadow_light_size;     // artistic sun size, drives the penumbra
+    \\uniform int u_shadow_quality;          // 0 = hard PCF, 1 = PCSS
     \\uniform float u_shadows_enabled;
-\\uniform vec4 u_material[8];   // per layer: x roughness, y metallic, z diffuse, w unused
-\\uniform samplerCube u_env;    // sky probe (4.4), unit 2
-\\uniform sampler2DArray u_normal; // tangent-space normals (4.7), unit 3
-\\uniform sampler2DArray u_rough;  // per-texel roughness (4.7), unit 4
-\\uniform float u_env_max_mip;
+    \\uniform vec4 u_material[8];   // per layer: x roughness, y metallic, z diffuse, w unused
+    \\uniform samplerCube u_env;    // sky probe (4.4), unit 2
+    \\uniform sampler2DArray u_normal; // tangent-space normals (4.7), unit 3
+    \\uniform sampler2DArray u_rough;  // per-texel roughness (4.7), unit 4
+    \\uniform float u_env_max_mip;
     \\in vec2 v_uv;
     \\in float v_layer;
     \\in float v_ao;
     \\in float v_face;
     \\in vec3 v_normal;
     \\in vec3 v_world;
+    \\in float v_wave;
+    \\uniform float u_water_layer_f;
+    \\uniform float u_foam;
+    \\uniform float u_time;
+    \\uniform float u_wave_amp;
+    \\uniform float u_waves;
     \\out vec4 f_colour;
+    \\
+    \\float hash21(vec2 p) {
+    \\    p = fract(p * vec2(0.1031, 0.1030));
+    \\    p += dot(p, p.yx + 33.33);
+    \\    return fract((p.x + p.y) * p.x);
+    \\}
+    \\
+    \\float vnoise2(vec2 p) {
+    \\    vec2 i = floor(p);
+    \\    vec2 f = fract(p);
+    \\    f = f * f * (3.0 - 2.0 * f);
+    \\    return mix(mix(hash21(i), hash21(i + vec2(1, 0)), f.x),
+    \\               mix(hash21(i + vec2(0, 1)), hash21(i + vec2(1, 1)), f.x), f.y);
+    \\}
     \\
     \\// Cheap directional stand-in for lighting: face order is px, nx, py, ny, pz, nz.
     \\float faceBrightness(float id) {
@@ -240,7 +281,19 @@ const FRAG_SRC: [:0]const u8 =
     \\    // out of the face normal - no tangent attribute, no vertex change.
     \\    vec3 T = (abs(geoN.y) > 0.5) ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 0.0, 1.0);
     \\    vec3 B = cross(geoN, T);
-    \\    vec3 tangent_normal = texture(u_normal, vec3(uv, v_layer)).rgb * 2.0 - 1.0;
+    \\    bool is_water = abs(v_layer - u_water_layer_f) < 0.5;
+    \\    vec3 tangent_normal;
+    \\    if (is_water && u_waves > 0.5) {
+    \\        // Two copies of the water normal map drifting at different speeds and
+    \\        // scales: the sum never repeats on screen even though each layer tiles.
+    \\        vec2 uv1 = uv + vec2(u_time * 0.035, u_time * 0.021);
+    \\        vec2 uv2 = uv * 1.7 + vec2(-u_time * 0.026, u_time * 0.018);
+    \\        vec3 n1 = texture(u_normal, vec3(uv1, v_layer)).rgb * 2.0 - 1.0;
+    \\        vec3 n2 = texture(u_normal, vec3(uv2, v_layer)).rgb * 2.0 - 1.0;
+    \\        tangent_normal = vec3((n1.xy + n2.xy) * 0.9, 1.0);
+    \\    } else {
+    \\        tangent_normal = texture(u_normal, vec3(uv, v_layer)).rgb * 2.0 - 1.0;
+    \\    }
     \\    // Photo normals at one block per metre are far stronger than the surface
     \\    // they describe; half strength reads as relief instead of wet tarmac.
     \\    tangent_normal = vec3(tangent_normal.xy * 0.55, tangent_normal.z);
@@ -288,6 +341,19 @@ const FRAG_SRC: [:0]const u8 =
     \\    vec3 legacy = vec3(faceBrightness(v_face) * ao);
     \\    vec3 rgb = mix(c.rgb * lit, c.rgb * legacy, u_legacy);
     \\
+    \\    // 5.6: foam rides the crests. Height comes from the same wave function the
+    \\    // vertex stage displaced with, so the white caps sit exactly where the water
+    \\    // is highest; the noise breaks the line so it does not read as a contour.
+    \\    if (is_water && u_foam > 0.5 && u_waves > 0.5) {
+    \\        // Only the very top of the swell: a low threshold put foam on a third
+    \\        // of the sea, which read as static speckle instead of breaking crests.
+    \\        float crest = smoothstep(0.72, 1.00, v_wave / max(u_wave_amp, 1e-3));
+    \\        float n = vnoise2(v_world.xz * 0.40 + vec2(u_time * 0.20, -u_time * 0.13));
+    \\        float foam = crest * smoothstep(0.48, 0.78, n) * 0.8;
+    \\        vec3 foam_colour = vec3(0.90, 0.94, 1.0) * (u_sun_colour * 0.8 + u_ambient_sky * 0.7);
+    \\        rgb = mix(rgb, foam_colour, foam);
+    \\    }
+    \\
     \\    // Distance fog, in linear space, coloured by the same sky gradient the sky
     \\    // pass draws (3.7). Duplicated on purpose: two lines and one pair of
     \\    // uniforms is cheaper than a texture lookup, and the uniforms come from
@@ -303,6 +369,7 @@ const FRAG_SRC: [:0]const u8 =
     \\    f_colour = vec4(rgb, c.a);
     \\}
 ;
+
 
 pub const ChunkRenderer = struct {
     shader: Shader,
@@ -363,6 +430,12 @@ pub const ChunkRenderer = struct {
         shadow_depth_range: f32,
         shadow_light_size: f32,
         shadow_quality: i32,
+        /// 5.6: water animation.
+        time: f32,
+        water_layer: f32,
+        wave_amp: f32,
+        waves: bool,
+        foam: bool,
         /// 4.4: the sky probe and the highest mip a roughness-1 surface samples.
         env_texture: gl.uint,
         env_max_mip: f32,
@@ -429,6 +502,12 @@ pub const ChunkRenderer = struct {
         self.shader.setFloat("u_shadow_depth_range", params.shadow_depth_range);
         self.shader.setFloat("u_shadow_light_size", params.shadow_light_size);
         self.shader.setInt("u_shadow_quality", params.shadow_quality);
+        self.shader.setFloat("u_time", params.time);
+        self.shader.setFloat("u_water_layer", params.water_layer);
+        self.shader.setFloat("u_water_layer_f", params.water_layer);
+        self.shader.setFloat("u_wave_amp", params.wave_amp);
+        self.shader.setFloat("u_waves", if (params.waves) 1.0 else 0.0);
+        self.shader.setFloat("u_foam", if (params.foam) 1.0 else 0.0);
 
         gl.Enable(gl.DEPTH_TEST);
         // Explicit, not inherited: the sky pass runs with depth writes off and a

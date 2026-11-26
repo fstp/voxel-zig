@@ -202,6 +202,10 @@ pub const App = struct {
     shadows_enabled: bool = true,
     soft_shadows: bool = true,
     clouds_enabled: bool = true,
+    /// 5.6: water animation.
+    waves: bool = true,
+    foam: bool = true,
+    wave_time: f32 = 0,
     /// Wind offset in cloud space, advanced on the fixed step (3.11).
     cloud_shift: Vec3 = Vec3.init(0, 0, 0),
     bodies: physics.Bodies,
@@ -751,6 +755,7 @@ pub const App = struct {
         self.player.update(&self.world, @floatCast(dt), self.wishVector(), up, sprint);
         self.bodies.step(&self.world, @floatCast(dt));
         self.sun.update(@floatCast(dt));
+        self.wave_time += @floatCast(dt);
         // 4.3: eye adaptation. The exposure control and the ACES toe together
         // left night at p95 = 4/255 - technically visible, practically black.
         // Night gets up to 6x the exposure; daylight is untouched (daylight()
@@ -840,6 +845,7 @@ pub const App = struct {
             if (self.input.tonemap_toggle) self.post.tonemap = !self.post.tonemap;
             if (self.input.ssao_toggle) self.ssao.enabled = !self.ssao.enabled;
             if (self.input.fxaa_toggle) self.post.fxaa = !self.post.fxaa;
+            if (self.input.waves_toggle) self.waves = !self.waves;
             // 4.1: exposure in 1/8-stop-ish steps, clamped so a held key cannot
             // drive the image to black or to white.
             if (self.input.exposure_down) self.post.exposure_base = @max(0.10, self.post.exposure_base * 0.92);
@@ -1178,6 +1184,13 @@ pub const App = struct {
             // block touches the ground and 8 where it floats a few blocks up.
             .shadow_light_size = 1.2,
             .shadow_quality = if (self.soft_shadows) 1 else 0,
+            // 5.6: amplitude in blocks; 0.22 keeps the displaced surface inside
+            // the water block so the shoreline never opens up.
+            .time = self.wave_time,
+            .water_layer = @floatFromInt(block.LAYER_WATER),
+            .wave_amp = 0.34,
+            .waves = self.waves,
+            .foam = self.foam,
         });
         var drawn: usize = 0;
         var it = self.meshes.valueIterator();

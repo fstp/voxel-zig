@@ -44,6 +44,8 @@ pub const Input = struct {
     ssao_toggle: bool = false,
     /// F13 toggles FXAA (5.2).
     fxaa_toggle: bool = false,
+    /// F14 toggles the animated water surface (5.6).
+    waves_toggle: bool = false,
     /// 3.10: O pins the sun at an explicit angle or hands it back to the clock;
     /// the arrow keys move a pinned sun.
     sun_pin_toggle: bool = false,
@@ -87,6 +89,7 @@ pub const Input = struct {
                     if (ev.key.key == sdl.SDLK_EQUALS) self.exposure_up = true;
                     if (ev.key.key == sdl.SDLK_F12) self.ssao_toggle = true;
                     if (ev.key.key == sdl.SDLK_F13) self.fxaa_toggle = true;
+                    if (ev.key.key == sdl.SDLK_F14) self.waves_toggle = true;
                     if (ev.key.key == sdl.SDLK_O) self.sun_pin_toggle = true;
                     if (ev.key.key == sdl.SDLK_LEFT) self.sun_azimuth_delta -= 2.0;
                     if (ev.key.key == sdl.SDLK_RIGHT) self.sun_azimuth_delta += 2.0;
@@ -153,6 +156,7 @@ pub const Input = struct {
         self.exposure_up = false;
         self.ssao_toggle = false;
         self.fxaa_toggle = false;
+        self.waves_toggle = false;
         self.sun_pin_toggle = false;
         self.sun_azimuth_delta = 0;
         self.sun_elevation_delta = 0;
