@@ -85,7 +85,10 @@ pub const LAYER_WOOD: u8 = 5;
 pub const LAYER_LEAVES: u8 = 6;
 pub const LAYER_WATER: u8 = 7;
 
-pub const TEXTURE_SIZE: u32 = 16;
+/// Edge length of every block texture, in pixels. 16 was the procedural set; the
+/// CC0 photo set is 256, which is what stops the blocks looking like coloured
+/// noise at arm's length. One number, because the array layers are square.
+pub const TEXTURE_SIZE: u32 = 256;
 
 /// One PNG per texture layer, loaded into a single GL_TEXTURE_2D_ARRAY
 /// (ADR 0002). The order defines the layer indices above.

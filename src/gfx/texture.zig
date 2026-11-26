@@ -2,8 +2,9 @@ const std = @import("std");
 const gl = @import("gl");
 const stb = @import("stb.zig");
 
-/// One GL_TEXTURE_2D_ARRAY holding every block texture (ADR 0002): one 16x16
-/// RGBA8 layer per PNG, NEAREST magnification, mipmapped minification.
+/// One GL_TEXTURE_2D_ARRAY holding every block texture (ADR 0002): one RGBA8
+/// layer per PNG at `block.TEXTURE_SIZE`, linear magnification, mipmapped
+/// minification.
 pub const TextureArray = struct {
     texture: gl.uint,
     size: u32,
@@ -52,8 +53,11 @@ pub const TextureArray = struct {
             gl.UNSIGNED_BYTE,
             pixels.ptr,
         );
-        gl.TexParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MIN_FILTER, @intCast(gl.NEAREST_MIPMAP_LINEAR));
-        gl.TexParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MAG_FILTER, @intCast(gl.NEAREST));
+        gl.TexParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MIN_FILTER, @intCast(gl.LINEAR_MIPMAP_LINEAR));
+        // LINEAR magnification: at 256 px the photo detail is the point, and NEAREST
+    // turned every texel into a visible square. Mipmapping stays on so distance
+    // still averages instead of shimmering.
+    gl.TexParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MAG_FILTER, @intCast(gl.LINEAR));
         // REPEAT, not CLAMP: the greedy mesher (2.1) emits one quad per run of
         // blocks with UVs up to (width, height), and the tile has to repeat.
         gl.TexParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_S, @intCast(gl.REPEAT));
