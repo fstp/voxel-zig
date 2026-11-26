@@ -46,16 +46,58 @@ fn buildField(alloc: std.mem.Allocator, cx: i32, cz: i32) ![]f32 {
     return vals;
 }
 
+const Coloured = extern struct {
+    pos: [3]f32,
+    normal: [3]f32,
+    colour: [3]f32,
+};
+
+/// IQ-style cosine palette: a + b*cos(2*pi*(c*t + d)). Four vectors give a whole material
+/// range with no texture and no data.
+fn palette(t: f32, a: [3]f32, b: [3]f32, c: [3]f32, d: [3]f32) [3]f32 {
+    var out: [3]f32 = undefined;
+    inline for (0..3) |i| {
+        out[i] = a[i] + b[i] * @cos(6.2831853 * (c[i] * t + d[i]));
+    }
+    return out;
+}
+
+/// Material from geometry alone: slope picks rock, height picks sand/grass/alpine tints.
+/// A pure function of world position and normal, which is what keeps it stable across chunk
+/// borders and future LOD levels.
+fn materialColour(pos: [3]f32, nrm: [3]f32, out_rock: *f32) [3]f32 {
+    const slope: f32 = 1.0 - @abs(nrm[1]);
+    const h: f32 = (pos[1] - 45.0) / 30.0;
+    const rock = @min(@max((slope - 0.35) / 0.25, 0.0), 1.0);
+    out_rock.* = rock;
+    const low = palette(h * 1.7, .{ 0.40, 0.34, 0.20 }, .{ 0.12, 0.11, 0.07 }, .{ 1.0, 1.0, 1.0 }, .{ 0.0, 0.05, 0.1 });
+    const high = palette(h * 2.3 + 0.4, .{ 0.30, 0.38, 0.22 }, .{ 0.14, 0.12, 0.09 }, .{ 1.0, 1.0, 1.0 }, .{ 0.15, 0.2, 0.25 });
+    const stone = palette(h * 3.1 + 1.7, .{ 0.30, 0.29, 0.28 }, .{ 0.08, 0.08, 0.08 }, .{ 1.0, 1.0, 1.0 }, .{ 0.3, 0.35, 0.4 });
+    const ground = [3]f32{
+        low[0] + (high[0] - low[0]) * @min(h, 1.0),
+        low[1] + (high[1] - low[1]) * @min(h, 1.0),
+        low[2] + (high[2] - low[2]) * @min(h, 1.0),
+    };
+    return .{
+        ground[0] + (stone[0] - ground[0]) * rock,
+        ground[1] + (stone[1] - ground[1]) * rock,
+        ground[2] + (stone[2] - ground[2]) * rock,
+    };
+}
+
 const vertex_src: [:0]const u8 =
     \\#version 330 core
     \\layout(location = 0) in vec3 a_pos;
     \\layout(location = 1) in vec3 a_nrm;
+    \\layout(location = 2) in vec3 a_col;
     \\uniform mat4 u_view_proj;
     \\out vec3 v_nrm;
     \\out vec3 v_pos;
+    \\out vec3 v_col;
     \\void main() {
     \\    v_nrm = a_nrm;
     \\    v_pos = a_pos;
+    \\    v_col = a_col;
     \\    gl_Position = u_view_proj * vec4(a_pos, 1.0);
     \\}
 ;
@@ -64,6 +106,7 @@ const fragment_src: [:0]const u8 =
     \\#version 330 core
     \\in vec3 v_nrm;
     \\in vec3 v_pos;
+    \\in vec3 v_col;
     \\out vec4 frag;
     \\void main() {
     \\    vec3 n = normalize(v_nrm);
@@ -72,10 +115,10 @@ const fragment_src: [:0]const u8 =
     \\    vec3 sky = vec3(0.36, 0.48, 0.62);
     \\    vec3 ground = vec3(0.16, 0.18, 0.14);
     \\    vec3 amb = mix(ground, sky, n.y * 0.5 + 0.5);
-    \\    vec3 albedo = vec3(0.42, 0.52, 0.34);
-    \\    vec3 c = albedo * (amb + ndl * 1.15);
-    \\    // Simple height tint so slopes read against the low ground.
-    \\    c = mix(c, vec3(0.52, 0.46, 0.38), clamp((v_pos.y - 50.0) / 24.0, 0.0, 1.0) * 0.45);
+    \\    vec3 albedo = v_col;
+    \\    // Lighting is deliberately shy of 1.0: albedo arrives already close to mid grey, and
+    \\    // multiplying it by ~1.8 and then gamma-encoding clips the whole surface to white.
+    \\    vec3 c = albedo * (amb * 0.55 + ndl * 0.65);
     \\    frag = vec4(pow(c, vec3(0.4545)), 1.0);
     \\}
 ;
@@ -153,7 +196,7 @@ pub fn main(init: std.process.Init) !void {
     // seams the single-field version was hiding.
     const n = CHUNK;
     const side = n + 3; // owned cells + 2 skirt cells
-    var all_verts: std.ArrayList(dc.Vertex) = .empty;
+    var all_verts: std.ArrayList(Coloured) = .empty;
     defer all_verts.deinit(alloc);
     var all_idx: std.ArrayList(u32) = .empty;
     defer all_idx.deinit(alloc);
@@ -200,7 +243,11 @@ pub fn main(init: std.process.Init) !void {
             defer surf.deinit(alloc);
             quads += surf.quadCount();
             const base: u32 = @intCast(all_verts.items.len);
-            try all_verts.appendSlice(alloc, surf.verts);
+            for (surf.verts) |v| {
+                var rock: f32 = 0;
+                const col = materialColour(v.pos, v.normal, &rock);
+                try all_verts.append(alloc, .{ .pos = v.pos, .normal = v.normal, .colour = col });
+            }
             for (surf.indices) |idx| try all_idx.append(alloc, base + idx);
         }
     }
@@ -219,13 +266,15 @@ pub fn main(init: std.process.Init) !void {
     gl.GenBuffers(1, @ptrCast(&ebo));
     gl.BindVertexArray(vao);
     gl.BindBuffer(gl.ARRAY_BUFFER, vbo);
-    gl.BufferData(gl.ARRAY_BUFFER, @intCast(all_verts_s.len * @sizeOf(dc.Vertex)), all_verts_s.ptr, gl.STATIC_DRAW);
+    gl.BufferData(gl.ARRAY_BUFFER, @intCast(all_verts_s.len * @sizeOf(Coloured)), all_verts_s.ptr, gl.STATIC_DRAW);
     gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, ebo);
     gl.BufferData(gl.ELEMENT_ARRAY_BUFFER, @intCast(all_idx_s.len * @sizeOf(u32)), all_idx_s.ptr, gl.STATIC_DRAW);
     gl.EnableVertexAttribArray(0);
-    gl.VertexAttribPointer(0, 3, gl.FLOAT, gl.FALSE, @sizeOf(dc.Vertex), 0);
+    gl.VertexAttribPointer(0, 3, gl.FLOAT, gl.FALSE, @sizeOf(Coloured), 0);
     gl.EnableVertexAttribArray(1);
-    gl.VertexAttribPointer(1, 3, gl.FLOAT, gl.FALSE, @sizeOf(dc.Vertex), @sizeOf([3]f32));
+    gl.VertexAttribPointer(1, 3, gl.FLOAT, gl.FALSE, @sizeOf(Coloured), @sizeOf([3]f32));
+    gl.EnableVertexAttribArray(2);
+    gl.VertexAttribPointer(2, 3, gl.FLOAT, gl.FALSE, @sizeOf(Coloured), @sizeOf([3]f32) * 2);
     gl.BindVertexArray(0);
 
     gl.Enable(gl.DEPTH_TEST);
