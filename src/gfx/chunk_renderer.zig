@@ -73,6 +73,8 @@ const FRAG_SRC: [:0]const u8 =
     \\uniform float u_shadows_enabled;
 \\uniform vec4 u_material[8];   // per layer: x roughness, y metallic, z diffuse, w unused
 \\uniform samplerCube u_env;    // sky probe (4.4), unit 2
+\\uniform sampler2DArray u_normal; // tangent-space normals (4.7), unit 3
+\\uniform sampler2DArray u_rough;  // per-texel roughness (4.7), unit 4
 \\uniform float u_env_max_mip;
     \\in vec2 v_uv;
     \\in float v_layer;
@@ -159,7 +161,21 @@ const FRAG_SRC: [:0]const u8 =
     \\    float diffuse_scale = clamp(material.z, 0.0, 1.0);
     \\    vec3 albedo = c.rgb * diffuse_scale;
     \\
-    \\    vec3 N = normalize(v_normal);
+    \\    // 4.7: tangent basis. Every voxel face is axis aligned, so the basis falls
+    \\    // out of the face normal - no tangent attribute, no vertex change.
+    \\    vec3 geoN = normalize(v_normal);
+    \\    vec3 T = (abs(geoN.y) > 0.5) ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 0.0, 1.0);
+    \\    vec3 B = cross(geoN, T);
+    \\    vec3 tangent_normal = texture(u_normal, vec3(v_uv, v_layer)).rgb * 2.0 - 1.0;
+    \\    // Photo normals at one block per metre are far stronger than the surface
+    \\    // they describe; half strength reads as relief instead of wet tarmac.
+    \\    tangent_normal = vec3(tangent_normal.xy * 0.55, tangent_normal.z);
+    \\    vec3 N = normalize(T * tangent_normal.x + B * tangent_normal.y + geoN * max(tangent_normal.z, 0.15));
+    \\
+    \\    // Per-texel roughness, mostly the map and partly the layer's own value, so
+    \\    // the table still controls the material's character.
+    \\    roughness = clamp(mix(roughness, texture(u_rough, vec3(v_uv, v_layer)).r, 0.8), 0.06, 1.0);
+    \\
     \\    vec3 V = normalize(u_eye - v_world);
     \\    vec3 L = u_sun_dir;
     \\    vec3 H = normalize(V + L);
@@ -178,7 +194,7 @@ const FRAG_SRC: [:0]const u8 =
     \\
     \\    // u_sun_colour is scaled for the old Lambert path, so it carries an implicit
     \\    // PI: multiply it back here rather than retuning the sky that shares it.
-    \\    float visibility = sunVisibility(v_world, N);
+    \\    float visibility = sunVisibility(v_world, geoN);
     \\    vec3 direct = (diffuse + specular) * u_sun_colour * PI * ndl * visibility;
     \\
     \\    vec3 hemi = mix(u_ambient_ground, u_ambient_sky, N.y * 0.5 + 0.5);
@@ -271,6 +287,9 @@ pub const ChunkRenderer = struct {
         /// 4.4: the sky probe and the highest mip a roughness-1 surface samples.
         env_texture: gl.uint,
         env_max_mip: f32,
+        /// 4.7: material maps for the same layers as the albedo array.
+        normal_texture: gl.uint,
+        rough_texture: gl.uint,
     };
 
     pub fn begin(self: *ChunkRenderer, textures: *const TextureArray, params: FrameParams) void {
@@ -314,6 +333,12 @@ pub const ChunkRenderer = struct {
         gl.BindTexture(gl.TEXTURE_CUBE_MAP, params.env_texture);
         self.shader.setInt("u_env", 2);
         self.shader.setFloat("u_env_max_mip", params.env_max_mip);
+        gl.ActiveTexture(gl.TEXTURE3);
+        gl.BindTexture(gl.TEXTURE_2D_ARRAY, params.normal_texture);
+        self.shader.setInt("u_normal", 3);
+        gl.ActiveTexture(gl.TEXTURE4);
+        gl.BindTexture(gl.TEXTURE_2D_ARRAY, params.rough_texture);
+        self.shader.setInt("u_rough", 4);
         self.shader.setMat4("u_light_vp", params.light_vp.m);
         self.shader.setFloat("u_shadows_enabled", if (params.shadow_enabled) 1.0 else 0.0);
         self.shader.setFloat("u_shadow_texel", params.shadow_texel);

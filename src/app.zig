@@ -148,6 +148,9 @@ pub const App = struct {
     input: Input,
     debug: DebugDraw,
     textures: TextureArray,
+    /// 4.7: material maps, same layers as `textures`.
+    normal_textures: TextureArray,
+    rough_textures: TextureArray,
     world: World,
     chunk_renderer: ChunkRenderer,
     meshes: std.HashMapUnmanaged(ChunkPos, ChunkRenderer.Mesh, ChunkPos.Context, 80),
@@ -232,8 +235,14 @@ pub const App = struct {
         var debug = try DebugDraw.init();
         errdefer debug.deinit();
 
-        var textures = try TextureArray.init(&block.texture_paths, block.TEXTURE_SIZE);
+        // Albedo is colour (sRGB); the material maps are data and must not be
+        // gamma-decoded on the way in.
+        var textures = try TextureArray.init(&block.texture_paths, block.TEXTURE_SIZE, true);
         errdefer textures.deinit();
+        var normal_textures = try TextureArray.init(&block.normal_paths, block.TEXTURE_SIZE, false);
+        errdefer normal_textures.deinit();
+        var rough_textures = try TextureArray.init(&block.rough_paths, block.TEXTURE_SIZE, false);
+        errdefer rough_textures.deinit();
         std.debug.print("textures: {d} layers of {d}x{d}\n", .{ textures.layers, textures.size, textures.size });
 
         var world = World.init(gpa);
@@ -335,6 +344,8 @@ pub const App = struct {
             .input = input,
             .debug = debug,
             .textures = textures,
+            .normal_textures = normal_textures,
+            .rough_textures = rough_textures,
             .seed = config.seed,
             .greedy = config.greedy,
             .saved = saved,
@@ -408,6 +419,8 @@ pub const App = struct {
         self.saved.deinit();
         self.world.deinit();
         self.textures.deinit();
+        self.normal_textures.deinit();
+        self.rough_textures.deinit();
         self.debug.deinit();
         self.frame_arena.deinit();
         self.window.deinit();
@@ -1135,6 +1148,8 @@ pub const App = struct {
             .shadow_bias = 0.0012,
             .shadow_normal_offset = self.shadow_renderer.texelSize() * 1.2,
             .env_texture = self.env_probe.texture,
+            .normal_texture = self.normal_textures.texture,
+            .rough_texture = self.rough_textures.texture,
             .env_max_mip = self.env_probe.max_mip,
             // 2 texels of spread: softer shadow edges (3.12). 1.0 restores the
             // hard 3x3 for an A/B.

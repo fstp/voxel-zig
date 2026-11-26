@@ -61,7 +61,10 @@ pub const Post = struct {
     height: i32 = 0,
     /// Exposure the player sets, before eye adaptation. 1.0 is the value the
     /// light rig was tuned around; less is darker.
-    exposure_base: f32 = 0.62,
+    /// Raised from 0.62 when albedo started being uploaded as sRGB (4.7): the
+    /// textures had been shaded as if their bytes were linear, which is about
+    /// 2.3x too bright for a mid tone, and the old value was tuned against that.
+    exposure_base: f32 = 1.45,
     /// Effective exposure used by the resolve: `exposure_base` times the night
     /// adaptation written each frame by the app.
     exposure: f32 = 0.62,

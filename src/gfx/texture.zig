@@ -12,7 +12,10 @@ pub const TextureArray = struct {
 
     /// PNG rows are top-down (first row is the top of the tile); GL samples
     /// v = 0 at the bottom. stb is asked to flip on load so the two agree.
-    pub fn init(paths: []const [:0]const u8, size: u32) !TextureArray {
+    /// `srgb` must be true for colour and false for data maps: an albedo uploaded
+    /// as plain RGBA8 is shaded as if its bytes were linear, which is the washed
+    /// out look ADR 0008 set out to remove.
+    pub fn init(paths: []const [:0]const u8, size: u32, srgb: bool) !TextureArray {
         std.debug.assert(paths.len > 0);
         const alloc = std.heap.page_allocator;
         const pixels = try alloc.alloc(u8, @as(usize, size) * size * 4 * paths.len);
@@ -44,7 +47,7 @@ pub const TextureArray = struct {
         gl.TexImage3D(
             gl.TEXTURE_2D_ARRAY,
             0,
-            gl.RGBA8,
+            if (srgb) gl.SRGB8_ALPHA8 else gl.RGBA8,
             @intCast(size),
             @intCast(size),
             @intCast(paths.len),
@@ -62,6 +65,15 @@ pub const TextureArray = struct {
         // blocks with UVs up to (width, height), and the tile has to repeat.
         gl.TexParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_S, @intCast(gl.REPEAT));
         gl.TexParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_T, @intCast(gl.REPEAT));
+        // Trilinear minification is only half the answer for a ground plane seen
+        // at a glancing angle: without anisotropy the driver picks a mip that
+        // suits the compressed axis and the surface smears into a blur.
+        var max_aniso: f32 = 1.0;
+        gl.GetFloatv(gl.MAX_TEXTURE_MAX_ANISOTROPY, @ptrCast(&max_aniso));
+        const wanted = @min(max_aniso, 8.0);
+        if (wanted > 1.0) {
+            gl.TexParameterf(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MAX_ANISOTROPY, wanted);
+        }
         gl.GenerateMipmap(gl.TEXTURE_2D_ARRAY);
 
         return .{ .texture = texture, .size = size, .layers = @intCast(paths.len) };

@@ -184,3 +184,34 @@ test "every texture layer has a material" {
         try std.testing.expect(m.diffuse >= 0.0 and m.diffuse <= 1.0);
     }
 }
+
+/// Tangent-space normal maps, same order and length as `texture_paths`. Data, not
+/// colour: uploaded as plain RGBA8 (see `TextureArray.init`'s `srgb` flag).
+pub const normal_paths = [_][:0]const u8{
+    "assets/blocks/stone_n.png",
+    "assets/blocks/dirt_n.png",
+    "assets/blocks/grass_top_n.png",
+    "assets/blocks/grass_side_n.png",
+    "assets/blocks/sand_n.png",
+    "assets/blocks/wood_n.png",
+    "assets/blocks/leaves_n.png",
+    "assets/blocks/water_n.png",
+};
+
+/// Per-texel roughness, red channel, blended with the layer's scalar value. Water
+/// is nearly black here because it is nearly a mirror.
+pub const rough_paths = [_][:0]const u8{
+    "assets/blocks/stone_r.png",
+    "assets/blocks/dirt_r.png",
+    "assets/blocks/grass_top_r.png",
+    "assets/blocks/grass_side_r.png",
+    "assets/blocks/sand_r.png",
+    "assets/blocks/wood_r.png",
+    "assets/blocks/leaves_r.png",
+    "assets/blocks/water_r.png",
+};
+
+test "every layer has a normal map and a roughness map" {
+    try std.testing.expectEqual(texture_paths.len, normal_paths.len);
+    try std.testing.expectEqual(texture_paths.len, rough_paths.len);
+}
