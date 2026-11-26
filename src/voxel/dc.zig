@@ -548,9 +548,10 @@ test "dual contouring: two skirted chunks tile without a crack" {
     const n = 8;
     const cell: f32 = 1.0;
 
+    // Referenced to x = 1000 so the plane still cuts the box at that far origin.
     const plane = struct {
         fn f(x: f32, y: f32, z: f32) f32 {
-            return 0.35 * x - 0.6 * y + 0.25 * z + 0.5;
+            return 0.35 * (x - 1000.0) - 0.6 * y + 0.25 * z + 0.5;
         }
     }.f;
 
@@ -558,16 +559,20 @@ test "dual contouring: two skirted chunks tile without a crack" {
         fn g(alloc2: std.mem.Allocator, nn: usize, c: f32, ox: f32, sk: usize) ![]f32 {
             const side = nn + 1 + 2 * sk;
             const vals = try alloc2.alloc(f32, side * side * side);
-            const skf: f32 = @floatFromInt(sk);
+            const oxi: i32 = @intFromFloat(ox);
             var k: usize = 0;
             while (k < side) : (k += 1) {
                 var j: usize = 0;
                 while (j < side) : (j += 1) {
                     var i: usize = 0;
                     while (i < side) : (i += 1) {
-                        const x = ox + (@as(f32, @floatFromInt(i)) - skf) * c;
-                        const y = (@as(f32, @floatFromInt(j)) - skf) * c;
-                        const z = (@as(f32, @floatFromInt(k)) - skf) * c;
+                        // Integer first, converted once: identical inputs for a shared sample.
+                        const gx: i32 = oxi + @as(i32, @intCast(i)) - @as(i32, @intCast(sk));
+                        const gy: i32 = @as(i32, @intCast(j)) - @as(i32, @intCast(sk));
+                        const gz: i32 = @as(i32, @intCast(k)) - @as(i32, @intCast(sk));
+                        const x = @as(f32, @floatFromInt(gx)) * c;
+                        const y = @as(f32, @floatFromInt(gy)) * c;
+                        const z = @as(f32, @floatFromInt(gz)) * c;
                         vals[i + side * (j + side * k)] = plane(x, y, z);
                     }
                 }
@@ -576,13 +581,17 @@ test "dual contouring: two skirted chunks tile without a crack" {
         }
     }.g;
 
-    const a_vals = try build(alloc, n, cell, 0.0, 1);
+    // A far origin on purpose: at x = 1000 an f32 has ~6e-5 of spacing, so building the
+    // sample coordinate as origin + index*cell gives the shared border sample different low
+    // bits in the two chunks and the seam draws a hairline. Sampling in integer space is
+    // what keeps the two evaluations bitwise identical.
+    const a_vals = try build(alloc, n, cell, 1000.0, 1);
     defer alloc.free(a_vals);
-    const b_vals = try build(alloc, n, cell, @as(f32, @floatFromInt(n)) * cell, 1);
+    const b_vals = try build(alloc, n, cell, 1000.0 + @as(f32, @floatFromInt(n)) * cell, 1);
     defer alloc.free(b_vals);
 
-    const fa = Field{ .values = a_vals, .n = n, .skirt = 1, .origin = .{ 0, 0, 0 }, .cell = cell };
-    const fb = Field{ .values = b_vals, .n = n, .skirt = 1, .origin = .{ @as(f32, @floatFromInt(n)) * cell, 0, 0 }, .cell = cell };
+    const fa = Field{ .values = a_vals, .n = n, .skirt = 1, .origin = .{ 1000.0, 0, 0 }, .cell = cell };
+    const fb = Field{ .values = b_vals, .n = n, .skirt = 1, .origin = .{ 1008.0, 0, 0 }, .cell = cell };
     const sa = try extract(alloc, fa);
     defer sa.deinit(alloc);
     const sb = try extract(alloc, fb);
@@ -654,8 +663,8 @@ test "dual contouring: two skirted chunks tile without a crack" {
     var it = counts.iterator();
     var bad: usize = 0;
     var checked: usize = 0;
-    const seam_lo: f32 = @as(f32, @floatFromInt(n)) - 2.0;
-    const seam_hi: f32 = @as(f32, @floatFromInt(n)) + 2.0;
+    const seam_lo: f32 = 1000.0 + @as(f32, @floatFromInt(n)) - 2.0;
+    const seam_hi: f32 = 1000.0 + @as(f32, @floatFromInt(n)) + 2.0;
     while (it.next()) |entry| {
         const pa = merged.items[entry.key_ptr.*[0]].pos;
         const pb = merged.items[entry.key_ptr.*[1]].pos;

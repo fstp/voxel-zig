@@ -173,9 +173,18 @@ pub fn main(init: std.process.Init) !void {
                 while (j < side) : (j += 1) {
                     var i: usize = 0;
                     while (i < side) : (i += 1) {
-                        const x = ox + (@as(f32, @floatFromInt(i)) - 1.0) * CELL;
-                        const y = 40.0 + (@as(f32, @floatFromInt(j)) - 1.0) * CELL;
-                        const z = oz + (@as(f32, @floatFromInt(k)) - 1.0) * CELL;
+                        // World coordinates are built in INTEGER space and converted once.
+                        // Adding the chunk origin as a float gave the same world sample
+                        // different low bits in different chunks (ox + (i-1)*cell vs
+                        // ox' + (i'-1)*cell), so the shared border vertices differed by ~1e-6
+                        // and every chunk border drew a hairline. Integers make the two
+                        // evaluations bitwise identical, which is what the skirt assumes.
+                        const gx: i32 = @as(i32, @intCast(cx)) * @as(i32, @intCast(CHUNK)) + @as(i32, @intCast(i)) - 1;
+                        const gy: i32 = @as(i32, @intCast(j)) - 1;
+                        const gz: i32 = @as(i32, @intCast(cz)) * @as(i32, @intCast(CHUNK)) + @as(i32, @intCast(k)) - 1;
+                        const x = @as(f32, @floatFromInt(gx)) * CELL;
+                        const y = 40.0 + @as(f32, @floatFromInt(gy)) * CELL;
+                        const z = @as(f32, @floatFromInt(gz)) * CELL;
                         vals[i + side * (j + side * k)] = y - heightAt(x, z);
                     }
                 }
