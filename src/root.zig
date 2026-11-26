@@ -39,6 +39,7 @@ pub const voxel = struct {
     pub const BlockPos = coords.BlockPos;
     pub const ChunkPos = coords.ChunkPos;
     pub const mesher = @import("voxel/mesher.zig");
+    pub const dc = @import("voxel/dc.zig");
     pub const raycast = @import("voxel/raycast.zig");
 };
 
@@ -78,6 +79,7 @@ test {
     _ = @import("world/chunk_slab.zig");
     _ = @import("world/world.zig");
     _ = @import("voxel/mesher.zig");
+    _ = @import("voxel/dc.zig");
     _ = @import("world/chunk_mesher.zig");
     _ = @import("world/terrain.zig");
     _ = @import("world/noise.zig");
