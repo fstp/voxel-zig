@@ -137,8 +137,35 @@ const FRAG_SRC: [:0]const u8 =
     \\    return f0 + (vec3(1.0) - f0) * pow(clamp(1.0 - voh, 0.0, 1.0), 5.0);
     \\}
     \\
+    \\// 4.8: per-block UV variation. Every face maps its texture 0..1, so a wall of
+    \\// stone repeats the same image block after block. Hashing the owning block's
+    \\// coordinate gives each face its own offset and mirror flags, which breaks the
+    \\// grid without any vertex data: the hash is constant across a one-block face,
+    \\// so the quad still samples one continuous piece of the texture.
+    \\float hash13(vec3 p) {
+    \\    p = fract(p * 0.1031);
+    \\    p += dot(p, p.yzx + 33.33);
+    \\    return fract((p.x + p.y) * p.z);
+    \\}
+    \\
+    \\vec2 blockUV(vec3 world, vec3 normal, vec2 uv) {
+    \\    vec3 cell = floor(world - normal * 0.5 + normal * 0.001);
+    \\    float h = hash13(cell + normal * 17.0);
+    \\    // Mirroring keeps the tile seamless where a plain rotation would not for
+    \\    // quads that span more than one block (greedy meshing).
+    \\    if (h > 0.75) uv.x = 1.0 - uv.x;
+    \\    else if (h > 0.5) uv.y = 1.0 - uv.y;
+    \\    else if (h > 0.25) uv = vec2(1.0 - uv.x, 1.0 - uv.y);
+    \\    // Offset by a hash of the same cell, in the other two axes so it is
+    \\    // independent of the mirror choice.
+    \\    vec2 offset = vec2(hash13(cell.yzx + 5.0), hash13(cell.zxy + 11.0));
+    \\    return uv + offset;
+    \\}
+    \\
     \\void main() {
-    \\    vec4 c = texture(u_tex, vec3(v_uv, v_layer));
+    \\    vec3 geoN = normalize(v_normal);
+    \\    vec2 uv = blockUV(v_world, geoN, v_uv);
+    \\    vec4 c = texture(u_tex, vec3(uv, v_layer));
     \\    if (c.a < 0.5) discard; // alpha cutout (leaves, ADR 0002)
     \\    // AO 0..15 (3.12) with a curve: more bands than the old 0..3, and the
     \\    // curve keeps the darkest step from reading as a black line.
@@ -163,10 +190,9 @@ const FRAG_SRC: [:0]const u8 =
     \\
     \\    // 4.7: tangent basis. Every voxel face is axis aligned, so the basis falls
     \\    // out of the face normal - no tangent attribute, no vertex change.
-    \\    vec3 geoN = normalize(v_normal);
     \\    vec3 T = (abs(geoN.y) > 0.5) ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 0.0, 1.0);
     \\    vec3 B = cross(geoN, T);
-    \\    vec3 tangent_normal = texture(u_normal, vec3(v_uv, v_layer)).rgb * 2.0 - 1.0;
+    \\    vec3 tangent_normal = texture(u_normal, vec3(uv, v_layer)).rgb * 2.0 - 1.0;
     \\    // Photo normals at one block per metre are far stronger than the surface
     \\    // they describe; half strength reads as relief instead of wet tarmac.
     \\    tangent_normal = vec3(tangent_normal.xy * 0.55, tangent_normal.z);
@@ -174,7 +200,7 @@ const FRAG_SRC: [:0]const u8 =
     \\
     \\    // Per-texel roughness, mostly the map and partly the layer's own value, so
     \\    // the table still controls the material's character.
-    \\    roughness = clamp(mix(roughness, texture(u_rough, vec3(v_uv, v_layer)).r, 0.8), 0.06, 1.0);
+    \\    roughness = clamp(mix(roughness, texture(u_rough, vec3(uv, v_layer)).r, 0.8), 0.06, 1.0);
     \\
     \\    vec3 V = normalize(u_eye - v_world);
     \\    vec3 L = u_sun_dir;
