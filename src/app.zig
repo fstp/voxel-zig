@@ -53,6 +53,8 @@ pub const Config = struct {
     sun_spec: ?[]const u8 = null,
     /// Starting scene exposure from VOXEL_EXPOSURE (4.1); null keeps the default.
     exposure: ?f32 = null,
+    /// 6.3: VOXEL_DEBUG_WATER paints water a flat colour.
+    debug_water: bool = false,
 };
 
 /// 1.11 streaming: a cylinder of LOAD_RADIUS chunks around the player, unloaded
@@ -282,6 +284,8 @@ pub const App = struct {
         var env_probe = try EnvProbe.init();
         errdefer env_probe.deinit();
 
+        if (config.debug_water) std.debug.print("water debug flat: on from VOXEL_DEBUG_WATER\n", .{});
+
         var ssao = try Ssao.init(window.width, window.height);
         errdefer ssao.deinit();
         // 4.1: VOXEL_EXPOSURE pins the starting exposure for screenshots.
@@ -372,6 +376,7 @@ pub const App = struct {
             .env_probe = env_probe,
             .ssao = ssao,
             .bodies = undefined,
+            .debug_flat_water = config.debug_water,
             .peer = peer,
             .body_items = try gpa.alloc(physics.Body, MAX_BODIES),
             .scratch_vertices = try gpa.alloc(mesher.Vertex, INITIAL_QUAD_CAPACITY * 4),
@@ -847,7 +852,10 @@ pub const App = struct {
             if (self.input.ssao_toggle) self.ssao.enabled = !self.ssao.enabled;
             if (self.input.fxaa_toggle) self.post.fxaa = !self.post.fxaa;
             if (self.input.waves_toggle) self.waves = !self.waves;
-            if (self.input.water_debug_toggle) self.debug_flat_water = !self.debug_flat_water;
+            if (self.input.water_debug_toggle) {
+                self.debug_flat_water = !self.debug_flat_water;
+                std.debug.print("water debug flat: {}\n", .{self.debug_flat_water});
+            }
             // 4.1: exposure in 1/8-stop-ish steps, clamped so a held key cannot
             // drive the image to black or to white.
             if (self.input.exposure_down) self.post.exposure_base = @max(0.10, self.post.exposure_base * 0.92);

@@ -26,6 +26,10 @@ pub fn main(init: std.process.Init) !void {
     if (init.environ_map.get("VOXEL_PEER")) |peer| config.net_peer = peer;
     // 3.10: VOXEL_SUN="142,18" pins the sun for screenshots and tests.
     if (init.environ_map.get("VOXEL_SUN")) |spec| config.sun_spec = spec;
+    // 6.3: VOXEL_DEBUG_WATER=1 paints water flat magenta for the seam diagnostic.
+    if (init.environ_map.get("VOXEL_DEBUG_WATER")) |raw| {
+        config.debug_water = raw.len > 0 and raw[0] != '0';
+    }
     // 4.1: VOXEL_EXPOSURE=0.55 pins the scene exposure.
     if (init.environ_map.get("VOXEL_EXPOSURE")) |raw| {
         if (std.fmt.parseFloat(f32, raw)) |value| {
