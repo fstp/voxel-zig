@@ -232,7 +232,11 @@ fn mul(a: [16]f32, b: [16]f32) [16]f32 {
 }
 
 pub fn main(init: std.process.Init) !void {
-    _ = init;
+    // VOXEL_DC_BG=magenta paints the background a colour that terrain shading cannot produce, so a
+    // hole count can never be confused with a pixel that merely happens to land near the sky tone.
+    // Sampling the background colour from the frame cannot make that distinction, and did not:
+    // two builds with IDENTICAL geometry measured 74 vs 320 "hole" pixels purely from shading.
+    const bg_magenta = if (init.environ_map.get("VOXEL_DC_BG")) |raw| raw.len > 0 and raw[0] == 'm' else false;
     var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
     defer _ = debug_allocator.deinit();
     const alloc = debug_allocator.allocator();
@@ -356,7 +360,7 @@ pub fn main(init: std.process.Init) !void {
         const w: f32 = @floatFromInt(window.width);
         const h: f32 = @floatFromInt(window.height);
         gl.Viewport(0, 0, window.width, window.height);
-        gl.ClearColor(0.30, 0.38, 0.50, 1.0);
+        if (bg_magenta) gl.ClearColor(1.0, 0.0, 1.0, 1.0) else gl.ClearColor(0.30, 0.38, 0.50, 1.0);
         gl.Clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
         const radius: f32 = 78.0;
