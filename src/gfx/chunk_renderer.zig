@@ -83,6 +83,8 @@ pub const ChunkRenderer = struct {
         wave_amp: f32,
         waves: bool,
         foam: bool,
+        /// 6.3: flat-colour water for diagnosing seams.
+        debug_flat_water: bool,
         /// 4.4: the sky probe and the highest mip a roughness-1 surface samples.
         env_texture: gl.uint,
         env_max_mip: f32,
@@ -155,6 +157,7 @@ pub const ChunkRenderer = struct {
         self.shader.setFloat("u_wave_amp", params.wave_amp);
         self.shader.setFloat("u_waves", if (params.waves) 1.0 else 0.0);
         self.shader.setFloat("u_foam", if (params.foam) 1.0 else 0.0);
+        self.shader.setFloat("u_debug_flat", if (params.debug_flat_water) 1.0 else 0.0);
 
         gl.Enable(gl.DEPTH_TEST);
         // Explicit, not inherited: the sky pass runs with depth writes off and a

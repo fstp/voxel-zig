@@ -206,6 +206,7 @@ pub const App = struct {
     waves: bool = true,
     foam: bool = true,
     wave_time: f32 = 0,
+    debug_flat_water: bool = false,
     /// Wind offset in cloud space, advanced on the fixed step (3.11).
     cloud_shift: Vec3 = Vec3.init(0, 0, 0),
     bodies: physics.Bodies,
@@ -846,6 +847,7 @@ pub const App = struct {
             if (self.input.ssao_toggle) self.ssao.enabled = !self.ssao.enabled;
             if (self.input.fxaa_toggle) self.post.fxaa = !self.post.fxaa;
             if (self.input.waves_toggle) self.waves = !self.waves;
+            if (self.input.water_debug_toggle) self.debug_flat_water = !self.debug_flat_water;
             // 4.1: exposure in 1/8-stop-ish steps, clamped so a held key cannot
             // drive the image to black or to white.
             if (self.input.exposure_down) self.post.exposure_base = @max(0.10, self.post.exposure_base * 0.92);
@@ -1191,6 +1193,7 @@ pub const App = struct {
             .wave_amp = 0.34,
             .waves = self.waves,
             .foam = self.foam,
+            .debug_flat_water = self.debug_flat_water,
         });
         var drawn: usize = 0;
         var it = self.meshes.valueIterator();

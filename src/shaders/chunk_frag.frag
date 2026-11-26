@@ -38,6 +38,7 @@ in vec3 v_world;
 in float v_wave;
 uniform float u_water_layer_f;
 uniform float u_foam;
+uniform float u_debug_flat; // 1 = paint water a flat colour, to tell a gap from a shading line
 uniform float u_time;
 uniform float u_wave_amp;
 uniform float u_waves;
@@ -190,6 +191,12 @@ void main() {
     vec2 uv = blockUV(v_world, geoN, v_uv);
     vec4 c = texture(u_tex, vec3(uv, v_layer));
     if (c.a < 0.5) discard; // alpha cutout (leaves, ADR 0002)
+    if (u_debug_flat > 0.5 && abs(v_layer - u_water_layer_f) < 0.5) {
+        // Diagnostic: a gap in the water shows the background here, a shading
+        // discontinuity shows as a different shade of magenta.
+        f_colour = vec4(1.0, 0.0, 1.0, 1.0);
+        return;
+    }
     // AO 0..15 (3.12) with a curve: more bands than the old 0..3, and the
     // curve keeps the darkest step from reading as a black line.
     float ao = mix(0.42, 1.0, pow(clamp(v_ao / 15.0, 0.0, 1.0), 0.85));
