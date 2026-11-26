@@ -27,7 +27,8 @@ pub const Input = struct {
     pause_time: bool = false,
     time_scrub: i8 = 0,
     time_jump: ?f32 = null,
-    /// F6 shows the normal debug view (3.3).
+    /// F6 shows the normal debug view (3.3), F7 toggles distance fog (3.7).
+    fog_toggle: bool = false,
     normals_toggle: bool = false,
     /// Scripting: B cycles the brush, brackets resize it, ctrl+z/y undo/redo.
     brush_cycle: bool = false,
@@ -57,6 +58,7 @@ pub const Input = struct {
                     if (ev.key.key == sdl.SDLK_F) self.fly_toggle = true;
                     if (ev.key.key == sdl.SDLK_F4) self.shading_toggle = true;
                     if (ev.key.key == sdl.SDLK_F6) self.normals_toggle = true;
+                    if (ev.key.key == sdl.SDLK_F7) self.fog_toggle = true;
                     if (ev.key.key == sdl.SDLK_P) self.pause_time = true;
                     if (ev.key.key == sdl.SDLK_COMMA) self.time_scrub = -1;
                     if (ev.key.key == sdl.SDLK_PERIOD) self.time_scrub = 1;
@@ -107,6 +109,7 @@ pub const Input = struct {
         self.debug_toggle = false;
         self.shading_toggle = false;
         self.normals_toggle = false;
+        self.fog_toggle = false;
         self.pause_time = false;
         self.time_scrub = 0;
         self.time_jump = null;

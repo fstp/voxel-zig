@@ -26,6 +26,7 @@ const VERT_SRC: [:0]const u8 =
     \\out float v_ao;
     \\out float v_face;
     \\out vec3 v_normal;
+    \\out vec3 v_world;
     \\// Face id -> outward normal (3.3). Same order as block.faceNormal().
     \\vec3 normalFromFace(float id) {
     \\    if (id < 0.5) return vec3(1.0, 0.0, 0.0);
@@ -41,6 +42,7 @@ const VERT_SRC: [:0]const u8 =
     \\    v_ao = a_ao;
     \\    v_face = a_face;
     \\    v_normal = normalFromFace(a_face);
+    \\    v_world = (u_model * vec4(a_pos, 1.0)).xyz;
     \\    gl_Position = u_vp * u_model * vec4(a_pos, 1.0);
     \\}
 ;
@@ -54,11 +56,18 @@ const FRAG_SRC: [:0]const u8 =
     \\uniform vec3 u_sun_colour;    // linear, scaled by sun height
     \\uniform vec3 u_ambient_sky;   // linear hemisphere ambient, up
     \\uniform vec3 u_ambient_ground;
+    \\uniform vec3 u_eye;
+    \\uniform vec3 u_sky_horizon;  // same ramp the sky pass draws with
+    \\uniform vec3 u_sky_zenith;
+    \\uniform float u_fog_start;
+    \\uniform float u_fog_end;
+    \\uniform float u_fog_enabled;
     \\in vec2 v_uv;
     \\in float v_layer;
     \\in float v_ao;
     \\in float v_face;
     \\in vec3 v_normal;
+    \\in vec3 v_world;
     \\out vec4 f_colour;
     \\
     \\// Cheap directional stand-in for lighting: face order is px, nx, py, ny, pz, nz.
@@ -89,6 +98,19 @@ const FRAG_SRC: [:0]const u8 =
     \\    // F4 A/B: the old hardcoded table, kept so 3.9 can show the difference.
     \\    vec3 legacy = vec3(faceBrightness(v_face) * ao);
     \\    vec3 rgb = mix(c.rgb * lit, c.rgb * legacy, u_legacy);
+    \\
+    \\    // Distance fog, in linear space, coloured by the same sky gradient the sky
+    \\    // pass draws (3.7). Duplicated on purpose: two lines and one pair of
+    \\    // uniforms is cheaper than a texture lookup, and the uniforms come from
+    \\    // the same sun.ramp() call, so they cannot drift.
+    \\    if (u_fog_enabled > 0.5) {
+    \\        vec3 to_fragment = v_world - u_eye;
+    \\        float distance = length(to_fragment);
+    \\        vec3 dir = to_fragment / max(distance, 1e-4);
+    \\        vec3 fog_colour = mix(u_sky_horizon, u_sky_zenith, pow(clamp(dir.y, 0.0, 1.0), 0.45));
+    \\        float fog = smoothstep(u_fog_start, u_fog_end, distance);
+    \\        rgb = mix(rgb, fog_colour, fog);
+    \\    }
     \\    f_colour = vec4(rgb, c.a);
     \\}
 ;
@@ -122,23 +144,38 @@ pub const ChunkRenderer = struct {
     /// array on unit 0. Depth test and backface culling are enabled here so a
     /// missing GL state setup cannot produce the "see the inside of the world"
     /// bug.
-    pub fn begin(
-        self: *ChunkRenderer,
+    /// Everything a frame needs. A struct, because a seventh positional argument
+    /// is how state gets passed to the wrong place.
+    pub const FrameParams = struct {
         view_projection: Mat4,
-        textures: *const TextureArray,
+        eye: Vec3,
         lighting: @import("../world/sun.zig").Lighting,
+        /// The same two colours the sky pass draws with (3.6), so fog matches.
+        sky_horizon: Vec3,
+        sky_zenith: Vec3,
+        fog_start: f32,
+        fog_end: f32,
+        fog_enabled: bool,
         legacy: bool,
         normals: bool,
-    ) void {
+    };
+
+    pub fn begin(self: *ChunkRenderer, textures: *const TextureArray, params: FrameParams) void {
         self.shader.use();
-        self.shader.setMat4("u_vp", view_projection.m);
+        self.shader.setMat4("u_vp", params.view_projection.m);
+        self.shader.setVec3("u_eye", asArray(params.eye));
+        self.shader.setVec3("u_sky_horizon", asArray(params.sky_horizon));
+        self.shader.setVec3("u_sky_zenith", asArray(params.sky_zenith));
+        self.shader.setFloat("u_fog_start", params.fog_start);
+        self.shader.setFloat("u_fog_end", params.fog_end);
+        self.shader.setFloat("u_fog_enabled", if (params.fog_enabled) 1.0 else 0.0);
         self.shader.setInt("u_tex", 0);
-        self.shader.setFloat("u_legacy", if (legacy) 1.0 else 0.0);
-        self.shader.setFloat("u_normals", if (normals) 1.0 else 0.0);
-        self.shader.setVec3("u_sun_dir", asArray(lighting.sun_dir));
-        self.shader.setVec3("u_sun_colour", asArray(lighting.sun_colour));
-        self.shader.setVec3("u_ambient_sky", asArray(lighting.ambient_sky));
-        self.shader.setVec3("u_ambient_ground", asArray(lighting.ambient_ground));
+        self.shader.setFloat("u_legacy", if (params.legacy) 1.0 else 0.0);
+        self.shader.setFloat("u_normals", if (params.normals) 1.0 else 0.0);
+        self.shader.setVec3("u_sun_dir", asArray(params.lighting.sun_dir));
+        self.shader.setVec3("u_sun_colour", asArray(params.lighting.sun_colour));
+        self.shader.setVec3("u_ambient_sky", asArray(params.lighting.ambient_sky));
+        self.shader.setVec3("u_ambient_ground", asArray(params.lighting.ambient_ground));
         textures.bind(0);
 
         gl.Enable(gl.DEPTH_TEST);

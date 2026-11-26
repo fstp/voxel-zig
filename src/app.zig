@@ -162,6 +162,7 @@ pub const App = struct {
     show_wire: bool = false,
     legacy_lighting: bool = false,
     show_normals: bool = false,
+    fog_enabled: bool = true,
     sun: sun_mod.Sun = sun_mod.Sun.init(),
     hud: Hud,
     show_hud: bool = true,
@@ -735,6 +736,7 @@ pub const App = struct {
             if (self.input.debug_toggle) self.show_wire = !self.show_wire;
             if (self.input.shading_toggle) self.legacy_lighting = !self.legacy_lighting;
             if (self.input.normals_toggle) self.show_normals = !self.show_normals;
+            if (self.input.fog_toggle) self.fog_enabled = !self.fog_enabled;
             if (self.input.pause_time) self.sun.togglePaused();
             if (self.input.time_scrub != 0) {
                 const delta = @as(f32, @floatFromInt(self.input.time_scrub)) * 0.01;
@@ -997,7 +999,22 @@ pub const App = struct {
         self.sky_renderer.draw(vp, self.camera.position, &self.sun);
 
         const lighting = self.sun.lighting();
-        self.chunk_renderer.begin(vp, &self.textures, lighting, self.legacy_lighting, self.show_normals);
+        const sky_ramp = self.sun.ramp();
+        // Fog ends just inside the load radius so chunks fade in behind it rather
+        // than popping through a hard frontier: radius 6 chunks = 192 blocks.
+        const radius_blocks: f32 = @floatFromInt(LOAD_RADIUS * @as(i32, coords.CHUNK_SIZE));
+        self.chunk_renderer.begin(&self.textures, .{
+            .view_projection = vp,
+            .eye = self.camera.position,
+            .lighting = lighting,
+            .sky_horizon = sky_ramp.horizon,
+            .sky_zenith = sky_ramp.zenith,
+            .fog_start = radius_blocks * 0.60,
+            .fog_end = radius_blocks * 0.97,
+            .fog_enabled = self.fog_enabled,
+            .legacy = self.legacy_lighting,
+            .normals = self.show_normals,
+        });
         var drawn: usize = 0;
         var it = self.meshes.valueIterator();
         while (it.next()) |mesh| {
@@ -1131,7 +1148,7 @@ pub const App = struct {
             self.hud.text(10, @as(f32, @floatFromInt(self.window.height)) - 66, text);
         }
 
-        const keys = "F1 HUD  F FLY  F3 BOXES  F4 LIGHT A/B  F6 NORMALS  P PAUSE SUN  1-4 TIMES";
+        const keys = "F1 HUD  F FLY  F3 BOXES  F4 LIGHT A/B  F6 NORMALS  F7 FOG  P PAUSE SUN  1-4 TIMES";
         self.hud.setColour(0.6, 0.6, 0.6);
         self.hud.text(10, @as(f32, @floatFromInt(self.window.height)) - 22, keys);
 
