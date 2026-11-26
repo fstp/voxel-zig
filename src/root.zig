@@ -11,6 +11,10 @@ pub const version = "0.1.0";
 
 pub const App = @import("app.zig").App;
 pub const Player = @import("player/player.zig").Player;
+pub const physics = struct {
+    pub const Bodies = @import("physics/bodies.zig").Bodies;
+    pub const Body = @import("physics/bodies.zig").Body;
+};
 pub const Camera = @import("camera.zig").Camera;
 pub const Input = @import("input.zig").Input;
 
@@ -75,5 +79,6 @@ test {
     _ = @import("world/undo.zig");
     _ = @import("voxel/raycast.zig");
     _ = @import("player/player.zig");
+    _ = @import("physics/bodies.zig");
     _ = @import("app.zig");
 }

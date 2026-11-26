@@ -11,6 +11,7 @@ const Hud = @import("gfx/hud.zig").Hud;
 const Frustum = @import("math/frustum.zig").Frustum;
 const Aabb = @import("math/aabb.zig").Aabb;
 const Vec3 = @import("math/vec.zig").Vec3;
+const Mat4 = @import("math/mat4.zig").Mat4;
 const World = @import("world/world.zig").World;
 const chunk_mesher = @import("world/chunk_mesher.zig");
 const mesher = @import("voxel/mesher.zig");
@@ -18,6 +19,8 @@ const terrain = @import("world/terrain.zig");
 const save = @import("world/save.zig");
 const brush = @import("world/brush.zig");
 const undo_mod = @import("world/undo.zig");
+const physics = @import("physics/bodies.zig");
+const BlockRenderer = @import("gfx/block_renderer.zig").BlockRenderer;
 const block = @import("voxel/block.zig");
 const coords = @import("voxel/coords.zig");
 const raycast = @import("voxel/raycast.zig");
@@ -49,6 +52,10 @@ pub const PRELOAD_MESH_RADIUS: i32 = 1;
 
 pub const REACH: f32 = 6.0;
 pub const SAVE_PATH = "world.vxz";
+/// 2.3: how many thrown boxes the toy allocates room for.
+pub const MAX_BODIES: usize = 96;
+/// Boxes spawned per press of G.
+pub const THROW_BATCH: usize = 50;
 pub const HOTBAR = [_]block.BlockId{ .stone, .dirt, .grass, .sand, .wood, .leaves };
 
 pub const Step = struct {
@@ -157,6 +164,10 @@ pub const App = struct {
     selected: block.BlockId = .stone,
     edits: usize = 0,
     undo: undo_mod.Undo,
+    block_renderer: BlockRenderer,
+    bodies: physics.Bodies,
+    body_items: []physics.Body,
+    rng: u32 = 0x1234_5678,
     brush_mode: ?brush.Mode = null,
     brush_radius: i32 = 3,
     last_stroke_blocks: usize = 0,
@@ -192,6 +203,10 @@ pub const App = struct {
 
         var hud = try Hud.init();
         errdefer hud.deinit();
+
+        // 2.3: single-block renderer reused for the physics toys.
+        var block_renderer = try BlockRenderer.init();
+        errdefer block_renderer.deinit();
 
         gl.gl.Enable(gl.gl.DEPTH_TEST);
         gl.gl.Enable(gl.gl.CULL_FACE);
@@ -234,6 +249,9 @@ pub const App = struct {
             .hud = hud,
             .meshes = .{},
             .undo = undo_mod.Undo.init(gpa),
+            .block_renderer = block_renderer,
+            .bodies = undefined,
+            .body_items = try gpa.alloc(physics.Body, MAX_BODIES),
             .scratch_vertices = try gpa.alloc(mesher.Vertex, INITIAL_QUAD_CAPACITY * 4),
             .scratch_indices = try gpa.alloc(u32, INITIAL_QUAD_CAPACITY * 6),
             .padded = mesher.PaddedBlocks.init(),
@@ -243,6 +261,8 @@ pub const App = struct {
             gpa.free(app.scratch_vertices);
             gpa.free(app.scratch_indices);
         }
+        // The body list needs the allocation above to exist first.
+        app.bodies = physics.Bodies.init(app.body_items);
 
         const start = std.Io.Timestamp.now(io, .awake);
         try app.preload();
@@ -274,6 +294,8 @@ pub const App = struct {
         self.allocator.free(self.scratch_vertices);
         self.allocator.free(self.scratch_indices);
         self.undo.deinit();
+        self.block_renderer.deinit();
+        self.allocator.free(self.body_items);
         self.hud.deinit();
         self.chunk_renderer.deinit();
         self.saved.deinit();
@@ -590,6 +612,7 @@ pub const App = struct {
         );
         const sprint = self.input.down(sdl.SDL_SCANCODE_LSHIFT);
         self.player.update(&self.world, @floatCast(dt), self.wishVector(), up, sprint);
+        self.bodies.step(&self.world, @floatCast(dt));
     }
 
     pub fn run(self: *App) !void {
@@ -614,6 +637,7 @@ pub const App = struct {
             if (self.input.shading_toggle) self.shading = !self.shading;
             if (self.input.hud_toggle) self.show_hud = !self.show_hud;
             if (self.input.brush_cycle) self.cycleBrush();
+            if (self.input.throw_pressed) self.throwBoxes(THROW_BATCH);
             if (self.input.radius_delta != 0) {
                 self.brush_radius = std.math.clamp(self.brush_radius + self.input.radius_delta, 1, 12);
             }
@@ -687,7 +711,7 @@ pub const App = struct {
                 self.recount();
                 const seconds = @as(f64, @floatFromInt(report_dt_ns)) / 1e9;
                 std.debug.print(
-                    "fps {d:6.1} frame {d:5.2}ms worst {d:5.2}ms  loaded {d} meshed {d} drawn {d} quads {d}  jobs {d} dropped {d}  pos ({d:.1},{d:.1},{d:.1}) {s}{s}\n",
+                    "fps {d:6.1} frame {d:5.2}ms worst {d:5.2}ms  loaded {d} meshed {d} drawn {d} quads {d}  jobs {d} boxes {d}  pos ({d:.1},{d:.1},{d:.1}) {s}{s}\n",
                     .{
                         @as(f64, @floatFromInt(frames)) / seconds,
                         @as(f64, @floatFromInt(report_dt_ns)) / 1e6 / @as(f64, @floatFromInt(frames)),
@@ -697,7 +721,7 @@ pub const App = struct {
                         drawn,
                         self.total_quads,
                         self.jobs_run,
-                        self.jobs_dropped,
+                        self.bodies.count,
                         self.player.position.x,
                         self.player.position.y,
                         self.player.position.z,
@@ -765,6 +789,37 @@ pub const App = struct {
         self.remeshDirty();
     }
 
+    /// G spawns a batch of boxes in front of the player, with a little spread so
+    /// they tumble rather than falling as a column.
+    fn throwBoxes(self: *App, count: usize) void {
+        const eye = self.player.eyePosition();
+        const forward = self.player.forward();
+        const base = eye.add(forward.scale(3));
+
+        var i: usize = 0;
+        while (i < count) : (i += 1) {
+            self.rng = self.rng *% 1664525 +% 1013904223;
+            const r1: f32 = @floatFromInt(self.rng >> 24);
+            self.rng = self.rng *% 1664525 +% 1013904223;
+            const r2: f32 = @floatFromInt(self.rng >> 24);
+            self.rng = self.rng *% 1664525 +% 1013904223;
+            const r3: f32 = @floatFromInt(self.rng >> 24);
+
+            const half: f32 = 0.3 + (r1 / 255.0) * 0.3;
+            const position = Vec3.init(
+                base.x + (r2 / 255.0 - 0.5) * 6.0,
+                base.y + (r3 / 255.0) * 4.0,
+                base.z + (r1 / 255.0 - 0.5) * 6.0,
+            );
+            const velocity = Vec3.init(
+                forward.x * 8.0 + (r2 / 255.0 - 0.5) * 4.0,
+                2.0 + (r3 / 255.0) * 4.0,
+                forward.z * 8.0 + (r3 / 255.0 - 0.5) * 4.0,
+            );
+            _ = self.bodies.spawn(position, Vec3.init(half, half, half), velocity);
+        }
+    }
+
     fn breakBlock(self: *App) void {
         const hit = self.highlight orelse return;
         if (self.world.setBlock(hit.block.x, hit.block.y, hit.block.z, .air)) {
@@ -823,6 +878,14 @@ pub const App = struct {
             if (!frustum.containsAabb(mesh.bounds)) continue;
             drawn += 1;
             self.chunk_renderer.draw(mesh);
+        }
+
+        if (self.bodies.count > 0) {
+            self.block_renderer.begin(vp, &self.textures);
+            for (self.bodies.items[0..self.bodies.count]) |body| {
+                const size = body.half.x * 2.0;
+                self.block_renderer.draw(.wood, body.position, size, Mat4.identity);
+            }
         }
 
         if (self.highlight) |hit| {
