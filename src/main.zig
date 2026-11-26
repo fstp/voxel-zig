@@ -24,6 +24,8 @@ pub fn main(init: std.process.Init) !void {
         config.net_port = std.fmt.parseInt(u16, port, 10) catch 0;
     }
     if (init.environ_map.get("VOXEL_PEER")) |peer| config.net_peer = peer;
+    // 3.10: VOXEL_SUN="142,18" pins the sun for screenshots and tests.
+    if (init.environ_map.get("VOXEL_SUN")) |spec| config.sun_spec = spec;
 
     var app = try engine.App.init(gpa, init.io, config);
     defer app.deinit();

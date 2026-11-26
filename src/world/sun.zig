@@ -12,7 +12,14 @@ const Vec3 = @import("../math/vec.zig").Vec3;
 /// east, peaks due south at `max_elevation`, sets in the west and spends the
 /// other half of the cycle below the horizon. Two numbers a person can reason
 /// about, and no ephemeris.
+pub const Mode = enum { cycle, pinned };
+
 pub const Sun = struct {
+    /// Where the sun comes from: the clock (cycle) or an explicit angle (pinned).
+    mode: Mode = .cycle,
+    /// Pinned angles, kept while the cycle runs so unpinning does not jump.
+    pinned_azimuth: f32 = 180.0,
+    pinned_elevation: f32 = 45.0,
     /// Position in the cycle, 0..1. 0 sunrise, 0.25 noon, 0.5 sunset, 0.75 midnight.
     time: f32 = 0.0,
     /// Seconds for a full cycle.
@@ -45,15 +52,36 @@ pub const Sun = struct {
 
     /// Sun elevation above the horizon, degrees. Negative at night.
     pub fn elevation(self: Sun) f32 {
+        if (self.mode == .pinned) return self.pinned_elevation;
         return self.max_elevation * @sin(self.time * 2.0 * std.math.pi);
     }
 
     /// Azimuth from north, clockwise, normalised to 0..360: 90 east (sunrise),
     /// 180 south (noon), 270 west (sunset), 0 north (midnight).
     pub fn azimuth(self: Sun) f32 {
-        const raw = 90.0 + 360.0 * self.time;
-        const wrapped = @mod(raw, 360.0);
-        return wrapped;
+        if (self.mode == .pinned) return self.pinned_azimuth;
+        return @mod(90.0 + 360.0 * self.time, 360.0);
+    }
+
+    /// Pins the sun at an explicit angle (3.10). The elevation must already be in
+    /// range; `parseSunSpec` and `nudge` do that validation, this is the setter.
+    pub fn pin(self: *Sun, azimuth_degrees: f32, elevation_degrees: f32) void {
+        self.mode = .pinned;
+        // @mod with a positive divisor returns a positive result, so -10 becomes 350.
+        self.pinned_azimuth = @mod(azimuth_degrees, 360.0);
+        self.pinned_elevation = std.math.clamp(elevation_degrees, -90.0, 90.0);
+    }
+
+    /// Back to the clock, keeping the cycle where it was.
+    pub fn unpin(self: *Sun) void {
+        self.mode = .cycle;
+    }
+
+    /// Moves a pinned sun by a delta, wrapping azimuth and clamping elevation.
+    /// Does nothing in cycle mode: moving the clock is what `setTime` is for.
+    pub fn nudge(self: *Sun, azimuth_delta: f32, elevation_delta: f32) void {
+        if (self.mode != .pinned) return;
+        self.pin(self.pinned_azimuth + azimuth_delta, self.pinned_elevation + elevation_delta);
     }
 
     /// Unit vector pointing from the world toward the sun. +X east, +Y up, +Z south.
@@ -70,6 +98,8 @@ pub const Sun = struct {
     }
 
     /// 24 hour clock for the HUD: t = 0 is 06:00 (sunrise), 0.25 is noon.
+    /// Only meaningful in cycle mode; pinned suns report the clock of the stored
+    /// time, and the HUD says PINNED next to it so nobody reads it as real.
     pub fn clockHours(self: Sun) f32 {
         return wrap01(self.time + 0.25) * 24.0;
     }
@@ -328,4 +358,62 @@ test "night lighting: no sun, but the ambient keeps a floor" {
     try testing.expect(l.ambient_sky.y >= 0.019);
     try testing.expect(l.ambient_sky.z >= 0.019);
     try testing.expect(l.ambient_sky.length() < 0.2);
+}
+
+/// Result of parsing a "<azimuth>,<elevation>" spec such as "142,18".
+pub const ParseError = error{ Malformed, ElevationOutOfRange, NotFinite };
+
+pub fn parseSunSpec(text: []const u8) ParseError!struct { azimuth: f32, elevation: f32 } {
+    const comma = std.mem.indexOfScalar(u8, text, ',') orelse return error.Malformed;
+    const azimuth_text = std.mem.trim(u8, text[0..comma], " ");
+    const elevation_text = std.mem.trim(u8, text[comma + 1 ..], " ");
+    const azimuth = std.fmt.parseFloat(f32, azimuth_text) catch return error.Malformed;
+    const elevation = std.fmt.parseFloat(f32, elevation_text) catch return error.Malformed;
+    if (!std.math.isFinite(azimuth) or !std.math.isFinite(elevation)) return error.NotFinite;
+    // Elevation has a real range: beyond +-90 the sun is under the world, which is
+    // a mistake, not a preference. Azimuth wraps instead, because 370 is east.
+    if (elevation < -90.0 or elevation > 90.0) return error.ElevationOutOfRange;
+    // @mod keeps the sign of the divisor: -10 becomes 350, 370 becomes 10.
+    return .{ .azimuth = @mod(azimuth, 360.0), .elevation = elevation };
+}
+
+test "a pinned sun overrides the clock and unpinning restores it" {
+    var sun = Sun.init();
+    sun.setTime(0.25);
+    const cycle_elevation = sun.elevation();
+    sun.pin(45.0, 10.0);
+    try testing.expectApproxEqAbs(@as(f32, 10.0), sun.elevation(), 1e-5);
+    try testing.expectApproxEqAbs(@as(f32, 45.0), sun.azimuth(), 1e-5);
+    // The cycle time is untouched, so unpinning returns to noon.
+    sun.unpin();
+    try testing.expectApproxEqAbs(cycle_elevation, sun.elevation(), 1e-5);
+}
+
+test "nudging wraps azimuth and clamps elevation" {
+    var sun = Sun.init();
+    sun.pin(350.0, 80.0);
+    sun.nudge(20.0, 20.0);
+    try testing.expectApproxEqAbs(@as(f32, 10.0), sun.azimuth(), 1e-4);
+    try testing.expectApproxEqAbs(@as(f32, 90.0), sun.elevation(), 1e-4);
+    // In cycle mode a nudge does nothing.
+    var cycling = Sun.init();
+    const before = cycling.azimuth();
+    cycling.nudge(30.0, 30.0);
+    try testing.expectApproxEqAbs(before, cycling.azimuth(), 1e-5);
+}
+
+test "sun specs parse, wrap azimuth, and reject what cannot be a sun" {
+    const parsed = try parseSunSpec("142,18");
+    try testing.expectApproxEqAbs(@as(f32, 142.0), parsed.azimuth, 1e-4);
+    try testing.expectApproxEqAbs(@as(f32, 18.0), parsed.elevation, 1e-4);
+
+    const wrapped = try parseSunSpec("-10, -5");
+    try testing.expectApproxEqAbs(@as(f32, 350.0), wrapped.azimuth, 1e-4);
+    try testing.expectApproxEqAbs(@as(f32, -5.0), wrapped.elevation, 1e-4);
+
+    try testing.expectError(error.Malformed, parseSunSpec("142"));
+    try testing.expectError(error.Malformed, parseSunSpec("east,18"));
+    try testing.expectError(error.ElevationOutOfRange, parseSunSpec("142,120"));
+    try testing.expectError(error.ElevationOutOfRange, parseSunSpec("142,-91"));
+    try testing.expectError(error.NotFinite, parseSunSpec("inf,10"));
 }

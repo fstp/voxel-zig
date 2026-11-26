@@ -44,6 +44,9 @@ pub const Config = struct {
     /// "ip:port" of the other side; the peer is learned from the first packet if
     /// this is null.
     net_peer: ?[]const u8 = null,
+    /// "azimuth,elevation" from VOXEL_SUN (3.10). Invalid specs are rejected with
+    /// a warning on screen and in the log, never silently corrected.
+    sun_spec: ?[]const u8 = null,
 };
 
 /// 1.11 streaming: a cylinder of LOAD_RADIUS chunks around the player, unloaded
@@ -163,6 +166,9 @@ pub const App = struct {
     legacy_lighting: bool = false,
     show_normals: bool = false,
     fog_enabled: bool = true,
+    /// Seconds left to show a rejected --sun spec, and the message itself.
+    sun_warning_seconds: f32 = 0,
+    sun_warning: ?[]const u8 = null,
     sun: sun_mod.Sun = sun_mod.Sun.init(),
     hud: Hud,
     show_hud: bool = true,
@@ -265,6 +271,24 @@ pub const App = struct {
         }
         errdefer if (peer) |*p| p.deinit(io);
 
+        var app_sun = sun_mod.Sun.init();
+        var warning: ?[]const u8 = null;
+        var warning_seconds: f32 = 0;
+        if (config.sun_spec) |spec| {
+            if (sun_mod.parseSunSpec(spec)) |parsed| {
+                app_sun.pin(parsed.azimuth, parsed.elevation);
+                std.debug.print("sun: pinned at az {d:.1} el {d:.1} from VOXEL_SUN\n", .{ parsed.azimuth, parsed.elevation });
+            } else |err| {
+                warning = switch (err) {
+                    error.ElevationOutOfRange => "SUN SPEC REJECTED: elevation must be -90..90",
+                    error.NotFinite => "SUN SPEC REJECTED: not a finite number",
+                    error.Malformed => "SUN SPEC REJECTED: expected \"azimuth,elevation\"",
+                };
+                warning_seconds = 8;
+                std.debug.print("sun: {s} (got {s})\n", .{ warning.?, spec });
+            }
+        }
+
         var app = App{
             .io = io,
             .window = window,
@@ -302,6 +326,9 @@ pub const App = struct {
         }
         // The body list needs the allocation above to exist first.
         app.bodies = physics.Bodies.init(app.body_items);
+        // The sun field has a default, so the literal above does not mention it;
+        // this is what carries VOXEL_SUN's pinned angle into the running app.
+        app.sun = app_sun;
 
         const start = std.Io.Timestamp.now(io, .awake);
         try app.preload();
@@ -664,6 +691,7 @@ pub const App = struct {
         self.player.update(&self.world, @floatCast(dt), self.wishVector(), up, sprint);
         self.bodies.step(&self.world, @floatCast(dt));
         self.sun.update(@floatCast(dt));
+        if (self.sun_warning_seconds > 0) self.sun_warning_seconds -= @floatCast(dt);
         self.stepNetwork(@floatCast(dt));
     }
 
@@ -737,6 +765,17 @@ pub const App = struct {
             if (self.input.shading_toggle) self.legacy_lighting = !self.legacy_lighting;
             if (self.input.normals_toggle) self.show_normals = !self.show_normals;
             if (self.input.fog_toggle) self.fog_enabled = !self.fog_enabled;
+            if (self.input.sun_pin_toggle) {
+                if (self.sun.mode == .pinned) {
+                    self.sun.unpin();
+                } else {
+                    // Seed from the current cycle angle so pinning does not jump.
+                    self.sun.pin(self.sun.azimuth(), self.sun.elevation());
+                }
+            }
+            if (self.input.sun_azimuth_delta != 0 or self.input.sun_elevation_delta != 0) {
+                self.sun.nudge(self.input.sun_azimuth_delta, self.input.sun_elevation_delta);
+            }
             if (self.input.pause_time) self.sun.togglePaused();
             if (self.input.time_scrub != 0) {
                 const delta = @as(f32, @floatFromInt(self.input.time_scrub)) * 0.01;
@@ -1135,7 +1174,7 @@ pub const App = struct {
             const whole: u32 = @intFromFloat(hours);
             const minutes: u32 = @intFromFloat((hours - @as(f32, @floatFromInt(whole))) * 60.0);
             var sun_line: [160]u8 = undefined;
-            const text = std.fmt.bufPrint(&sun_line, "SUN {d:0>2}:{d:0>2}  el {d:5.1}  az {d:5.1}  day {d:.2}  cycle {d}s{s}", .{
+            const text = std.fmt.bufPrint(&sun_line, "SUN {d:0>2}:{d:0>2}  el {d:5.1}  az {d:5.1}  day {d:.2}  cycle {d}s{s}{s}", .{
                 whole,
                 minutes,
                 self.sun.elevation(),
@@ -1143,6 +1182,7 @@ pub const App = struct {
                 self.sun.daylight(),
                 @as(u32, @intFromFloat(self.sun.cycle_seconds)),
                 if (self.sun.paused) "  PAUSED" else "",
+                if (self.sun.mode == .pinned) "  PINNED (O/arrows)" else "",
             }) catch "";
             self.hud.setColour(0.95, 0.9, 0.6);
             self.hud.text(10, @as(f32, @floatFromInt(self.window.height)) - 66, text);
