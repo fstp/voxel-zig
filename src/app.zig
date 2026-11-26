@@ -25,6 +25,7 @@ const BlockRenderer = @import("gfx/block_renderer.zig").BlockRenderer;
 const SkyRenderer = @import("gfx/sky_renderer.zig").SkyRenderer;
 const ShadowRenderer = @import("gfx/shadow_renderer.zig").ShadowRenderer;
 const Post = @import("gfx/post.zig").Post;
+const EnvProbe = @import("gfx/env_probe.zig").EnvProbe;
 const net = @import("net/udp.zig");
 const block = @import("voxel/block.zig");
 const coords = @import("voxel/coords.zig");
@@ -190,6 +191,8 @@ pub const App = struct {
     shadow_renderer: ShadowRenderer,
     /// 4.1: HDR target plus the tone-map resolve.
     post: Post,
+    /// 4.4: sky cube map the materials reflect.
+    env_probe: EnvProbe,
     shadows_enabled: bool = true,
     soft_shadows: bool = true,
     clouds_enabled: bool = true,
@@ -257,6 +260,10 @@ pub const App = struct {
         // 4.1: linear light into a half-float target, tone mapped on the way out.
         var post = try Post.init(window.width, window.height);
         errdefer post.deinit();
+
+        // 4.4: the sky, as a cube map for reflections.
+        var env_probe = try EnvProbe.init();
+        errdefer env_probe.deinit();
         // 4.1: VOXEL_EXPOSURE pins the starting exposure for screenshots.
         if (config.exposure) |value| {
             post.exposure_base = std.math.clamp(value, 0.05, 8.0);
@@ -340,6 +347,7 @@ pub const App = struct {
             .sky_renderer = sky_renderer,
             .shadow_renderer = shadow_renderer,
             .post = post,
+            .env_probe = env_probe,
             .bodies = undefined,
             .peer = peer,
             .body_items = try gpa.alloc(physics.Body, MAX_BODIES),
@@ -393,6 +401,7 @@ pub const App = struct {
         self.sky_renderer.deinit();
         self.shadow_renderer.deinit();
         self.post.deinit();
+        self.env_probe.deinit();
         self.allocator.free(self.body_items);
         self.hud.deinit();
         self.chunk_renderer.deinit();
@@ -1092,6 +1101,10 @@ pub const App = struct {
         }
 
         // Sky first, over the cleared colour buffer, then terrain on top of it.
+        // 4.4: re-render the sky cube only when the sun has moved. Before this
+        // point nothing samples it, so the ordering is safe.
+        self.env_probe.updateIfNeeded(&self.sun);
+
         // 4.1: the world goes into the half-float target, so shaders can emit
         // light above 1.0 and the exposure has something to work with. Bound
         // after the shadow pass, which ends by restoring the window.
@@ -1121,6 +1134,8 @@ pub const App = struct {
             // half a block, with the normal offset doing the real work.
             .shadow_bias = 0.0012,
             .shadow_normal_offset = self.shadow_renderer.texelSize() * 1.2,
+            .env_texture = self.env_probe.texture,
+            .env_max_mip = self.env_probe.max_mip,
             // 2 texels of spread: softer shadow edges (3.12). 1.0 restores the
             // hard 3x3 for an A/B.
             // 4 texels is about 0.9 blocks at this map resolution: enough to read

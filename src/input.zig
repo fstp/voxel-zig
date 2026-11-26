@@ -89,10 +89,12 @@ pub const Input = struct {
                     if (ev.key.key == sdl.SDLK_P) self.pause_time = true;
                     if (ev.key.key == sdl.SDLK_COMMA) self.time_scrub = -1;
                     if (ev.key.key == sdl.SDLK_PERIOD) self.time_scrub = 1;
+                    // 4.5: the day arc is the first 60 percent of the cycle, so
+                    // noon is 0.30 and dusk sits just before the 0.60 sunset.
                     if (ev.key.key == sdl.SDLK_1) self.time_jump = 0.02;
-                    if (ev.key.key == sdl.SDLK_2) self.time_jump = 0.25;
-                    if (ev.key.key == sdl.SDLK_3) self.time_jump = 0.48;
-                    if (ev.key.key == sdl.SDLK_4) self.time_jump = 0.75;
+                    if (ev.key.key == sdl.SDLK_2) self.time_jump = 0.30;
+                    if (ev.key.key == sdl.SDLK_3) self.time_jump = 0.58;
+                    if (ev.key.key == sdl.SDLK_4) self.time_jump = 0.80;
                     if (ev.key.key == sdl.SDLK_F5) self.save_toggle = true;
                     if (ev.key.key == sdl.SDLK_F1) self.hud_toggle = true;
                     if (ev.key.key == sdl.SDLK_B) self.brush_cycle = true;

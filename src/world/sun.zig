@@ -20,10 +20,15 @@ pub const Sun = struct {
     /// Pinned angles, kept while the cycle runs so unpinning does not jump.
     pinned_azimuth: f32 = 180.0,
     pinned_elevation: f32 = 45.0,
-    /// Position in the cycle, 0..1. 0 sunrise, 0.25 noon, 0.5 sunset, 0.75 midnight.
+    /// Position in the cycle, 0..1. 0 sunrise, `day_fraction/2` noon,
+    /// `day_fraction` sunset, and midnight at 0.8 of the way round.
     time: f32 = 0.0,
-    /// Seconds for a full cycle.
-    cycle_seconds: f32 = 600.0,
+    /// Seconds for a full cycle: five minutes, of which three are day and two
+    /// are night (player request, 4.5).
+    cycle_seconds: f32 = 300.0,
+    /// Fraction of the cycle the sun spends above the horizon. 0.6 of 300 s is
+    /// 180 s of day and 120 s of night.
+    day_fraction: f32 = 0.6,
     /// Highest elevation, degrees. 62 is a Swedish summer noon.
     max_elevation: f32 = 62.0,
     paused: bool = false,
@@ -50,17 +55,30 @@ pub const Sun = struct {
         self.paused = !self.paused;
     }
 
+    /// The clock time remapped onto the sine's half-cycles.
+    ///
+    /// A plain sine gives a 50/50 day and night, but the player asked for three
+    /// minutes of day to two of night. Stretching the day arc over 60 percent of
+    /// the cycle and the night arc over the remaining 40 gives exactly that,
+    /// while the elevation curve keeps its smooth sine shape inside each arc.
+    /// The sun therefore crosses the sky slightly faster by day than by night.
+    pub fn phase(self: Sun) f32 {
+        const d = std.math.clamp(self.day_fraction, 0.01, 0.99);
+        if (self.time < d) return 0.5 * (self.time / d);
+        return 0.5 + 0.5 * ((self.time - d) / (1.0 - d));
+    }
+
     /// Sun elevation above the horizon, degrees. Negative at night.
     pub fn elevation(self: Sun) f32 {
         if (self.mode == .pinned) return self.pinned_elevation;
-        return self.max_elevation * @sin(self.time * 2.0 * std.math.pi);
+        return self.max_elevation * @sin(self.phase() * 2.0 * std.math.pi);
     }
 
     /// Azimuth from north, clockwise, normalised to 0..360: 90 east (sunrise),
     /// 180 south (noon), 270 west (sunset), 0 north (midnight).
     pub fn azimuth(self: Sun) f32 {
         if (self.mode == .pinned) return self.pinned_azimuth;
-        return @mod(90.0 + 360.0 * self.time, 360.0);
+        return @mod(90.0 + 360.0 * self.phase(), 360.0);
     }
 
     /// Pins the sun at an explicit angle (3.10). The elevation must already be in
@@ -100,8 +118,11 @@ pub const Sun = struct {
     /// 24 hour clock for the HUD: t = 0 is 06:00 (sunrise), 0.25 is noon.
     /// Only meaningful in cycle mode; pinned suns report the clock of the stored
     /// time, and the HUD says PINNED next to it so nobody reads it as real.
+    /// Wall-clock hours implied by the sun's position: 06:00 at sunrise, 12:00 at
+    /// noon, 18:00 at sunset, 00:00 at midnight. Derived from `phase`, so it stays
+    /// consistent with the asymmetric cycle instead of assuming a 50/50 split.
     pub fn clockHours(self: Sun) f32 {
-        return wrap01(self.time + 0.25) * 24.0;
+        return @mod(6.0 + 24.0 * self.phase(), 24.0);
     }
 
     pub fn ramp(self: Sun) Ramp {
@@ -237,15 +258,16 @@ test "the sun rises east, peaks south, sets west, and is below at midnight" {
     try testing.expectApproxEqAbs(@as(f32, 0.0), sun.elevation(), 1e-4);
     try testing.expectApproxEqAbs(@as(f32, 90.0), sun.azimuth(), 1e-4);
 
-    sun.setTime(0.25);
+    // 4.5: the day arc now spans the first 60 percent of the cycle.
+    sun.setTime(0.30);
     try testing.expectApproxEqAbs(@as(f32, 62.0), sun.elevation(), 1e-4);
     try testing.expectApproxEqAbs(@as(f32, 180.0), sun.azimuth(), 1e-4);
 
-    sun.setTime(0.5);
+    sun.setTime(0.60);
     try testing.expectApproxEqAbs(@as(f32, 0.0), sun.elevation(), 1e-4);
     try testing.expectApproxEqAbs(@as(f32, 270.0), sun.azimuth(), 1e-4);
 
-    sun.setTime(0.75);
+    sun.setTime(0.80);
     try testing.expectApproxEqAbs(@as(f32, -62.0), sun.elevation(), 1e-4);
     // Normalised: midnight is due north, shown as 0 rather than 360.
     try testing.expectApproxEqAbs(@as(f32, 0.0), sun.azimuth(), 1e-4);
@@ -335,17 +357,33 @@ test "ramp values match the ADR 0009 table after converting back to sRGB" {
     }
 }
 
-test "the clock reads noon at t = 0.25" {
+test "the clock reads noon at t = 0.30 and midnight at t = 0.80" {
     var sun = Sun.init();
-    sun.setTime(0.25);
+    sun.setTime(0.30);
     try testing.expectApproxEqAbs(@as(f32, 12.0), sun.clockHours(), 1e-5);
-    sun.setTime(0.75);
+    sun.setTime(0.80);
     try testing.expectApproxEqAbs(@as(f32, 0.0), sun.clockHours(), 1e-5);
+}
+
+test "the cycle gives three minutes of day and two of night (4.5)" {
+    var sun = Sun.init();
+    try testing.expectApproxEqAbs(@as(f32, 300.0), sun.cycle_seconds, 1e-6);
+
+    // Time is discrete here, so walk the clock and count how long the sun is up.
+    var day_seconds: f32 = 0;
+    var t: f32 = 0;
+    const step: f32 = 0.001;
+    while (t < 1.0) : (t += step) {
+        sun.setTime(t);
+        if (sun.elevation() > 0.0) day_seconds += step * sun.cycle_seconds;
+    }
+    try testing.expectApproxEqAbs(@as(f32, 180.0), day_seconds, 1.0);
+    try testing.expectApproxEqAbs(@as(f32, 120.0), sun.cycle_seconds - day_seconds, 1.0);
 }
 
 test "noon lighting: the sun dominates the ambient" {
     var sun = Sun.init();
-    sun.setTime(0.25);
+    sun.setTime(0.30);
     const l = sun.lighting();
     const sun_strength = l.sun_colour.length();
     const ambient_strength = l.ambient_sky.length();
@@ -355,7 +393,7 @@ test "noon lighting: the sun dominates the ambient" {
 
 test "night lighting: no sun, but the ambient keeps a floor" {
     var sun = Sun.init();
-    sun.setTime(0.75);
+    sun.setTime(0.80);
     const l = sun.lighting();
     try testing.expectApproxEqAbs(@as(f32, 0.0), l.sun_colour.length(), 1e-6);
     // Every channel is at least the night floor, so terrain is dim, not black.

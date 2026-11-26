@@ -100,6 +100,10 @@ pub const TEXTURE_SIZE: u32 = 16;
 pub const Material = struct {
     roughness: f32,
     metallic: f32,
+    /// How much of the albedo reaches the diffuse lobe. Water absorbs light that
+    /// enters it, so its diffuse is nearly zero and the sky reflection is what
+    /// you actually see; everything solid stays at 1.0.
+    diffuse: f32 = 1.0,
 };
 
 pub const layer_materials = [_]Material{
@@ -110,7 +114,9 @@ pub const layer_materials = [_]Material{
     .{ .roughness = 0.88, .metallic = 0.0 }, // sand
     .{ .roughness = 0.48, .metallic = 0.0 }, // wood: planed, the shiniest natural block
     .{ .roughness = 0.82, .metallic = 0.0 }, // leaves
-    .{ .roughness = 0.06, .metallic = 0.0 }, // water: smooth dielectric, near mirror
+    // Water: smooth, and with almost no diffuse. Leaving it at 1.0 was why the
+    // sea read as flat blue - its own albedo swamped the 4 percent reflection.
+    .{ .roughness = 0.08, .metallic = 0.0, .diffuse = 0.12 },
 };
 
 pub const texture_paths = [_][:0]const u8{
@@ -172,5 +178,6 @@ test "every texture layer has a material" {
     for (layer_materials) |m| {
         try std.testing.expect(m.roughness > 0.0 and m.roughness <= 1.0);
         try std.testing.expect(m.metallic >= 0.0 and m.metallic <= 1.0);
+        try std.testing.expect(m.diffuse >= 0.0 and m.diffuse <= 1.0);
     }
 }

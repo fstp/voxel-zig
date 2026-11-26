@@ -71,7 +71,9 @@ const FRAG_SRC: [:0]const u8 =
     \\uniform float u_shadow_pcf_radius; // in texels (3.12: soft edges)
     \\uniform int u_shadow_kernel;       // 1 = 3x3, 2 = 5x5 taps
     \\uniform float u_shadows_enabled;
-\\uniform vec2 u_material[8];   // per texture layer: x roughness, y metallic
+\\uniform vec4 u_material[8];   // per layer: x roughness, y metallic, z diffuse, w unused
+\\uniform samplerCube u_env;    // sky probe (4.4), unit 2
+\\uniform float u_env_max_mip;
     \\in vec2 v_uv;
     \\in float v_layer;
     \\in float v_ao;
@@ -149,9 +151,13 @@ const FRAG_SRC: [:0]const u8 =
     \\    // Physical shading (ADR 0011): metallic-roughness, one directional light
     \\    // plus the sky as ambient. The material comes from the texture layer, so
     \\    // the vertex format and the mesher are untouched.
-    \\    vec2 material = u_material[int(v_layer + 0.5)];
-    \\    float roughness = clamp(material.x, 0.04, 1.0);
+    \\    vec4 material = u_material[int(v_layer + 0.5)];
+    \\    float roughness = clamp(material.x, 0.06, 1.0);
     \\    float metallic = clamp(material.y, 0.0, 1.0);
+    \\    // 4.4: water sets this near zero, so its bright albedo stops drowning the
+    \\    // reflection it is supposed to show.
+    \\    float diffuse_scale = clamp(material.z, 0.0, 1.0);
+    \\    vec3 albedo = c.rgb * diffuse_scale;
     \\
     \\    vec3 N = normalize(v_normal);
     \\    vec3 V = normalize(u_eye - v_world);
@@ -168,7 +174,7 @@ const FRAG_SRC: [:0]const u8 =
     \\    vec3 fresnel = F_Schlick(f0, vdh);
     \\    vec3 specular = D_GGX(ndh, roughness) * V_SmithGGX(ndv, ndl, roughness) * fresnel;
     \\    // Energy conservation: whatever is reflected specularly cannot also diffuse.
-    \\    vec3 diffuse = (vec3(1.0) - fresnel) * (1.0 - metallic) * c.rgb / PI;
+    \\    vec3 diffuse = (vec3(1.0) - fresnel) * (1.0 - metallic) * albedo / PI;
     \\
     \\    // u_sun_colour is scaled for the old Lambert path, so it carries an implicit
     \\    // PI: multiply it back here rather than retuning the sky that shares it.
@@ -176,13 +182,13 @@ const FRAG_SRC: [:0]const u8 =
     \\    vec3 direct = (diffuse + specular) * u_sun_colour * PI * ndl * visibility;
     \\
     \\    vec3 hemi = mix(u_ambient_ground, u_ambient_sky, N.y * 0.5 + 0.5);
-    \\    // Without a cube map the sky gradient stands in for the environment: the
-    \\    // reflected ray picks its colour from the same hemisphere, and roughness
-    \\    // decides how much of it survives. That is the visible half of PBR here.
+    \\    // 4.4: the reflected ray is looked up in the sky probe with the mip chosen
+    \\    // by roughness, so a polished face mirrors the gradient and the sun while
+    \\    // a rough one averages to a soft sheen.
     \\    vec3 R = reflect(-V, N);
-    \\    vec3 environment = mix(u_ambient_ground, u_ambient_sky, clamp(R.y * 0.5 + 0.5, 0.0, 1.0));
-    \\    vec3 ambient_specular = environment * F_Schlick(f0, ndv) * (1.0 - roughness);
-    \\    vec3 ambient = (hemi * c.rgb * (1.0 - metallic) + ambient_specular) * ao;
+    \\    vec3 environment = textureLod(u_env, R, roughness * u_env_max_mip).rgb;
+    \\    vec3 ambient_specular = environment * F_Schlick(f0, ndv);
+    \\    vec3 ambient = (hemi * albedo * (1.0 - metallic) + ambient_specular) * ao;
     \\
     \\    // AO darkens the ambient fully and the direct sun only partly: the shadow
     \\    // map is what should darken a lit face that is in shadow, and multiplying
@@ -262,6 +268,9 @@ pub const ChunkRenderer = struct {
         /// 2 = 5x5). Both matter: nine taps spread wider is still nine taps.
         shadow_pcf_radius: f32,
         shadow_kernel: i32,
+        /// 4.4: the sky probe and the highest mip a roughness-1 surface samples.
+        env_texture: gl.uint,
+        env_max_mip: f32,
     };
 
     pub fn begin(self: *ChunkRenderer, textures: *const TextureArray, params: FrameParams) void {
@@ -276,7 +285,7 @@ pub const ChunkRenderer = struct {
         };
         comptime std.debug.assert(material_uniforms.len == block.layer_materials.len);
         for (block.layer_materials, material_uniforms) |m, name| {
-            self.shader.setFloat2(name, .{ m.roughness, m.metallic });
+            self.shader.setFloat4(name, .{ m.roughness, m.metallic, m.diffuse, 0.0 });
         }
         self.shader.setMat4("u_vp", params.view_projection.m);
         self.shader.setVec3("u_eye", asArray(params.eye));
@@ -299,6 +308,12 @@ pub const ChunkRenderer = struct {
             gl.ActiveTexture(gl.TEXTURE0);
         }
         self.shader.setInt("u_shadow", 1);
+        // 4.4: the sky probe, unit 2. A zero texture (probe not ready) still
+        // samples as black rather than leaving the sampler unbound.
+        gl.ActiveTexture(gl.TEXTURE2);
+        gl.BindTexture(gl.TEXTURE_CUBE_MAP, params.env_texture);
+        self.shader.setInt("u_env", 2);
+        self.shader.setFloat("u_env_max_mip", params.env_max_mip);
         self.shader.setMat4("u_light_vp", params.light_vp.m);
         self.shader.setFloat("u_shadows_enabled", if (params.shadow_enabled) 1.0 else 0.0);
         self.shader.setFloat("u_shadow_texel", params.shadow_texel);
