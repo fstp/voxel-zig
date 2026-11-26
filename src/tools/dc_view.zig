@@ -32,6 +32,10 @@ const SEED: u32 = 1337;
 const PATCH: i32 = 8;
 const CELL: f32 = 1.0;
 
+/// The field, sampled directly from the project's fBm. It used to be a bilinear blend of four
+/// `terrain.heightAt` values - four generator calls per sample, and a rebuild of 64 chunks cost
+/// 157 ms because of it. Sampling the noise once is cheaper AND smoother: the block generator's
+/// height is an integer, so the blend still carried a 1 m staircase that DC faithfully reproduced.
 fn heightAt(x: f32, z: f32) f32 {
     const base: f32 = 62.0;
     const big = noise.fbm2(SEED, x * 0.009, z * 0.009, 4, 2.0, 0.5);
