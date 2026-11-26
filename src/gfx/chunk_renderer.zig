@@ -5,6 +5,11 @@ const TextureArray = @import("texture.zig").TextureArray;
 const mesher = @import("../voxel/mesher.zig");
 const Mat4 = @import("../math/mat4.zig").Mat4;
 const Vec3 = @import("../math/vec.zig").Vec3;
+
+/// Shader.setVec3 takes a plain array; the engine passes Vec3 everywhere else.
+fn asArray(v: Vec3) [3]f32 {
+    return .{ v.x, v.y, v.z };
+}
 const Aabb = @import("../math/aabb.zig").Aabb;
 
 const VERT_SRC: [:0]const u8 =
@@ -43,8 +48,12 @@ const VERT_SRC: [:0]const u8 =
 const FRAG_SRC: [:0]const u8 =
     \\#version 460 core
     \\uniform sampler2DArray u_tex;
-    \\uniform float u_shading; // 1 = AO + face shading, 0 = flat (A/B toggle)
+    \\uniform float u_legacy;  // 1 = the old face table, 0 = sun lighting (F4 A/B)
     \\uniform float u_normals; // 1 = debug view: colour by normal (F6)
+    \\uniform vec3 u_sun_dir;  // toward the sun, unit
+    \\uniform vec3 u_sun_colour;    // linear, scaled by sun height
+    \\uniform vec3 u_ambient_sky;   // linear hemisphere ambient, up
+    \\uniform vec3 u_ambient_ground;
     \\in vec2 v_uv;
     \\in float v_layer;
     \\in float v_ao;
@@ -68,11 +77,19 @@ const FRAG_SRC: [:0]const u8 =
     \\    float ao = mix(0.45, 1.0, v_ao / 3.0);
     \\    if (u_normals > 0.5) {
     \\        // Debug: -1..1 mapped to 0..1, so +Y is green, +X red, +Z blue.
-    \\        f_colour = vec4(v_normal * 0.5 + 0.5, 1.0);
+    \\        // The framebuffer is sRGB (ADR 0008), so encode here or the colours
+    \\        // come out washed out.
+    \\        f_colour = vec4(pow(v_normal * 0.5 + 0.5, vec3(2.2)), 1.0);
     \\        return;
     \\    }
-    \\    float lit = mix(1.0, faceBrightness(v_face) * ao, u_shading);
-    \\    f_colour = vec4(c.rgb * lit, c.a);
+    \\    // Sun lighting (ADR 0008): Lambert plus a hemisphere ambient, times AO.
+    \\    float ndl = max(dot(v_normal, u_sun_dir), 0.0);
+    \\    vec3 hemi = mix(u_ambient_ground, u_ambient_sky, v_normal.y * 0.5 + 0.5);
+    \\    vec3 lit = (hemi + u_sun_colour * ndl) * ao;
+    \\    // F4 A/B: the old hardcoded table, kept so 3.9 can show the difference.
+    \\    vec3 legacy = vec3(faceBrightness(v_face) * ao);
+    \\    vec3 rgb = mix(c.rgb * lit, c.rgb * legacy, u_legacy);
+    \\    f_colour = vec4(rgb, c.a);
     \\}
 ;
 
@@ -105,12 +122,23 @@ pub const ChunkRenderer = struct {
     /// array on unit 0. Depth test and backface culling are enabled here so a
     /// missing GL state setup cannot produce the "see the inside of the world"
     /// bug.
-    pub fn begin(self: *ChunkRenderer, view_projection: Mat4, textures: *const TextureArray, shading: bool, normals: bool) void {
+    pub fn begin(
+        self: *ChunkRenderer,
+        view_projection: Mat4,
+        textures: *const TextureArray,
+        lighting: @import("../world/sun.zig").Lighting,
+        legacy: bool,
+        normals: bool,
+    ) void {
         self.shader.use();
         self.shader.setMat4("u_vp", view_projection.m);
         self.shader.setInt("u_tex", 0);
-        self.shader.setFloat("u_shading", if (shading) 1.0 else 0.0);
+        self.shader.setFloat("u_legacy", if (legacy) 1.0 else 0.0);
         self.shader.setFloat("u_normals", if (normals) 1.0 else 0.0);
+        self.shader.setVec3("u_sun_dir", asArray(lighting.sun_dir));
+        self.shader.setVec3("u_sun_colour", asArray(lighting.sun_colour));
+        self.shader.setVec3("u_ambient_sky", asArray(lighting.ambient_sky));
+        self.shader.setVec3("u_ambient_ground", asArray(lighting.ambient_ground));
         textures.bind(0);
 
         gl.Enable(gl.DEPTH_TEST);

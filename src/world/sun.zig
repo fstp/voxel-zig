@@ -77,7 +77,39 @@ pub const Sun = struct {
     pub fn ramp(self: Sun) Ramp {
         return rampAt(self.elevation());
     }
+
+    /// Everything the shaders need for one frame of sunlight, in linear space.
+    pub fn lighting(self: Sun) Lighting {
+        const r = self.ramp();
+        const elevation_rad = self.elevation() * std.math.pi / 180.0;
+        const strength = @max(@sin(elevation_rad), 0.0);
+        return .{
+            .sun_dir = self.direction(),
+            .sun_colour = r.sun.scale(strength),
+            // Ambient is deliberately a fraction of the sun: a full-strength blue
+            // zenith washes out the directional term and everything reads flat.
+            .ambient_sky = r.zenith.scale(0.30).add(Vec3.splat(night_floor)),
+            .ambient_ground = r.horizon.scale(0.15).add(Vec3.splat(night_floor * 0.4)),
+        };
+    }
+
+
 };
+
+/// Everything the shaders need for one frame of sunlight, in linear space.
+pub const Lighting = struct {
+    /// Unit vector from the world toward the sun.
+    sun_dir: Vec3,
+    /// Sun colour, already scaled by how high the sun is (zero at night).
+    sun_colour: Vec3,
+    /// Hemisphere ambient: sky above, ground bounce below.
+    ambient_sky: Vec3,
+    ambient_ground: Vec3,
+};
+
+/// Floor so night is dark but still readable (C19): without it the terrain goes
+/// to black once the sun is below the horizon.
+const night_floor: f32 = 0.02;
 
 pub const Ramp = struct {
     /// Linear-space colours (ADR 0008: everything downstream shades in linear).
@@ -274,4 +306,26 @@ test "the clock reads noon at t = 0.25" {
     try testing.expectApproxEqAbs(@as(f32, 12.0), sun.clockHours(), 1e-5);
     sun.setTime(0.75);
     try testing.expectApproxEqAbs(@as(f32, 0.0), sun.clockHours(), 1e-5);
+}
+
+test "noon lighting: the sun dominates the ambient" {
+    var sun = Sun.init();
+    sun.setTime(0.25);
+    const l = sun.lighting();
+    const sun_strength = l.sun_colour.length();
+    const ambient_strength = l.ambient_sky.length();
+    try testing.expect(sun_strength > ambient_strength * 4.0);
+    try testing.expectApproxEqAbs(@as(f32, 1.0), l.sun_dir.length(), 1e-5);
+}
+
+test "night lighting: no sun, but the ambient keeps a floor" {
+    var sun = Sun.init();
+    sun.setTime(0.75);
+    const l = sun.lighting();
+    try testing.expectApproxEqAbs(@as(f32, 0.0), l.sun_colour.length(), 1e-6);
+    // Every channel is at least the night floor, so terrain is dim, not black.
+    try testing.expect(l.ambient_sky.x >= 0.019);
+    try testing.expect(l.ambient_sky.y >= 0.019);
+    try testing.expect(l.ambient_sky.z >= 0.019);
+    try testing.expect(l.ambient_sky.length() < 0.2);
 }

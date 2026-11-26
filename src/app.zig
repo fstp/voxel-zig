@@ -159,7 +159,7 @@ pub const App = struct {
     saved: save.Loaded,
     save_path: []const u8 = SAVE_PATH,
     show_wire: bool = false,
-    shading: bool = true,
+    legacy_lighting: bool = false,
     show_normals: bool = false,
     sun: sun_mod.Sun = sun_mod.Sun.init(),
     hud: Hud,
@@ -725,7 +725,7 @@ pub const App = struct {
             const dt = @as(f64, @floatFromInt(dt_ns)) / 1e9;
 
             if (self.input.debug_toggle) self.show_wire = !self.show_wire;
-            if (self.input.shading_toggle) self.shading = !self.shading;
+            if (self.input.shading_toggle) self.legacy_lighting = !self.legacy_lighting;
             if (self.input.normals_toggle) self.show_normals = !self.show_normals;
             if (self.input.pause_time) self.sun.togglePaused();
             if (self.input.time_scrub != 0) {
@@ -967,11 +967,12 @@ pub const App = struct {
 
     fn render(self: *App) usize {
         gl.gl.Viewport(0, 0, self.window.width, self.window.height);
-        // Until the sky pass lands (3.6), the clear colour is the sun's horizon
-        // colour. Note this is an sRGB value and the pipeline is not sRGB yet;
-        // 3.5 turns on FRAMEBUFFER_SRGB and must revisit this line.
-        const horizon = sun_mod.toSrgb(self.sun.ramp().horizon);
-        gl.gl.ClearColor(horizon.x, horizon.y, horizon.z, 1.0);
+        // ADR 0008: the framebuffer is sRGB, so every fragment the shaders write is
+        // linear and the hardware encodes it. Clears are converted too, which is
+        // why the colour below is linear.
+        gl.gl.Enable(gl.gl.FRAMEBUFFER_SRGB);
+        const linear_horizon = self.sun.ramp().horizon;
+        gl.gl.ClearColor(linear_horizon.x, linear_horizon.y, linear_horizon.z, 1.0);
         gl.gl.Clear(gl.gl.COLOR_BUFFER_BIT | gl.gl.DEPTH_BUFFER_BIT);
 
         self.camera.position = self.player.eyePosition();
@@ -982,7 +983,8 @@ pub const App = struct {
         const vp = self.camera.viewProjection(aspect);
         const frustum = Frustum.fromViewProjection(vp);
 
-        self.chunk_renderer.begin(vp, &self.textures, self.shading, self.show_normals);
+        const lighting = self.sun.lighting();
+        self.chunk_renderer.begin(vp, &self.textures, lighting, self.legacy_lighting, self.show_normals);
         var drawn: usize = 0;
         var it = self.meshes.valueIterator();
         while (it.next()) |mesh| {
@@ -994,12 +996,12 @@ pub const App = struct {
 
         if (self.remote_position) |remote| {
             // The other player is a floating cube for now: enough to see them move.
-            self.block_renderer.begin(vp, &self.textures);
+            self.block_renderer.begin(vp, &self.textures, lighting, self.legacy_lighting);
             self.block_renderer.draw(.sand, Vec3.init(remote.x, remote.y + 0.9, remote.z), 1.6, Mat4.identity);
         }
 
         if (self.bodies.count > 0) {
-            self.block_renderer.begin(vp, &self.textures);
+            self.block_renderer.begin(vp, &self.textures, lighting, self.legacy_lighting);
             for (self.bodies.items[0..self.bodies.count]) |body| {
                 const size = body.half.x * 2.0;
                 self.block_renderer.draw(.wood, body.position, size, Mat4.identity);
@@ -1116,7 +1118,7 @@ pub const App = struct {
             self.hud.text(10, @as(f32, @floatFromInt(self.window.height)) - 66, text);
         }
 
-        const keys = "F1 HUD  F FLY  F3 BOXES  F4 SHADING  F6 NORMALS  P PAUSE SUN  1-4 TIMES";
+        const keys = "F1 HUD  F FLY  F3 BOXES  F4 LIGHT A/B  F6 NORMALS  P PAUSE SUN  1-4 TIMES";
         self.hud.setColour(0.6, 0.6, 0.6);
         self.hud.text(10, @as(f32, @floatFromInt(self.window.height)) - 22, keys);
 
