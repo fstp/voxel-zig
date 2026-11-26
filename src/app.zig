@@ -13,7 +13,7 @@ const Vec3 = @import("math/vec.zig").Vec3;
 const World = @import("world/world.zig").World;
 const chunk_mesher = @import("world/chunk_mesher.zig");
 const mesher = @import("voxel/mesher.zig");
-const fixture = @import("world/fixture.zig");
+const terrain = @import("world/terrain.zig");
 const block = @import("voxel/block.zig");
 
 pub const Config = struct {
@@ -21,7 +21,13 @@ pub const Config = struct {
     width: i32 = 1280,
     height: i32 = 720,
     vsync: bool = true,
+    /// Worldgen seed. Fixed so the acceptance screenshot is reproducible.
+    seed: u32 = 0x5EED_1234,
 };
+
+/// 1.8 generates a fixed 9x9 chunk area (ADR 0005); streaming replaces the
+/// bounds in 1.11.
+pub const FIELD_CHUNKS: i32 = 9;
 
 /// Fixed-timestep bookkeeping, split out so it can be tested without a window.
 pub const Step = struct {
@@ -54,6 +60,33 @@ pub fn advance(accumulator: f64, dt: f64, fixed_dt: f64, max_steps: u32) Step {
     return .{ .accumulator = acc, .steps = steps, .clamped = clamped };
 }
 
+pub const CHUNK_TOTAL: usize = @intCast(FIELD_CHUNKS * FIELD_CHUNKS * @import("voxel/coords.zig").CHUNK_COUNT_Y);
+
+/// The fixed area 1.8 generates and draws.
+pub fn chunkPositions() [CHUNK_TOTAL]@import("voxel/coords.zig").ChunkPos {
+    const coords = @import("voxel/coords.zig");
+    var positions: [CHUNK_TOTAL]coords.ChunkPos = undefined;
+    var i: usize = 0;
+    for (0..coords.CHUNK_COUNT_Y) |cy| {
+        for (0..FIELD_CHUNKS) |cz| {
+            for (0..FIELD_CHUNKS) |cx| {
+                positions[i] = coords.ChunkPos.init(@intCast(cx), @intCast(cy), @intCast(cz));
+                i += 1;
+            }
+        }
+    }
+    return positions;
+}
+
+/// Creates and generates every chunk in the area. Pure per chunk, so this could
+/// be split across worker threads without changing the result (1.13).
+pub fn buildWorld(world: *World, seed: u32) !void {
+    for (chunkPositions()) |pos| {
+        const chunk = try world.getOrCreateChunk(pos);
+        terrain.generateChunk(chunk, seed);
+    }
+}
+
 /// First guess for a chunk's geometry buffers; a chunk that needs more is
 /// meshed again into a bigger buffer (the checkerboard worst case is 98k quads
 /// and not worth reserving up front).
@@ -75,6 +108,8 @@ pub const App = struct {
     scratch_vertices: []mesher.Vertex,
     scratch_indices: []u32,
     total_quads: usize = 0,
+    meshed_chunks: usize = 0,
+    seed: u32,
     show_wire: bool = false,
     allocator: std.mem.Allocator,
 
@@ -102,11 +137,14 @@ pub const App = struct {
         errdefer textures.deinit();
         std.debug.print("textures: {d} layers of {d}x{d}\n", .{ textures.layers, textures.size, textures.size });
 
-        // 1.7 draws a fixed 5x5x2 chunk field (fixture terrain; 1.8 replaces it
-        // with noise worldgen).
+        // ADR 0005 worldgen: a pure function of (seed, chunk_pos), so the order
+        // these chunks are created in cannot matter.
         var world = World.init(gpa);
         errdefer world.deinit();
-        try fixture.build(&world);
+        const gen_start = std.Io.Timestamp.now(io, .awake);
+        try buildWorld(&world, config.seed);
+        const gen_ms = @as(f64, @floatFromInt(std.Io.Timestamp.now(io, .awake).nanoseconds - gen_start.nanoseconds)) / 1e6;
+        std.debug.print("worldgen: {d} chunks in {d:.1} ms ({d:.1} us/chunk)\n", .{ CHUNK_TOTAL, gen_ms, gen_ms * 1000.0 / @as(f64, @floatFromInt(CHUNK_TOTAL)) });
 
         var chunk_renderer = try ChunkRenderer.init();
         errdefer chunk_renderer.deinit();
@@ -124,17 +162,18 @@ pub const App = struct {
             .window = window,
             .frame_arena = std.heap.ArenaAllocator.init(gpa),
             .camera = .{
-                .position = Vec3.init(80, 74, 196),
+                .position = Vec3.init(144, 150, 430),
                 .yaw = 0,
-                .pitch = -0.26,
-                .speed = 24,
+                .pitch = -0.18,
+                .speed = 40,
             },
             .input = input,
             .debug = debug,
             .textures = textures,
+            .seed = config.seed,
             .world = world,
             .chunk_renderer = chunk_renderer,
-            .meshes = try gpa.alloc(ChunkRenderer.Mesh, fixture.CHUNK_COUNT),
+            .meshes = try gpa.alloc(ChunkRenderer.Mesh, CHUNK_TOTAL),
             .scratch_vertices = try gpa.alloc(mesher.Vertex, INITIAL_QUAD_CAPACITY * 4),
             .scratch_indices = try gpa.alloc(u32, INITIAL_QUAD_CAPACITY * 6),
             .allocator = gpa,
@@ -146,7 +185,10 @@ pub const App = struct {
         }
         @memset(app.meshes, .{});
 
+        const mesh_start = std.Io.Timestamp.now(io, .awake);
         try app.meshWorld();
+        const mesh_ms = @as(f64, @floatFromInt(std.Io.Timestamp.now(io, .awake).nanoseconds - mesh_start.nanoseconds)) / 1e6;
+        std.debug.print("meshing: {d} chunks in {d:.1} ms ({d:.1} us/chunk)\n", .{ app.meshed_chunks, mesh_ms, mesh_ms * 1000.0 / @as(f64, @floatFromInt(app.meshed_chunks)) });
         return app;
     }
 
@@ -168,10 +210,14 @@ pub const App = struct {
     /// worker threads; 1.11 remeshes on demand.
     fn meshWorld(self: *App) !void {
         var padded = mesher.PaddedBlocks.init();
-        const positions = fixture.chunkPositions();
+        const positions = chunkPositions();
         var total_quads: usize = 0;
+        var meshed: usize = 0;
 
         for (positions, 0..) |pos, index| {
+            // A chunk entirely above the surface has no geometry; skipping it
+            // before meshing avoids empty VAOs and the fill pass.
+            if (terrain.chunkIsAir(self.seed, pos)) continue;
             while (true) {
                 // meshChunk's only error is the capacity one, so the loop can
                 // grow and retry rather than reserving the 98k-quad bound.
@@ -189,17 +235,20 @@ pub const App = struct {
                     self.scratch_indices[0..stats.indices],
                 );
                 total_quads += stats.quads;
+                if (stats.quads > 0) meshed += 1;
                 break;
             }
         }
         self.total_quads = total_quads;
+        self.meshed_chunks = meshed;
         std.debug.print(
-            "world: {d} chunks, {d} quads, {d} vertices ({d:.1} MB of vertex data)\n",
+            "world: {d} chunks generated ({d} with geometry), {d} quads, {d:.1} MB of vertex data, seed 0x{X}\n",
             .{
                 positions.len,
+                meshed,
                 total_quads,
-                total_quads * 4,
                 @as(f64, @floatFromInt(total_quads * 4 * @sizeOf(mesher.Vertex))) / (1024.0 * 1024.0),
+                self.seed,
             },
         );
     }
@@ -277,12 +326,13 @@ pub const App = struct {
             if (report_dt_ns >= std.time.ns_per_s) {
                 const seconds = @as(f64, @floatFromInt(report_dt_ns)) / 1e9;
                 std.debug.print(
-                    "fps {d:6.1} frame {d:5.2}ms worst {d:5.2}ms  chunks {d}/{d} quads {d}  pos ({d:.1},{d:.1},{d:.1}) yaw {d:.2}\n",
+                    "fps {d:6.1} frame {d:5.2}ms worst {d:5.2}ms  chunks {d}/{d} of {d} quads {d}  pos ({d:.1},{d:.1},{d:.1}) yaw {d:.2}\n",
                     .{
                         @as(f64, @floatFromInt(frames)) / seconds,
                         @as(f64, @floatFromInt(report_dt_ns)) / 1e6 / @as(f64, @floatFromInt(frames)),
                         worst_ms,
                         drawn,
+                        self.meshed_chunks,
                         self.meshes.len,
                         self.total_quads,
                         self.camera.position.x,
@@ -318,6 +368,9 @@ pub const App = struct {
         self.chunk_renderer.begin(vp, &self.textures);
         var drawn: usize = 0;
         for (self.meshes) |*mesh| {
+            // Air-only chunks have no uploaded geometry and must not count as
+            // drawn, or the HUD lies about what the frustum let through.
+            if (mesh.index_count == 0) continue;
             if (!frustum.containsAabb(mesh.bounds)) continue;
             drawn += 1;
             self.chunk_renderer.draw(mesh);
@@ -367,8 +420,11 @@ test "fractional frames accumulate rather than dropping time" {
     try std.testing.expectEqual(@as(u32, 60), steps);
 }
 
-test "the fixture field spans the camera's view" {
-    const positions = fixture.chunkPositions();
+test "the generated area is 9x9x4 chunks" {
+    const positions = chunkPositions();
+    try std.testing.expectEqual(@as(usize, 324), positions.len);
+    try std.testing.expectEqual(@as(usize, 324), CHUNK_TOTAL);
+
     var min_x: i32 = std.math.maxInt(i32);
     var max_x: i32 = std.math.minInt(i32);
     for (positions) |p| {
@@ -376,6 +432,5 @@ test "the fixture field spans the camera's view" {
         max_x = @max(max_x, p.x);
     }
     try std.testing.expectEqual(@as(i32, 0), min_x);
-    try std.testing.expectEqual(@as(i32, 4), max_x);
-    try std.testing.expectEqual(fixture.CHUNK_COUNT, positions.len);
+    try std.testing.expectEqual(@as(i32, 8), max_x);
 }

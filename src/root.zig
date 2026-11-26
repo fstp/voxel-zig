@@ -36,7 +36,8 @@ pub const world = struct {
     pub const ChunkState = @import("world/chunk.zig").ChunkState;
     pub const ChunkSlab = @import("world/chunk_slab.zig").ChunkSlab;
     pub const chunk_mesher = @import("world/chunk_mesher.zig");
-    pub const fixture = @import("world/fixture.zig");
+    pub const terrain = @import("world/terrain.zig");
+    pub const noise = @import("world/noise.zig");
 };
 
 pub const gfx = struct {
@@ -62,6 +63,7 @@ test {
     _ = @import("world/world.zig");
     _ = @import("voxel/mesher.zig");
     _ = @import("world/chunk_mesher.zig");
-    _ = @import("world/fixture.zig");
+    _ = @import("world/terrain.zig");
+    _ = @import("world/noise.zig");
     _ = @import("app.zig");
 }
