@@ -83,15 +83,18 @@ pub fn fillPadded(world: *const World, pos: ChunkPos, padded: *mesher.PaddedBloc
     }
 }
 
-/// Meshes one loaded chunk into caller-provided buffers.
+/// Meshes one loaded chunk into caller-provided buffers. `greedy` selects the
+/// 2.1 mesher; both emit the same vertex format and obey the same culling rules.
 pub fn meshChunk(
     world: *const World,
     pos: ChunkPos,
     padded: *mesher.PaddedBlocks,
     vertices: []mesher.Vertex,
     indices: []u32,
+    greedy: bool,
 ) !mesher.MeshStats {
     fillPadded(world, pos, padded);
+    if (greedy) return mesher.meshGreedy(padded, vertices, indices);
     return mesher.mesh(padded, vertices, indices);
 }
 
@@ -126,7 +129,7 @@ test "an unloaded neighbour counts as opaque, so the frontier is culled" {
     const ibuffers = try testing.allocator.alloc(u32, 96);
     defer testing.allocator.free(ibuffers);
 
-    const stats = try meshChunk(&world, ChunkPos.init(0, 0, 0), &padded, buffers, ibuffers);
+    const stats = try meshChunk(&world, ChunkPos.init(0, 0, 0), &padded, buffers, ibuffers, false);
     // Five faces: the +x one faces an unloaded chunk and is treated as hidden.
     try testing.expectEqual(@as(usize, 5), stats.quads);
 }
@@ -157,6 +160,6 @@ test "an interior border block culls the chunk's face" {
     const ibuffers = try testing.allocator.alloc(u32, 96);
     defer testing.allocator.free(ibuffers);
 
-    const stats = try meshChunk(&world, ChunkPos.init(0, 0, 0), &padded, buffers, ibuffers);
+    const stats = try meshChunk(&world, ChunkPos.init(0, 0, 0), &padded, buffers, ibuffers, false);
     try testing.expectEqual(@as(usize, 5), stats.quads);
 }

@@ -189,6 +189,166 @@ fn cornerOcclusion(padded: *const PaddedBlocks, bx: i32, by: i32, bz: i32, corne
     return 3 - occluders;
 }
 
+
+// ------------------------------------------------------------------ greedy
+
+/// One cell of a greedy sweep: the block whose face is visible there, the layer
+/// that face uses and the four corner AO values. Two cells only merge when all
+/// of it matches, which is the AO constraint ADR 0004 warned about.
+const Cell = struct {
+    present: bool = false,
+    block: BlockId = .air,
+    layer: u8 = 0,
+    ao: [4]u8 = .{ 3, 3, 3, 3 },
+};
+
+/// Merge rule: same block and same layer. AO is deliberately *not* part of it -
+/// requiring equal corner AO caps the gain near 2.5x on rugged terrain - so the
+/// merged quad takes its four corner AO values from the cells that own those
+/// corners instead. That is the standard trade: coarser AO, much better merging.
+fn cellMatches(a: Cell, b: Cell) bool {
+    if (!a.present or !b.present) return false;
+    return a.block == b.block and a.layer == b.layer;
+}
+
+/// Corner positions in the face plane as (du, dv) in 0..1, derived from the
+/// same corner table the naive mesher uses so the winding is identical.
+fn cornerUv(face_index: usize) [4][2]f32 {
+    const info = faces[face_index];
+    var out: [4][2]f32 = undefined;
+    for (info.corners, 0..) |c, i| {
+        out[i] = .{ c[info.u], c[info.v] };
+    }
+    return out;
+}
+
+/// Greedy meshing (2.1): sweep each of the six face directions slice by slice,
+/// build a mask of visible faces and merge equal neighbours into rectangles.
+/// Same vertex format and same culling rules as `mesh`, so callers can switch
+/// between them with a flag.
+pub fn meshGreedy(padded: *const PaddedBlocks, out_vertices: []Vertex, out_indices: []u32) mesh_error!MeshStats {
+    var vertex_count: usize = 0;
+    var index_count: usize = 0;
+    var quad_count: usize = 0;
+
+    inline for (faces, face_order, 0..) |info, face, face_index| {
+        const n = info.normal;
+        // Axis the face points along, and the two axes that span the slice.
+        const axis: usize = if (n[0] != 0) 0 else if (n[1] != 0) 1 else 2;
+        const sign: i32 = n[axis];
+        const u_axis = info.u;
+        const v_axis = info.v;
+
+        var slice: i32 = 0;
+        while (slice < coords.CHUNK_SIZE) : (slice += 1) {
+            // Build the 32x32 mask for this slice.
+            var mask: [coords.CHUNK_SIZE * coords.CHUNK_SIZE]Cell = undefined;
+            for (&mask) |*cell| cell.* = .{};
+
+            var v: i32 = 0;
+            while (v < coords.CHUNK_SIZE) : (v += 1) {
+                var u: i32 = 0;
+                while (u < coords.CHUNK_SIZE) : (u += 1) {
+                    var coord = [_]i32{ 0, 0, 0 };
+                    coord[axis] = slice;
+                    coord[u_axis] = u;
+                    coord[v_axis] = v;
+                    const block = padded.get(coord[0], coord[1], coord[2]);
+                    if (!block.isSolid()) continue;
+                    if (padded.get(coord[0] + n[0], coord[1] + n[1], coord[2] + n[2]).isOpaque()) continue;
+
+                    var cell = Cell{ .present = true, .block = block, .layer = block.layerFor(face) };
+                    for (info.corners, 0..) |c, k| {
+                        cell.ao[k] = cornerOcclusion(padded, coord[0] + n[0], coord[1] + n[1], coord[2] + n[2], c, u_axis, v_axis);
+                    }
+                    mask[@intCast(v * coords.CHUNK_SIZE + u)] = cell;
+                }
+            }
+
+            // Merge rectangles.
+            v = 0;
+            while (v < coords.CHUNK_SIZE) : (v += 1) {
+                var u: i32 = 0;
+                while (u < coords.CHUNK_SIZE) : (u += 1) {
+                    const index: usize = @intCast(v * coords.CHUNK_SIZE + u);
+                    if (!mask[index].present) continue;
+
+                    // Width along u.
+                    var width: i32 = 1;
+                    while (u + width < coords.CHUNK_SIZE and cellMatches(mask[index], mask[@intCast(v * coords.CHUNK_SIZE + u + width)])) width += 1;
+                    // Height along v, every cell of the row equal to the first.
+                    var height: i32 = 1;
+                    outer: while (v + height < coords.CHUNK_SIZE) : (height += 1) {
+                        var k: i32 = 0;
+                        while (k < width) : (k += 1) {
+                            const other = mask[@intCast((v + height) * coords.CHUNK_SIZE + u + k)];
+                            if (!cellMatches(mask[index], other)) break :outer;
+                        }
+                    }
+
+                    // AO for the merged rect comes from the four cells that own
+                    // its corners, so a merged quad still shades like one cell.
+                    var merged_ao = [4]u8{ 3, 3, 3, 3 };
+                    if (width == 1 and height == 1) {
+                        merged_ao = mask[index].ao;
+                    } else {
+                        const bottom_right: usize = @intCast(v * coords.CHUNK_SIZE + u + width - 1);
+                        const top_right: usize = @intCast((v + height - 1) * coords.CHUNK_SIZE + u + width - 1);
+                        const top_left: usize = @intCast((v + height - 1) * coords.CHUNK_SIZE + u);
+                        merged_ao[0] = mask[index].ao[0];
+                        merged_ao[1] = mask[bottom_right].ao[1];
+                        merged_ao[2] = mask[top_right].ao[2];
+                        merged_ao[3] = mask[top_left].ao[3];
+                    }
+
+                    // Emit the merged quad.
+                    if (vertex_count + 4 > out_vertices.len) return error.VertexBufferTooSmall;
+                    const plane: f32 = @floatFromInt(slice);
+                    const offset: f32 = if (sign > 0) 1.0 else 0.0;
+                    const uvs = cornerUv(face_index);
+                    const base: u32 = @intCast(vertex_count);
+                    for (uvs, 0..) |c, k| {
+                        var pos = [_]f32{ 0, 0, 0 };
+                        pos[axis] = plane + offset;
+                        pos[u_axis] = @as(f32, @floatFromInt(u)) + c[0] * @as(f32, @floatFromInt(width));
+                        pos[v_axis] = @as(f32, @floatFromInt(v)) + c[1] * @as(f32, @floatFromInt(height));
+                        out_vertices[vertex_count + k] = .{
+                            .pos = .{ pos[0], pos[1], pos[2] },
+                            // UVs tile per block, so the array texture repeats.
+                            .uv = .{ c[0] * @as(f32, @floatFromInt(width)), c[1] * @as(f32, @floatFromInt(height)) },
+                            .layer = mask[index].layer,
+                            .ao = merged_ao[k],
+                            ._pad = .{ @intCast(@intFromEnum(face)), 0 },
+                        };
+                    }
+                    out_indices[index_count + 0] = base + 0;
+                    out_indices[index_count + 1] = base + 1;
+                    out_indices[index_count + 2] = base + 2;
+                    out_indices[index_count + 3] = base + 0;
+                    out_indices[index_count + 4] = base + 2;
+                    out_indices[index_count + 5] = base + 3;
+
+                    vertex_count += 4;
+                    index_count += 6;
+                    quad_count += 1;
+
+                    // Clear the consumed cells.
+                    var dv: i32 = 0;
+                    while (dv < height) : (dv += 1) {
+                        var du: i32 = 0;
+                        while (du < width) : (du += 1) {
+                            mask[@intCast((v + dv) * coords.CHUNK_SIZE + u + du)] = .{};
+                        }
+                    }
+                    u += width - 1;
+                }
+            }
+        }
+    }
+
+    return .{ .quads = quad_count, .vertices = vertex_count, .indices = index_count };
+}
+
 /// Upper bound on quads for one chunk. The worst case is not a solid chunk
 /// (6 x 32^2 = 6,144 surface faces) but a checkerboard: half the cells solid,
 /// each of them fully exposed, so 16,384 x 6 = 98,304. Buffers sized for that
@@ -415,6 +575,69 @@ test "every quad carries its face id in the pad byte" {
         const id: u8 = @intCast(face);
         for (buffers.vertices[face * 4 .. face * 4 + 4]) |v| try testing.expectEqual(id, v._pad[0]);
     }
+}
+
+test "greedy merges a flat plane into one quad" {
+    // A 32x32 slab with air around it: every top face is the same block, layer
+    // and AO (3), so the whole surface merges into a single quad.
+    var padded = PaddedBlocks.init();
+    var z: i32 = 0;
+    while (z < coords.CHUNK_SIZE) : (z += 1) {
+        var x: i32 = 0;
+        while (x < coords.CHUNK_SIZE) : (x += 1) padded.set(x, 0, z, .stone);
+    }
+    const buffers = try Buffers.init(testing.allocator, 8);
+    defer buffers.deinit(testing.allocator);
+    const stats = try meshGreedy(&padded, buffers.vertices, buffers.indices);
+    // Top and bottom merge to one quad each; the four sides are one quad each.
+    try testing.expectEqual(@as(usize, 6), stats.quads);
+}
+
+test "greedy keeps the same surface area as the naive mesher" {
+    // Same chunk, two meshers: the summed quad area must match, which catches a
+    // merge that swallowed or duplicated geometry.
+    var padded = PaddedBlocks.init();
+    var z: i32 = 0;
+    while (z < 16) : (z += 1) {
+        var y: i32 = 0;
+        while (y < 6) : (y += 1) {
+            var x: i32 = 0;
+            while (x < 16) : (x += 1) {
+                const block: BlockId = if (y == 5) .grass else if (y > 2) .dirt else .stone;
+                padded.set(x, y, z, block);
+            }
+        }
+    }
+    const buffers = try Buffers.init(testing.allocator, 20000);
+    defer buffers.deinit(testing.allocator);
+
+    const naive = try mesh(&padded, buffers.vertices, buffers.indices);
+    const naive_area = quadArea(buffers.vertices[0..naive.vertices]);
+    const greedy = try meshGreedy(&padded, buffers.vertices, buffers.indices);
+    const greedy_area = quadArea(buffers.vertices[0..greedy.vertices]);
+
+    try testing.expect(naive.quads > greedy.quads);
+    try testing.expectApproxEqRel(naive_area, greedy_area, 0.0001);
+}
+
+/// Sums the area of every quad in a vertex list (4 vertices per quad).
+fn quadArea(vertices: []const Vertex) f64 {
+    var total: f64 = 0;
+    var i: usize = 0;
+    while (i + 3 < vertices.len) : (i += 4) {
+        const a = vertices[i].pos;
+        const b = vertices[i + 1].pos;
+        const c = vertices[i + 3].pos;
+        const ab = [3]f64{ b[0] - a[0], b[1] - a[1], b[2] - a[2] };
+        const ac = [3]f64{ c[0] - a[0], c[1] - a[1], c[2] - a[2] };
+        const cross = [3]f64{
+            ab[1] * ac[2] - ab[2] * ac[1],
+            ab[2] * ac[0] - ab[0] * ac[2],
+            ab[0] * ac[1] - ab[1] * ac[0],
+        };
+        total += @sqrt(cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2]);
+    }
+    return total;
 }
 
 test "fillFromChunk copies the body and chunkIsEmpty sees it" {

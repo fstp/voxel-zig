@@ -29,6 +29,8 @@ pub const Config = struct {
     height: i32 = 720,
     vsync: bool = true,
     seed: u32 = 0x5EED_1234,
+    /// 2.1: greedy meshing on by default; the naive mesher stays for comparison.
+    greedy: bool = true,
 };
 
 /// 1.11 streaming: a cylinder of LOAD_RADIUS chunks around the player, unloaded
@@ -137,6 +139,7 @@ pub const App = struct {
     jobs_run: usize = 0,
     jobs_dropped: usize = 0,
     seed: u32,
+    greedy: bool,
     saved: save.Loaded,
     save_path: []const u8 = SAVE_PATH,
     show_wire: bool = false,
@@ -218,6 +221,7 @@ pub const App = struct {
             .debug = debug,
             .textures = textures,
             .seed = config.seed,
+            .greedy = config.greedy,
             .saved = saved,
             .world = world,
             .chunk_renderer = chunk_renderer,
@@ -494,7 +498,7 @@ pub const App = struct {
         }
 
         while (true) {
-            const stats = chunk_mesher.meshChunk(&self.world, pos, &self.padded, self.scratch_vertices, self.scratch_indices) catch |err| switch (err) {
+            const stats = chunk_mesher.meshChunk(&self.world, pos, &self.padded, self.scratch_vertices, self.scratch_indices, self.greedy) catch |err| switch (err) {
                 error.VertexBufferTooSmall => {
                     try self.growScratch();
                     continue;

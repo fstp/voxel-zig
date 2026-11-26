@@ -54,8 +54,10 @@ pub const TextureArray = struct {
         );
         gl.TexParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MIN_FILTER, @intCast(gl.NEAREST_MIPMAP_LINEAR));
         gl.TexParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MAG_FILTER, @intCast(gl.NEAREST));
-        gl.TexParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_S, @intCast(gl.CLAMP_TO_EDGE));
-        gl.TexParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_T, @intCast(gl.CLAMP_TO_EDGE));
+        // REPEAT, not CLAMP: the greedy mesher (2.1) emits one quad per run of
+        // blocks with UVs up to (width, height), and the tile has to repeat.
+        gl.TexParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_S, @intCast(gl.REPEAT));
+        gl.TexParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_T, @intCast(gl.REPEAT));
         gl.GenerateMipmap(gl.TEXTURE_2D_ARRAY);
 
         return .{ .texture = texture, .size = size, .layers = @intCast(paths.len) };
