@@ -26,6 +26,12 @@ pub fn main(init: std.process.Init) !void {
     if (init.environ_map.get("VOXEL_PEER")) |peer| config.net_peer = peer;
     // 3.10: VOXEL_SUN="142,18" pins the sun for screenshots and tests.
     if (init.environ_map.get("VOXEL_SUN")) |spec| config.sun_spec = spec;
+    // 4.1: VOXEL_EXPOSURE=0.55 pins the scene exposure.
+    if (init.environ_map.get("VOXEL_EXPOSURE")) |raw| {
+        if (std.fmt.parseFloat(f32, raw)) |value| {
+            config.exposure = value;
+        } else |_| {}
+    }
 
     var app = try engine.App.init(gpa, init.io, config);
     defer app.deinit();

@@ -3,6 +3,7 @@ const gl = @import("gl");
 const Shader = @import("shader.zig").Shader;
 const TextureArray = @import("texture.zig").TextureArray;
 const mesher = @import("../voxel/mesher.zig");
+const block = @import("../voxel/block.zig");
 const Mat4 = @import("../math/mat4.zig").Mat4;
 const Vec3 = @import("../math/vec.zig").Vec3;
 
@@ -70,6 +71,7 @@ const FRAG_SRC: [:0]const u8 =
     \\uniform float u_shadow_pcf_radius; // in texels (3.12: soft edges)
     \\uniform int u_shadow_kernel;       // 1 = 3x3, 2 = 5x5 taps
     \\uniform float u_shadows_enabled;
+\\uniform vec2 u_material[8];   // per texture layer: x roughness, y metallic
     \\in vec2 v_uv;
     \\in float v_layer;
     \\in float v_ao;
@@ -106,6 +108,31 @@ const FRAG_SRC: [:0]const u8 =
     \\    return sum / taps;
     \\}
     \\
+    \\const float PI = 3.14159265;
+    \\
+    \\// GGX / Trowbridge-Reitz: the shape of the specular lobe. Rough surfaces
+    \\// spread the highlight, smooth ones keep it tight.
+    \\float D_GGX(float noh, float roughness) {
+    \\    float a = roughness * roughness;
+    \\    float a2 = a * a;
+    \\    float d = noh * noh * (a2 - 1.0) + 1.0;
+    \\    return a2 / max(PI * d * d, 1e-7);
+    \\}
+    \\
+    \\// Smith height-correlated visibility. Returns 1/(4 N.V N.L) folded in, which
+    \\// is why the specular term below has no denominator of its own.
+    \\float V_SmithGGX(float nov, float nol, float roughness) {
+    \\    float a = roughness * roughness;
+    \\    float a2 = a * a;
+    \\    float gv = nol * sqrt(nov * nov * (1.0 - a2) + a2);
+    \\    float gl = nov * sqrt(nol * nol * (1.0 - a2) + a2);
+    \\    return 0.5 / max(gv + gl, 1e-7);
+    \\}
+    \\
+    \\vec3 F_Schlick(vec3 f0, float voh) {
+    \\    return f0 + (vec3(1.0) - f0) * pow(clamp(1.0 - voh, 0.0, 1.0), 5.0);
+    \\}
+    \\
     \\void main() {
     \\    vec4 c = texture(u_tex, vec3(v_uv, v_layer));
     \\    if (c.a < 0.5) discard; // alpha cutout (leaves, ADR 0002)
@@ -119,13 +146,48 @@ const FRAG_SRC: [:0]const u8 =
     \\        f_colour = vec4(pow(v_normal * 0.5 + 0.5, vec3(2.2)), 1.0);
     \\        return;
     \\    }
-    \\    // Sun lighting (ADR 0008): Lambert plus a hemisphere ambient, times AO.
-    \\    float ndl = max(dot(v_normal, u_sun_dir), 0.0);
-    \\    vec3 hemi = mix(u_ambient_ground, u_ambient_sky, v_normal.y * 0.5 + 0.5);
+    \\    // Physical shading (ADR 0011): metallic-roughness, one directional light
+    \\    // plus the sky as ambient. The material comes from the texture layer, so
+    \\    // the vertex format and the mesher are untouched.
+    \\    vec2 material = u_material[int(v_layer + 0.5)];
+    \\    float roughness = clamp(material.x, 0.04, 1.0);
+    \\    float metallic = clamp(material.y, 0.0, 1.0);
+    \\
+    \\    vec3 N = normalize(v_normal);
+    \\    vec3 V = normalize(u_eye - v_world);
+    \\    vec3 L = u_sun_dir;
+    \\    vec3 H = normalize(V + L);
+    \\    float ndl = max(dot(N, L), 0.0);
+    \\    float ndv = max(dot(N, V), 1e-4);
+    \\    float ndh = max(dot(N, H), 0.0);
+    \\    float vdh = max(dot(V, H), 0.0);
+    \\
+    \\    // A dielectric reflects 4 percent at normal incidence; a metal reflects its
+    \\    // own albedo and has no diffuse lobe at all.
+    \\    vec3 f0 = mix(vec3(0.04), c.rgb, metallic);
+    \\    vec3 fresnel = F_Schlick(f0, vdh);
+    \\    vec3 specular = D_GGX(ndh, roughness) * V_SmithGGX(ndv, ndl, roughness) * fresnel;
+    \\    // Energy conservation: whatever is reflected specularly cannot also diffuse.
+    \\    vec3 diffuse = (vec3(1.0) - fresnel) * (1.0 - metallic) * c.rgb / PI;
+    \\
+    \\    // u_sun_colour is scaled for the old Lambert path, so it carries an implicit
+    \\    // PI: multiply it back here rather than retuning the sky that shares it.
+    \\    float visibility = sunVisibility(v_world, N);
+    \\    vec3 direct = (diffuse + specular) * u_sun_colour * PI * ndl * visibility;
+    \\
+    \\    vec3 hemi = mix(u_ambient_ground, u_ambient_sky, N.y * 0.5 + 0.5);
+    \\    // Without a cube map the sky gradient stands in for the environment: the
+    \\    // reflected ray picks its colour from the same hemisphere, and roughness
+    \\    // decides how much of it survives. That is the visible half of PBR here.
+    \\    vec3 R = reflect(-V, N);
+    \\    vec3 environment = mix(u_ambient_ground, u_ambient_sky, clamp(R.y * 0.5 + 0.5, 0.0, 1.0));
+    \\    vec3 ambient_specular = environment * F_Schlick(f0, ndv) * (1.0 - roughness);
+    \\    vec3 ambient = (hemi * c.rgb * (1.0 - metallic) + ambient_specular) * ao;
+    \\
     \\    // AO darkens the ambient fully and the direct sun only partly: the shadow
     \\    // map is what should darken a lit face that is in shadow, and multiplying
     \\    // both factors at full strength made corners twice as dark as either.
-    \\    vec3 lit = hemi * ao + u_sun_colour * ndl * sunVisibility(v_world, v_normal) * mix(0.55, 1.0, ao);
+    \\    vec3 lit = direct * mix(0.55, 1.0, ao) + ambient;
     \\    // F4 A/B: the old hardcoded table, kept so 3.9 can show the difference.
     \\    vec3 legacy = vec3(faceBrightness(v_face) * ao);
     \\    vec3 rgb = mix(c.rgb * lit, c.rgb * legacy, u_legacy);
@@ -204,6 +266,18 @@ pub const ChunkRenderer = struct {
 
     pub fn begin(self: *ChunkRenderer, textures: *const TextureArray, params: FrameParams) void {
         self.shader.use();
+        // Materials are fixed per texture layer, so they ride with the other
+        // frame-constant uniforms instead of adding a mesher field (ADR 0011).
+        // Literal names: Zig 0.17 dropped bufPrintZ, and an array indexed by the
+        // layer keeps the uniform names and the table the same length.
+        const material_uniforms = [_][:0]const u8{
+            "u_material[0]", "u_material[1]", "u_material[2]", "u_material[3]",
+            "u_material[4]", "u_material[5]", "u_material[6]", "u_material[7]",
+        };
+        comptime std.debug.assert(material_uniforms.len == block.layer_materials.len);
+        for (block.layer_materials, material_uniforms) |m, name| {
+            self.shader.setFloat2(name, .{ m.roughness, m.metallic });
+        }
         self.shader.setMat4("u_vp", params.view_projection.m);
         self.shader.setVec3("u_eye", asArray(params.eye));
         self.shader.setVec3("u_sky_horizon", asArray(params.sky_horizon));

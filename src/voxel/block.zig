@@ -89,6 +89,30 @@ pub const TEXTURE_SIZE: u32 = 16;
 
 /// One PNG per texture layer, loaded into a single GL_TEXTURE_2D_ARRAY
 /// (ADR 0002). The order defines the layer indices above.
+/// One entry per texture layer, same order as `texture_paths`. Roughness is the
+/// GGX perceptual roughness (0 mirror, 1 fully diffuse); metallic 0 means a
+/// dielectric with a 4 percent F0, 1 means the albedo is the reflectance.
+///
+/// These are the numbers PBR materials are described with, and the reason the
+/// blocks read as different substances under a moving sun rather than as one
+/// surface wearing different textures: wood takes a highlight, stone scatters it,
+/// water keeps a mirror.
+pub const Material = struct {
+    roughness: f32,
+    metallic: f32,
+};
+
+pub const layer_materials = [_]Material{
+    .{ .roughness = 0.72, .metallic = 0.0 }, // stone: some sheen on a broken face
+    .{ .roughness = 0.95, .metallic = 0.0 }, // dirt: almost fully diffuse
+    .{ .roughness = 0.90, .metallic = 0.0 }, // grass top
+    .{ .roughness = 0.90, .metallic = 0.0 }, // grass side
+    .{ .roughness = 0.88, .metallic = 0.0 }, // sand
+    .{ .roughness = 0.48, .metallic = 0.0 }, // wood: planed, the shiniest natural block
+    .{ .roughness = 0.82, .metallic = 0.0 }, // leaves
+    .{ .roughness = 0.06, .metallic = 0.0 }, // water: smooth dielectric, near mirror
+};
+
 pub const texture_paths = [_][:0]const u8{
     "assets/blocks/stone.png",
     "assets/blocks/dirt.png",
@@ -140,5 +164,13 @@ test "every block maps inside the texture array" {
         try std.testing.expect(t.top < texture_paths.len);
         try std.testing.expect(t.side < texture_paths.len);
         try std.testing.expect(t.bottom < texture_paths.len);
+    }
+}
+
+test "every texture layer has a material" {
+    try std.testing.expectEqual(texture_paths.len, layer_materials.len);
+    for (layer_materials) |m| {
+        try std.testing.expect(m.roughness > 0.0 and m.roughness <= 1.0);
+        try std.testing.expect(m.metallic >= 0.0 and m.metallic <= 1.0);
     }
 }

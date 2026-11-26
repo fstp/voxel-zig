@@ -24,6 +24,7 @@ const physics = @import("physics/bodies.zig");
 const BlockRenderer = @import("gfx/block_renderer.zig").BlockRenderer;
 const SkyRenderer = @import("gfx/sky_renderer.zig").SkyRenderer;
 const ShadowRenderer = @import("gfx/shadow_renderer.zig").ShadowRenderer;
+const Post = @import("gfx/post.zig").Post;
 const net = @import("net/udp.zig");
 const block = @import("voxel/block.zig");
 const coords = @import("voxel/coords.zig");
@@ -48,6 +49,8 @@ pub const Config = struct {
     /// "azimuth,elevation" from VOXEL_SUN (3.10). Invalid specs are rejected with
     /// a warning on screen and in the log, never silently corrected.
     sun_spec: ?[]const u8 = null,
+    /// Starting scene exposure from VOXEL_EXPOSURE (4.1); null keeps the default.
+    exposure: ?f32 = null,
 };
 
 /// 1.11 streaming: a cylinder of LOAD_RADIUS chunks around the player, unloaded
@@ -185,6 +188,8 @@ pub const App = struct {
     block_renderer: BlockRenderer,
     sky_renderer: SkyRenderer,
     shadow_renderer: ShadowRenderer,
+    /// 4.1: HDR target plus the tone-map resolve.
+    post: Post,
     shadows_enabled: bool = true,
     soft_shadows: bool = true,
     clouds_enabled: bool = true,
@@ -248,6 +253,15 @@ pub const App = struct {
         // 3.8: the sun's depth map.
         var shadow_renderer = try ShadowRenderer.init();
         errdefer shadow_renderer.deinit();
+
+        // 4.1: linear light into a half-float target, tone mapped on the way out.
+        var post = try Post.init(window.width, window.height);
+        errdefer post.deinit();
+        // 4.1: VOXEL_EXPOSURE pins the starting exposure for screenshots.
+        if (config.exposure) |value| {
+            post.exposure = std.math.clamp(value, 0.05, 8.0);
+            std.debug.print("exposure: {d:.3} from VOXEL_EXPOSURE\n", .{post.exposure});
+        }
 
         gl.gl.Enable(gl.gl.DEPTH_TEST);
         gl.gl.Enable(gl.gl.CULL_FACE);
@@ -324,6 +338,7 @@ pub const App = struct {
             .block_renderer = block_renderer,
             .sky_renderer = sky_renderer,
             .shadow_renderer = shadow_renderer,
+            .post = post,
             .bodies = undefined,
             .peer = peer,
             .body_items = try gpa.alloc(physics.Body, MAX_BODIES),
@@ -376,6 +391,7 @@ pub const App = struct {
         self.block_renderer.deinit();
         self.sky_renderer.deinit();
         self.shadow_renderer.deinit();
+        self.post.deinit();
         self.allocator.free(self.body_items);
         self.hud.deinit();
         self.chunk_renderer.deinit();
@@ -784,6 +800,11 @@ pub const App = struct {
             if (self.input.shadows_toggle) self.shadows_enabled = !self.shadows_enabled;
             if (self.input.soft_shadows_toggle) self.soft_shadows = !self.soft_shadows;
             if (self.input.clouds_toggle) self.clouds_enabled = !self.clouds_enabled;
+            if (self.input.tonemap_toggle) self.post.tonemap = !self.post.tonemap;
+            // 4.1: exposure in 1/8-stop-ish steps, clamped so a held key cannot
+            // drive the image to black or to white.
+            if (self.input.exposure_down) self.post.exposure = @max(0.10, self.post.exposure * 0.92);
+            if (self.input.exposure_up) self.post.exposure = @min(4.00, self.post.exposure * 1.08);
             if (self.input.sun_pin_toggle) {
                 if (self.sun.mode == .pinned) {
                     self.sun.unpin();
@@ -1042,8 +1063,7 @@ pub const App = struct {
         // why the colour below is linear.
         gl.gl.Enable(gl.gl.FRAMEBUFFER_SRGB);
         const linear_horizon = self.sun.ramp().horizon;
-        gl.gl.ClearColor(linear_horizon.x, linear_horizon.y, linear_horizon.z, 1.0);
-        gl.gl.Clear(gl.gl.COLOR_BUFFER_BIT | gl.gl.DEPTH_BUFFER_BIT);
+        _ = linear_horizon;
 
         self.camera.position = self.player.eyePosition();
         self.camera.yaw = self.player.yaw;
@@ -1065,6 +1085,10 @@ pub const App = struct {
         }
 
         // Sky first, over the cleared colour buffer, then terrain on top of it.
+        // 4.1: the world goes into the half-float target, so shaders can emit
+        // light above 1.0 and the exposure has something to work with. Bound
+        // after the shadow pass, which ends by restoring the window.
+        self.post.begin(self.sun.ramp().horizon);
         self.sky_renderer.draw(vp, self.camera.position, &self.sun, self.clouds_enabled, self.cloud_shift);
 
         const sky_ramp = self.sun.ramp();
@@ -1140,6 +1164,10 @@ pub const App = struct {
             }
         }
 
+        // Resolve the HDR target to the window before the 2D passes, which draw
+        // straight into the default framebuffer.
+        self.post.end(self.window.width, self.window.height);
+
         if (self.show_hud) {
             const hud_start = std.Io.Timestamp.now(self.io, .awake);
             self.drawHud(drawn);
@@ -1164,7 +1192,7 @@ pub const App = struct {
         if (std.fmt.bufPrint(&buffer, "FPS {d:.1}", .{if (self.frame_ms > 0) 1000.0 / self.frame_ms else 0})) |text| {
             self.hud.text(10, 8, text);
         } else |_| {}
-        if (std.fmt.bufPrint(&buffer, "FRAME {d:.2} MS  WORST {d:.2} MS  SKY {d:.3}  SHDW {d:.3} MS", .{ self.frame_ms, self.worst_frame_ms, self.sky_renderer.last_ms, self.shadow_renderer.last_ms })) |text| {
+        if (std.fmt.bufPrint(&buffer, "FRAME {d:.2} MS  WORST {d:.2} MS  SKY {d:.3}  SHDW {d:.3}  POST {d:.3} MS  EV {d:.2}{s}", .{ self.frame_ms, self.worst_frame_ms, self.sky_renderer.last_ms, self.shadow_renderer.last_ms, self.post.last_ms, self.post.exposure, if (self.post.tonemap) " ACES" else " CLIP" })) |text| {
             self.hud.text(10, 26, text);
         } else |_| {}
         line = 2;
@@ -1231,7 +1259,7 @@ pub const App = struct {
             self.hud.text(10, @as(f32, @floatFromInt(self.window.height)) - 66, text);
         }
 
-        const keys = "F1 HUD  F FLY  F3 BOXES  F4 LIGHT A/B  F6 NORMALS  F7 FOG  F8 SHADOWS  F10 CLOUDS  P PAUSE SUN  1-4 TIMES";
+        const keys = "F1 HUD  F FLY  F3 BOXES  F4 LIGHT A/B  F6 NORMALS  F7 FOG  F8 SHADOWS  F10 CLOUDS  F11 TONEMAP  -/= EXPOSURE  P PAUSE SUN  1-4 TIMES";
         self.hud.setColour(0.6, 0.6, 0.6);
         self.hud.text(10, @as(f32, @floatFromInt(self.window.height)) - 22, keys);
 
