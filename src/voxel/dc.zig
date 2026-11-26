@@ -172,6 +172,9 @@ const Qef = struct {
 
         const solved: [3]f32 = .{ x, y, z };
         if (!(std.math.isFinite(x) and std.math.isFinite(y) and std.math.isFinite(z))) return mass;
+        // Regularisation already pulls the solution toward the mass point, so the extra
+        // mass blend tried here changed the render by 1,060 pixels out of 1.44M and did not
+        // remove the specks. Reverted rather than kept on faith.
         return .{
             std.math.clamp(solved[0], lo[0], hi[0]),
             std.math.clamp(solved[1], lo[1], hi[1]),
@@ -481,13 +484,16 @@ test "dual contouring: an overlapping chunk reproduces the border vertices exact
         fn g(alloc2: std.mem.Allocator, nn: usize, c: f32, ox: f32) ![]f32 {
             const side = nn + 1;
             const vals = try alloc2.alloc(f32, side * side * side);
+            const oxi: i32 = @intFromFloat(ox);
             var k: usize = 0;
             while (k < side) : (k += 1) {
                 var j: usize = 0;
                 while (j < side) : (j += 1) {
                     var i: usize = 0;
                     while (i < side) : (i += 1) {
-                        const x = ox + @as(f32, @floatFromInt(i)) * c;
+                        // Integer first: exact arithmetic keeps the two chunks' shared samples
+                        // bitwise identical, which is the property this test is about.
+                        const x = @as(f32, @floatFromInt(oxi + @as(i32, @intCast(i)))) * c;
                         const y = @as(f32, @floatFromInt(j)) * c;
                         const z = @as(f32, @floatFromInt(k)) * c;
                         vals[i + side * (j + side * k)] = plane(x, y, z);
