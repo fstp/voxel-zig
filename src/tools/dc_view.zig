@@ -29,7 +29,7 @@ const SEED: u32 = 1337;
 
 /// Bumped whenever the field or the mesher changes. Printed at startup so a stale binary cannot be
 /// mistaken for a change that "made no difference" - which is what the last commit could not rule out.
-const BUILD_TAG = "column-cache-v3";
+const BUILD_TAG = "stream-v4";
 // 8x8 chunks (64 chunks, 256 m^2), re-meshed as the camera crosses a chunk border:: at PATCH=4 the boundary was visible in frame and accounted for
 // 99.6% of the background pixels counted as "holes". A bigger patch pushes the world edge out of
 // shot, which is the honest way to separate a mesher defect from the edge of the world.
@@ -261,6 +261,7 @@ fn mul(a: [16]f32, b: [16]f32) [16]f32 {
 fn meshPatch(
     alloc: std.mem.Allocator,
     patch_origin: i32,
+    patch_origin_z: i32,
     verts: *std.ArrayList(Coloured),
     idx: *std.ArrayList(u32),
 ) !usize {
@@ -278,7 +279,7 @@ fn meshPatch(
             const vals = try alloc.alloc(f32, side * side * side);
             defer alloc.free(vals);
             const ox: f32 = @floatFromInt((patch_origin + cx) * @as(i32, @intCast(CHUNK)));
-            const oz: f32 = @floatFromInt((patch_origin + cz) * @as(i32, @intCast(CHUNK)));
+            const oz: f32 = @floatFromInt((patch_origin_z + cz) * @as(i32, @intCast(CHUNK)));
             // The field is a HEIGHT field: y - height(x, z) depends on the column only. Evaluating
             // heightAt once per (x, z) column and reusing it across all 35 y samples cuts the field
             // cost by that factor - measured 140 ms -> a few ms per patch, which is the difference
@@ -289,7 +290,7 @@ fn meshPatch(
                 var ci: usize = 0;
                 while (ci < side) : (ci += 1) {
                     const gx: i32 = (patch_origin + cx) * @as(i32, @intCast(CHUNK)) + @as(i32, @intCast(ci)) - 1;
-                    const gz: i32 = (patch_origin + cz) * @as(i32, @intCast(CHUNK)) + @as(i32, @intCast(ck)) - 1;
+                    const gz: i32 = (patch_origin_z + cz) * @as(i32, @intCast(CHUNK)) + @as(i32, @intCast(ck)) - 1;
                     heights[ci + side * ck] = heightAt(
                         @as(f32, @floatFromInt(gx)) * CELL,
                         @as(f32, @floatFromInt(gz)) * CELL,
@@ -337,6 +338,31 @@ fn meshPatch(
     return quads;
 }
 
+
+/// Uploads a mesh into the existing VAO/VBO/EBO. Factored out with `meshPatch` so a rebuild can
+/// replace the buffers in place: streaming is "mesh again, upload again", nothing else.
+fn uploadMesh(vao: *u32, vbo: *u32, ebo: *u32, verts: []const Coloured, idx: []const u32) void {
+    if (vao.* == 0) {
+        gl.GenVertexArrays(1, @ptrCast(vao));
+        gl.GenBuffers(1, @ptrCast(vbo));
+        gl.GenBuffers(1, @ptrCast(ebo));
+    }
+    gl.BindVertexArray(vao.*);
+    gl.BindBuffer(gl.ARRAY_BUFFER, vbo.*);
+    gl.BufferData(gl.ARRAY_BUFFER, @intCast(verts.len * @sizeOf(Coloured)), verts.ptr, gl.STATIC_DRAW);
+    gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, ebo.*);
+    gl.BufferData(gl.ELEMENT_ARRAY_BUFFER, @intCast(idx.len * @sizeOf(u32)), idx.ptr, gl.STATIC_DRAW);
+    gl.EnableVertexAttribArray(0);
+    gl.VertexAttribPointer(0, 3, gl.FLOAT, gl.FALSE, @sizeOf(Coloured), 0);
+    gl.EnableVertexAttribArray(1);
+    gl.VertexAttribPointer(1, 3, gl.FLOAT, gl.FALSE, @sizeOf(Coloured), @sizeOf([3]f32));
+    gl.EnableVertexAttribArray(2);
+    gl.VertexAttribPointer(2, 3, gl.FLOAT, gl.FALSE, @sizeOf(Coloured), @sizeOf([3]f32) * 2);
+    gl.EnableVertexAttribArray(3);
+    gl.VertexAttribPointer(3, 1, gl.FLOAT, gl.FALSE, @sizeOf(Coloured), @sizeOf([3]f32) * 3);
+    gl.BindVertexArray(0);
+}
+
 pub fn main(init: std.process.Init) !void {
     // VOXEL_DC_BG=magenta paints the background a colour that terrain shading cannot produce, so a
     // hole count can never be confused with a pixel that merely happens to land near the sky tone.
@@ -375,8 +401,12 @@ pub fn main(init: std.process.Init) !void {
     var all_idx: std.ArrayList(u32) = .empty;
     defer all_idx.deinit(alloc);
 
-    const patch_origin: i32 = -PATCH / 2;
-    const quads = try meshPatch(alloc, patch_origin, &all_verts, &all_idx);
+    var patch_origin: i32 = -PATCH / 2;
+    var patch_origin_z: i32 = -PATCH / 2;
+    var sim_time: f32 = 0.0;
+    var rebuilds: usize = 0;
+    var rebuild_ms_total: f64 = 0;
+    const quads = try meshPatch(alloc, patch_origin, patch_origin_z, &all_verts, &all_idx);
     const all_verts_s = all_verts.items;
     const all_idx_s = all_idx.items;
     std.debug.print("DC viewer: {d} verts, {d} quads over {d} skirted chunks\n", .{ all_verts_s.len, quads, PATCH * PATCH });
@@ -389,7 +419,7 @@ pub fn main(init: std.process.Init) !void {
     var probe_idx: std.ArrayList(u32) = .empty;
     defer probe_idx.deinit(alloc);
     const t_rebuild = nowNs();
-    const probe_quads = try meshPatch(alloc, patch_origin, &probe_verts, &probe_idx);
+    const probe_quads = try meshPatch(alloc, patch_origin, patch_origin_z, &probe_verts, &probe_idx);
     const rebuild_ms = @as(f64, @floatFromInt(nowNs() - t_rebuild)) / 1e6;
     const identical = probe_verts.items.len == all_verts_s.len and probe_idx.items.len == all_idx_s.len and probe_quads == quads;
     std.debug.print("rebuild: {d} quads in {d:.1} ms, identical to the first build: {}\n", .{ probe_quads, rebuild_ms, identical });
@@ -400,23 +430,7 @@ pub fn main(init: std.process.Init) !void {
     var vao: u32 = 0;
     var vbo: u32 = 0;
     var ebo: u32 = 0;
-    gl.GenVertexArrays(1, @ptrCast(&vao));
-    gl.GenBuffers(1, @ptrCast(&vbo));
-    gl.GenBuffers(1, @ptrCast(&ebo));
-    gl.BindVertexArray(vao);
-    gl.BindBuffer(gl.ARRAY_BUFFER, vbo);
-    gl.BufferData(gl.ARRAY_BUFFER, @intCast(all_verts_s.len * @sizeOf(Coloured)), all_verts_s.ptr, gl.STATIC_DRAW);
-    gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, ebo);
-    gl.BufferData(gl.ELEMENT_ARRAY_BUFFER, @intCast(all_idx_s.len * @sizeOf(u32)), all_idx_s.ptr, gl.STATIC_DRAW);
-    gl.EnableVertexAttribArray(0);
-    gl.VertexAttribPointer(0, 3, gl.FLOAT, gl.FALSE, @sizeOf(Coloured), 0);
-    gl.EnableVertexAttribArray(1);
-    gl.VertexAttribPointer(1, 3, gl.FLOAT, gl.FALSE, @sizeOf(Coloured), @sizeOf([3]f32));
-    gl.EnableVertexAttribArray(2);
-    gl.VertexAttribPointer(2, 3, gl.FLOAT, gl.FALSE, @sizeOf(Coloured), @sizeOf([3]f32) * 2);
-    gl.EnableVertexAttribArray(3);
-    gl.VertexAttribPointer(3, 1, gl.FLOAT, gl.FALSE, @sizeOf(Coloured), @sizeOf([3]f32) * 3);
-    gl.BindVertexArray(0);
+    uploadMesh(&vao, &vbo, &ebo, all_verts_s, all_idx_s);
 
     // ADR 0008: the engine draws into an sRGB framebuffer and every shader writes LINEAR, so the
     // hardware does the encode. The spike omitted this line, which is why its terrain looked washed
@@ -427,7 +441,6 @@ pub fn main(init: std.process.Init) !void {
     // guess (near-degenerate cells) vanish into the background and read as holes.
     gl.Disable(gl.CULL_FACE);
 
-    const centre: f32 = @floatFromInt(@as(usize, @intCast(PATCH)) * CHUNK / 2);
     const index_count: u32 = @intCast(all_idx_s.len);
 
     var frames: u64 = 0;
@@ -447,12 +460,34 @@ pub fn main(init: std.process.Init) !void {
         if (bg_magenta) gl.ClearColor(1.0, 0.0, 1.0, 1.0) else gl.ClearColor(0.30, 0.38, 0.50, 1.0);
         gl.Clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
-        const radius: f32 = 78.0;
-        const eye = [3]f32{ centre + radius * 0.75, 92.0, centre + radius * 0.95 };
-        // Aim near the horizon: the clouds live in a 380..700 block slab (ADR 0010), so a camera
-        // pointed down at the terrain never sees them, which is exactly what the first sky capture
-        // showed - a clean gradient with nothing in it.
-        const view = lookAt(eye, .{ centre, 86.0, centre }, .{ 0, 1, 0 });
+        // Streaming: the camera orbits, so the patch has to follow. Crossing a chunk border rebuilds
+        // the whole patch synchronously - 39.7 ms measured - a visible hitch, and exactly why step 3
+        // of the plan moves meshing to a worker thread.
+        sim_time += 0.0167;
+        const orbit: f32 = 0.05 * sim_time;
+        const eye = [3]f32{ @cos(orbit) * 260.0, 92.0, @sin(orbit) * 260.0 };
+        const cur_cx: i32 = @divFloor(@as(i32, @intFromFloat(eye[0])), @as(i32, @intCast(CHUNK)));
+        const cur_cz: i32 = @divFloor(@as(i32, @intFromFloat(eye[2])), @as(i32, @intCast(CHUNK)));
+        const want_x = cur_cx - @divFloor(PATCH, 2);
+        const want_z = cur_cz - @divFloor(PATCH, 2);
+        if (want_x != patch_origin or want_z != patch_origin_z) {
+            patch_origin = want_x;
+            patch_origin_z = want_z;
+            all_verts.clearRetainingCapacity();
+            all_idx.clearRetainingCapacity();
+            const t_stream = nowNs();
+            const rebuilt_quads = try meshPatch(alloc, patch_origin, patch_origin_z, &all_verts, &all_idx);
+            const ms = @as(f64, @floatFromInt(nowNs() - t_stream)) / 1e6;
+            rebuilds += 1;
+            rebuild_ms_total += ms;
+            uploadMesh(&vao, &vbo, &ebo, all_verts.items, all_idx.items);
+            std.debug.print("stream: origin ({d},{d}) {d} quads, {d:.1} ms (rebuild #{d}, mean {d:.1} ms)\n", .{
+                patch_origin, patch_origin_z, rebuilt_quads, ms, rebuilds, rebuild_ms_total / @as(f64, @floatFromInt(rebuilds)),
+            });
+        }
+        const look_x: f32 = @as(f32, @floatFromInt(patch_origin + @divFloor(PATCH, 2))) * @as(f32, @floatFromInt(CHUNK));
+        const look_z: f32 = @as(f32, @floatFromInt(patch_origin_z + @divFloor(PATCH, 2))) * @as(f32, @floatFromInt(CHUNK));
+        const view = lookAt(eye, .{ look_x, 86.0, look_z }, .{ 0, 1, 0 });
         const proj = perspective(0.9, w / @max(h, 1.0), 0.5, 900.0);
         const vp_m = mul(proj, view);
         const eye_v = Vec3.init(eye[0], eye[1], eye[2]);
