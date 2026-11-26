@@ -15,6 +15,16 @@ const std = @import("std");
 pub var skipped_missing_cell: usize = 0;
 pub var skipped_bounds: usize = 0;
 pub var emitted_quads: usize = 0;
+/// Cells whose inside-corners form a configuration the surface can enter twice: exactly two
+/// diagonally opposite corners inside. These are the cells where one vertex per cell (plain DC)
+/// forces two surface sheets through a single point - the pinch that draws as a hole. Counting them
+/// says whether manifold DC is worth building, instead of guessing from a screenshot.
+pub var ambiguous_cells: usize = 0;
+/// Quads whose better split still leaves a triangle with essentially no area. Those rasterise as a
+/// sliver or not at all, which is the remaining candidate for the white wedges after the pinch
+/// hypothesis came back at zero.
+pub var degenerate_quads: usize = 0;
+pub var min_quad_area_observed: f32 = 1e9;
 
 pub const Vertex = extern struct {
     pos: [3]f32,
@@ -218,6 +228,9 @@ pub fn extract(alloc: std.mem.Allocator, field: Field) !Surface {
     skipped_missing_cell = 0;
     skipped_bounds = 0;
     emitted_quads = 0;
+    ambiguous_cells = 0;
+    degenerate_quads = 0;
+    min_quad_area_observed = 1e9;
     // Cells cover the whole sample grid, skirts included, so the cells straddling a chunk
     // border exist locally.
     const cpa = field.side() - 1;
@@ -259,6 +272,19 @@ pub fn extract(alloc: std.mem.Allocator, field: Field) !Surface {
                     if (val < 0) mask |= @as(u8, 1) << @intCast(idx);
                 }
                 if (mask == 0 or mask == 0xff) continue;
+                // Two diagonally opposite corners inside and the other six outside: the surface
+                // passes through this cell twice, and one vertex cannot represent both sheets.
+                if (@popCount(mask) == 2) {
+                    const pairs = [_][2]u3{ .{ 0, 7 }, .{ 1, 6 }, .{ 2, 5 }, .{ 3, 4 } };
+                    for (pairs) |p| {
+                        const a: u8 = @as(u8, 1) << p[0];
+                        const b: u8 = @as(u8, 1) << p[1];
+                        if ((mask & a) != 0 and (mask & b) != 0) {
+                            ambiguous_cells += 1;
+                            break;
+                        }
+                    }
+                }
 
                 qef = .{};
                 const lo = field.samplePos(ci, cj, ck);
@@ -425,6 +451,9 @@ fn emitEdge(
     const ac_min = @min(area(p0, p1, p2), area(p0, p2, p3));
     const bd_min = @min(area(p1, p2, p3), area(p1, p3, p0));
     const split_bd = bd_min > ac_min;
+    const best_area = @max(ac_min, bd_min);
+    if (best_area < 1e-5) degenerate_quads += 1;
+    if (best_area < min_quad_area_observed) min_quad_area_observed = best_area;
     const backwards = dot(quad_n, avg) < 0;
 
     if (!split_bd and !backwards) {

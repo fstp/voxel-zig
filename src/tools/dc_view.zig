@@ -29,7 +29,7 @@ const SEED: u32 = 1337;
 
 /// Bumped whenever the field or the mesher changes. Printed at startup so a stale binary cannot be
 /// mistaken for a change that "made no difference" - which is what the last commit could not rule out.
-const BUILD_TAG = "hud-live-v6";
+const BUILD_TAG = "inside-v7";
 // 8x8 chunks (64 chunks, 256 m^2), re-meshed as the camera crosses a chunk border:: at PATCH=4 the boundary was visible in frame and accounted for
 // 99.6% of the background pixels counted as "holes". A bigger patch pushes the world edge out of
 // shot, which is the honest way to separate a mesher defect from the edge of the world.
@@ -482,7 +482,11 @@ pub fn main(init: std.process.Init) !void {
         // of the plan moves meshing to a worker thread.
         sim_time += 0.0167;
         const orbit: f32 = 0.05 * sim_time;
-        const eye = [3]f32{ @cos(orbit) * 260.0, 92.0, @sin(orbit) * 260.0 };
+                // Radius 60, not 260: the patch is 8x8 chunks = 256 m across, so half-extent is 128 m and
+        // an orbit at 260 m put the camera OUTSIDE the world - which made the patch boundary the
+        // dominant thing in frame and looked exactly like holes in the surface. Two mesher hypotheses
+        // (ambiguous cells, degenerate quads) both measured zero, which is what pointed here.
+        const eye = [3]f32{ @cos(orbit) * 60.0, 92.0, @sin(orbit) * 60.0 };
         const cur_cx: i32 = @divFloor(@as(i32, @intFromFloat(eye[0])), @as(i32, @intCast(CHUNK)));
         const cur_cz: i32 = @divFloor(@as(i32, @intFromFloat(eye[2])), @as(i32, @intCast(CHUNK)));
         const want_x = cur_cx - @divFloor(PATCH, 2);

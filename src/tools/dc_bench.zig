@@ -126,6 +126,9 @@ pub fn main() !void {
         \\  quads emitted    {d}
         \\  skipped, no cell vertex on the edge  {d}
         \\  skipped, out of sample grid bounds   {d}
+        \\  ambiguous cells (pinch candidates)   {d}
+        \\  degenerate quads (area < 1e-5)       {d}
+        \\  smallest triangle area seen          {d:.8}
         \\
     , .{
         cell,
@@ -139,6 +142,9 @@ pub fn main() !void {
         dc.emitted_quads,
         dc.skipped_missing_cell,
         dc.skipped_bounds,
+        dc.ambiguous_cells,
+        dc.degenerate_quads,
+        dc.min_quad_area_observed,
     });
 }
 
