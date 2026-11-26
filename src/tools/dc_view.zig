@@ -246,6 +246,68 @@ fn mul(a: [16]f32, b: [16]f32) [16]f32 {
     return out;
 }
 
+
+/// Meshes a PATCH x PATCH block of chunks with the one-cell skirt. Factored out of `main` so a
+/// rebuild is possible at all: without this the world could only ever be meshed once, and streaming
+/// is exactly "call this again with a different origin".
+fn meshPatch(
+    alloc: std.mem.Allocator,
+    patch_origin: i32,
+    verts: *std.ArrayList(Coloured),
+    idx: *std.ArrayList(u32),
+) !usize {
+    const n = CHUNK;
+    const side = n + 3; // owned cells + 2 skirt cells
+    var quads: usize = 0;
+
+    var cz: i32 = 0;
+    while (cz < PATCH) : (cz += 1) {
+        var cx: i32 = 0;
+        while (cx < PATCH) : (cx += 1) {
+            const vals = try alloc.alloc(f32, side * side * side);
+            defer alloc.free(vals);
+            const ox: f32 = @floatFromInt((patch_origin + cx) * @as(i32, @intCast(CHUNK)));
+            const oz: f32 = @floatFromInt((patch_origin + cz) * @as(i32, @intCast(CHUNK)));
+            var k: usize = 0;
+            while (k < side) : (k += 1) {
+                var j: usize = 0;
+                while (j < side) : (j += 1) {
+                    var i: usize = 0;
+                    while (i < side) : (i += 1) {
+                        // Integer space, converted once: two chunks must evaluate a shared sample
+                        // to the same float, or their border vertices differ and hairline.
+                        const gx: i32 = (patch_origin + cx) * @as(i32, @intCast(CHUNK)) + @as(i32, @intCast(i)) - 1;
+                        const gy: i32 = @as(i32, @intCast(j)) - 1;
+                        const gz: i32 = (patch_origin + cz) * @as(i32, @intCast(CHUNK)) + @as(i32, @intCast(k)) - 1;
+                        const x = @as(f32, @floatFromInt(gx)) * CELL;
+                        const y = 40.0 + @as(f32, @floatFromInt(gy)) * CELL;
+                        const z = @as(f32, @floatFromInt(gz)) * CELL;
+                        vals[i + side * (j + side * k)] = y - heightAt(x, z);
+                    }
+                }
+            }
+            const field = dc.Field{
+                .values = vals,
+                .n = CHUNK,
+                .skirt = 1,
+                .origin = .{ ox, 40.0, oz },
+                .cell = CELL,
+            };
+            const surf = try dc.extract(alloc, field);
+            defer surf.deinit(alloc);
+            quads += surf.quadCount();
+            const base: u32 = @intCast(verts.items.len);
+            for (surf.verts) |v| {
+                var mat: u8 = 0;
+                const col = materialColour(v.pos, v.normal, &mat);
+                try verts.append(alloc, .{ .pos = v.pos, .normal = v.normal, .colour = col, .material = @floatFromInt(mat) });
+            }
+            for (surf.indices) |v| try idx.append(alloc, base + v);
+        }
+    }
+    return quads;
+}
+
 pub fn main(init: std.process.Init) !void {
     // VOXEL_DC_BG=magenta paints the background a colour that terrain shading cannot produce, so a
     // hole count can never be confused with a pixel that merely happens to land near the sky tone.
@@ -277,74 +339,29 @@ pub fn main(init: std.process.Init) !void {
     sun.setTime(0.30); // ADR 0009: noon sits at t = 0.30 of the 300 s cycle
     var cloud_shift = Vec3.init(0, 0, 0);
 
-    // Chunk-by-chunk, each with a one-cell skirt. Ownership is a half-open cube of sample
-    // indices, so each border quad is emitted exactly once - by the chunk that owns it -
-    // using a skirt vertex its neighbour computes identically. That is what closes the
-    // seams the single-field version was hiding.
-    const n = CHUNK;
-    const side = n + 3; // owned cells + 2 skirt cells
     var all_verts: std.ArrayList(Coloured) = .empty;
     defer all_verts.deinit(alloc);
     var all_idx: std.ArrayList(u32) = .empty;
     defer all_idx.deinit(alloc);
 
-    var quads: usize = 0;
-    // Streaming prep: the patch origin is a variable rather than a hard-coded 0, so a rebuild can
-    // follow the camera. Making it actually move needs the build+upload below factored into a
-    // function that can be called again - see the note at the end of this file.
     const patch_origin: i32 = -PATCH / 2;
-    var cz: i32 = 0;
-    while (cz < PATCH) : (cz += 1) {
-        var cx: i32 = 0;
-        while (cx < PATCH) : (cx += 1) {
-            const vals = try alloc.alloc(f32, side * side * side);
-            defer alloc.free(vals);
-            const ox: f32 = @floatFromInt((patch_origin + cx) * @as(i32, @intCast(CHUNK)));
-            const oz: f32 = @floatFromInt((patch_origin + cz) * @as(i32, @intCast(CHUNK)));
-            var k: usize = 0;
-            while (k < side) : (k += 1) {
-                var j: usize = 0;
-                while (j < side) : (j += 1) {
-                    var i: usize = 0;
-                    while (i < side) : (i += 1) {
-                        // World coordinates are built in INTEGER space and converted once.
-                        // Adding the chunk origin as a float gave the same world sample
-                        // different low bits in different chunks (ox + (i-1)*cell vs
-                        // ox' + (i'-1)*cell), so the shared border vertices differed by ~1e-6
-                        // and every chunk border drew a hairline. Integers make the two
-                        // evaluations bitwise identical, which is what the skirt assumes.
-                        const gx: i32 = (patch_origin + cx) * @as(i32, @intCast(CHUNK)) + @as(i32, @intCast(i)) - 1;
-                        const gy: i32 = @as(i32, @intCast(j)) - 1;
-                        const gz: i32 = (patch_origin + cz) * @as(i32, @intCast(CHUNK)) + @as(i32, @intCast(k)) - 1;
-                        const x = @as(f32, @floatFromInt(gx)) * CELL;
-                        const y = 40.0 + @as(f32, @floatFromInt(gy)) * CELL;
-                        const z = @as(f32, @floatFromInt(gz)) * CELL;
-                        vals[i + side * (j + side * k)] = y - heightAt(x, z);
-                    }
-                }
-            }
-            const field = dc.Field{
-                .values = vals,
-                .n = CHUNK,
-                .skirt = 1,
-                .origin = .{ ox, 40.0, oz },
-                .cell = CELL,
-            };
-            const surf = try dc.extract(alloc, field);
-            defer surf.deinit(alloc);
-            quads += surf.quadCount();
-            const base: u32 = @intCast(all_verts.items.len);
-            for (surf.verts) |v| {
-                var mat: u8 = 0;
-                const col = materialColour(v.pos, v.normal, &mat);
-                try all_verts.append(alloc, .{ .pos = v.pos, .normal = v.normal, .colour = col, .material = @floatFromInt(mat) });
-            }
-            for (surf.indices) |idx| try all_idx.append(alloc, base + idx);
-        }
-    }
+    const quads = try meshPatch(alloc, patch_origin, &all_verts, &all_idx);
     const all_verts_s = all_verts.items;
     const all_idx_s = all_idx.items;
     std.debug.print("DC viewer: {d} verts, {d} quads over {d} skirted chunks\n", .{ all_verts_s.len, quads, PATCH * PATCH });
+
+    // Streaming plan step 1 and 2: a rebuild is just a second call, so prove that first.
+    // Identical counts mean the build is a pure function of the origin; the timing says what a
+    // chunk crossing would cost if it ran synchronously on this thread.
+    var probe_verts: std.ArrayList(Coloured) = .empty;
+    defer probe_verts.deinit(alloc);
+    var probe_idx: std.ArrayList(u32) = .empty;
+    defer probe_idx.deinit(alloc);
+    const t_rebuild = nowNs();
+    const probe_quads = try meshPatch(alloc, patch_origin, &probe_verts, &probe_idx);
+    const rebuild_ms = @as(f64, @floatFromInt(nowNs() - t_rebuild)) / 1e6;
+    const identical = probe_verts.items.len == all_verts_s.len and probe_idx.items.len == all_idx_s.len and probe_quads == quads;
+    std.debug.print("rebuild: {d} quads in {d:.1} ms, identical to the first build: {}\n", .{ probe_quads, rebuild_ms, identical });
 
     var shader = try gfx.Shader.init(vertex_src, fragment_src);
     defer shader.deinit();
