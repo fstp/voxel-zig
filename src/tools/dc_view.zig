@@ -26,10 +26,10 @@ fn nowNs() i64 {
     return ts.tv_sec * 1_000_000_000 + ts.tv_nsec;
 }
 const SEED: u32 = 1337;
-// 16x16 chunks (256 chunks, 1024 m^2): at PATCH=4 the boundary was visible in frame and accounted for
+// 8x8 chunks (64 chunks, 256 m^2), re-meshed as the camera crosses a chunk border:: at PATCH=4 the boundary was visible in frame and accounted for
 // 99.6% of the background pixels counted as "holes". A bigger patch pushes the world edge out of
 // shot, which is the honest way to separate a mesher defect from the edge of the world.
-const PATCH: i32 = 16;
+const PATCH: i32 = 8;
 const CELL: f32 = 1.0;
 
 fn heightAt(x: f32, z: f32) f32 {
@@ -289,14 +289,18 @@ pub fn main(init: std.process.Init) !void {
     defer all_idx.deinit(alloc);
 
     var quads: usize = 0;
+    // Streaming prep: the patch origin is a variable rather than a hard-coded 0, so a rebuild can
+    // follow the camera. Making it actually move needs the build+upload below factored into a
+    // function that can be called again - see the note at the end of this file.
+    const patch_origin: i32 = -PATCH / 2;
     var cz: i32 = 0;
     while (cz < PATCH) : (cz += 1) {
         var cx: i32 = 0;
         while (cx < PATCH) : (cx += 1) {
             const vals = try alloc.alloc(f32, side * side * side);
             defer alloc.free(vals);
-            const ox: f32 = @floatFromInt(cx * @as(i32, @intCast(CHUNK)));
-            const oz: f32 = @floatFromInt(cz * @as(i32, @intCast(CHUNK)));
+            const ox: f32 = @floatFromInt((patch_origin + cx) * @as(i32, @intCast(CHUNK)));
+            const oz: f32 = @floatFromInt((patch_origin + cz) * @as(i32, @intCast(CHUNK)));
             var k: usize = 0;
             while (k < side) : (k += 1) {
                 var j: usize = 0;
@@ -309,9 +313,9 @@ pub fn main(init: std.process.Init) !void {
                         // ox' + (i'-1)*cell), so the shared border vertices differed by ~1e-6
                         // and every chunk border drew a hairline. Integers make the two
                         // evaluations bitwise identical, which is what the skirt assumes.
-                        const gx: i32 = @as(i32, @intCast(cx)) * @as(i32, @intCast(CHUNK)) + @as(i32, @intCast(i)) - 1;
+                        const gx: i32 = (patch_origin + cx) * @as(i32, @intCast(CHUNK)) + @as(i32, @intCast(i)) - 1;
                         const gy: i32 = @as(i32, @intCast(j)) - 1;
-                        const gz: i32 = @as(i32, @intCast(cz)) * @as(i32, @intCast(CHUNK)) + @as(i32, @intCast(k)) - 1;
+                        const gz: i32 = (patch_origin + cz) * @as(i32, @intCast(CHUNK)) + @as(i32, @intCast(k)) - 1;
                         const x = @as(f32, @floatFromInt(gx)) * CELL;
                         const y = 40.0 + @as(f32, @floatFromInt(gy)) * CELL;
                         const z = @as(f32, @floatFromInt(gz)) * CELL;
@@ -431,3 +435,17 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 }
+
+// Streaming, the next step and why it is not here yet.
+//
+// This viewer meshes one patch at startup and uploads it once. Making the world follow the camera
+// needs two things this file does not have: the build-and-upload block factored into a callable
+// function (it currently lives inline in `main`, appending into two ArrayLists and then binding a
+// VAO), and key handling that moves the camera. Both are mechanical, but the cost is a synchronous
+// rebuild of the whole patch - 64 chunks x ~0.37 ms = ~24 ms - paid whenever the camera crosses a
+// chunk border, so streaming properly means meshing off the main thread and swapping buffers, which
+// is the same worker-pool design the block world already uses.
+//
+// Order that keeps each step verifiable: (1) factor build+upload into `meshPatch(alloc, origin, ...)`
+// and call it twice in a row, asserting identical vertex counts; (2) call it on a chunk crossing
+// and time the rebuild; (3) move meshing to a worker and upload on completion.
