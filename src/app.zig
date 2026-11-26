@@ -637,11 +637,20 @@ pub const App = struct {
         return Vec3.init(wish.x / length, 0, wish.z / length);
     }
 
+    /// Vertical axis for fly mode: +1 for Space, -1 for Ctrl, 0 for neither.
+    ///
+    /// Signed on purpose. The obvious `@intFromBool(space) - @intFromBool(ctrl)`
+    /// infers u1 for both operands, and `0 - 1` in u1 is an integer overflow: the
+    /// game aborted the first time Ctrl was pressed without Space.
+    pub fn verticalAxis(space: bool, ctrl: bool) i8 {
+        return @as(i8, @intFromBool(space)) - @as(i8, @intFromBool(ctrl));
+    }
+
     fn simulate(self: *App, dt: f64) void {
-        const up: f32 = @floatFromInt(
-            @intFromBool(self.input.down(sdl.SDL_SCANCODE_SPACE)) -
-                @intFromBool(self.input.down(sdl.SDL_SCANCODE_LCTRL)),
-        );
+        const up: f32 = @floatFromInt(verticalAxis(
+            self.input.down(sdl.SDL_SCANCODE_SPACE),
+            self.input.down(sdl.SDL_SCANCODE_LCTRL),
+        ));
         const sprint = self.input.down(sdl.SDL_SCANCODE_LSHIFT);
         self.player.update(&self.world, @floatCast(dt), self.wishVector(), up, sprint);
         self.bodies.step(&self.world, @floatCast(dt));
@@ -1181,4 +1190,11 @@ test "streaming ranges are a cylinder with a one-ring hysteresis" {
     // Outside the world height is never in range.
     try std.testing.expect(!chunkInRange(centre, ChunkPos.init(10, -1, 10), LOAD_RADIUS));
     try std.testing.expect(!chunkInRange(centre, ChunkPos.init(10, 4, 10), LOAD_RADIUS));
+}
+
+test "vertical axis is signed: ctrl alone is -1, not an overflow" {
+    try std.testing.expectEqual(@as(i8, 1), App.verticalAxis(true, false));
+    try std.testing.expectEqual(@as(i8, -1), App.verticalAxis(false, true));
+    try std.testing.expectEqual(@as(i8, 0), App.verticalAxis(true, true));
+    try std.testing.expectEqual(@as(i8, 0), App.verticalAxis(false, false));
 }
