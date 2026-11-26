@@ -1222,6 +1222,9 @@ pub const App = struct {
             }
         }
 
+        // 5.3: multisample scene -> single-sample colour and depth.
+        self.post.resolve();
+
         // 4.9: occlusion from the depth buffer just written, then hand the blur to
         // the resolve. Half resolution: AO is low frequency by nature.
         if (self.ssao.enabled) {

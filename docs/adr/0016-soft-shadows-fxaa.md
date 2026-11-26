@@ -67,3 +67,27 @@ query - the shadow pass is unchanged at 0.379 ms because it only draws depth, an
 extra work lands in the main pass. The evidence that it fits is that the frame stays
 at 120.0 fps with the 8.33 ms vsync budget intact; a dedicated timing query around the
 chunk pass is the next step if that stops being enough.
+
+## Amendment: MSAA replaced FXAA, and the window is 1920x1080
+
+FXAA was the wrong default for this renderer. It blurs the 256 px textures that were
+just paid for, and every edge it fixes is a geometric edge that coverage sampling
+handles exactly. MSAA now runs at 4x on the scene target.
+
+| | |
+|---|---|
+| Scene target | `RGBA16F` multisample, 4 samples, with a multisample `DEPTH_COMPONENT24` |
+| Resolve | `glBlitFramebuffer` of colour **and depth** into the single-sample textures, before SSAO runs |
+| Why the depth blit | SSAO reads depth; multisample depth cannot be sampled directly, and `texelFetch` per sample would cost four times as much for no visible gain |
+| FXAA | kept behind F13 as an A/B, off by default |
+| Window | 1920x1080 |
+| VRAM | 4x colour 66 MB, 4x depth 33 MB, resolve colour 17 MB, resolve depth 8 MB: about 124 MB |
+
+Measured at 1920x1080, sun el 30, walking: 120.0 fps, worst frame 8.51 ms. Pass costs
+scale as expected from 720p - sky 1.789 ms (2.25x the pixels), shadow 0.366 (map size
+unchanged), SSAO 0.141 (half of 1080p), resolve 0.047 with FXAA off.
+
+Not done, and worth stating: alpha-cutout leaves still get hard edges under MSAA,
+because coverage comes from the triangle and not from the texture's alpha.
+`GL_SAMPLE_ALPHA_TO_COVERAGE` on the chunk pass would fix it by turning alpha into
+coverage, at the cost of full-rate shading on those fragments.

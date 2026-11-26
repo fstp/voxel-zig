@@ -111,7 +111,14 @@ const FRAG_SRC: [:0]const u8 =
 /// exposure and a filmic curve on the way to the window, is what makes bright
 /// surfaces roll off instead of blowing out.
 pub const Post = struct {
+    /// The resolve target: single-sample colour and depth, which the tone map and
+    /// SSAO read. The scene is drawn into `msaa_fbo` and blitted here.
     fbo: gl.uint = 0,
+    /// Multisample scene target (5.3).
+    msaa_fbo: gl.uint = 0,
+    msaa_colour: gl.uint = 0,
+    msaa_depth: gl.uint = 0,
+    samples: i32 = 4,
     colour: gl.uint = 0,
     /// Depth as a texture rather than a renderbuffer, so SSAO can read it.
     depth: gl.uint = 0,
@@ -133,7 +140,8 @@ pub const Post = struct {
     /// adaptation written each frame by the app.
     exposure: f32 = 0.62,
     tonemap: bool = true,
-    fxaa: bool = true,
+    /// Kept as a fallback and an A/B; MSAA is the default antialiasing now.
+    fxaa: bool = false,
     query: gl.uint = 0,
     /// Milliseconds the resolve took on the GPU last frame.
     last_ms: f32 = 0,
@@ -157,6 +165,27 @@ pub const Post = struct {
         };
         try post.createTargets();
         return post;
+    }
+
+    fn createMsaaTargets(self: *Post) !void {
+        gl.GenTextures(1, @ptrCast(&self.msaa_colour));
+        gl.BindTexture(gl.TEXTURE_2D_MULTISAMPLE, self.msaa_colour);
+        gl.TexImage2DMultisample(gl.TEXTURE_2D_MULTISAMPLE, self.samples, gl.RGBA16F, self.width, self.height, 1);
+
+        gl.GenTextures(1, @ptrCast(&self.msaa_depth));
+        gl.BindTexture(gl.TEXTURE_2D_MULTISAMPLE, self.msaa_depth);
+        gl.TexImage2DMultisample(gl.TEXTURE_2D_MULTISAMPLE, self.samples, gl.DEPTH_COMPONENT24, self.width, self.height, 1);
+
+        gl.GenFramebuffers(1, @ptrCast(&self.msaa_fbo));
+        gl.BindFramebuffer(gl.FRAMEBUFFER, self.msaa_fbo);
+        gl.FramebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D_MULTISAMPLE, self.msaa_colour, 0);
+        gl.FramebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.TEXTURE_2D_MULTISAMPLE, self.msaa_depth, 0);
+        const status = gl.CheckFramebufferStatus(gl.FRAMEBUFFER);
+        gl.BindFramebuffer(gl.FRAMEBUFFER, 0);
+        if (status != gl.FRAMEBUFFER_COMPLETE) {
+            std.debug.print("msaa framebuffer incomplete: 0x{x}\n", .{status});
+            return error.FramebufferIncomplete;
+        }
     }
 
     fn createTargets(self: *Post) !void {
@@ -199,9 +228,16 @@ pub const Post = struct {
             std.debug.print("hdr framebuffer incomplete: 0x{x}\n", .{status});
             return error.FramebufferIncomplete;
         }
+        try self.createMsaaTargets();
     }
 
     fn destroyTargets(self: *Post) void {
+        if (self.msaa_fbo != 0) gl.DeleteFramebuffers(1, @ptrCast(&self.msaa_fbo));
+        if (self.msaa_colour != 0) gl.DeleteTextures(1, @ptrCast(&self.msaa_colour));
+        if (self.msaa_depth != 0) gl.DeleteTextures(1, @ptrCast(&self.msaa_depth));
+        self.msaa_fbo = 0;
+        self.msaa_colour = 0;
+        self.msaa_depth = 0;
         if (self.fbo != 0) gl.DeleteFramebuffers(1, @ptrCast(&self.fbo));
         if (self.colour != 0) gl.DeleteTextures(1, @ptrCast(&self.colour));
         if (self.depth != 0) gl.DeleteTextures(1, @ptrCast(&self.depth));
@@ -227,10 +263,25 @@ pub const Post = struct {
 
     /// Bind the HDR target and clear it to `clear` (linear).
     pub fn begin(self: *Post, clear: Vec3) void {
-        gl.BindFramebuffer(gl.FRAMEBUFFER, self.fbo);
+        gl.BindFramebuffer(gl.FRAMEBUFFER, self.msaa_fbo);
         gl.Viewport(0, 0, self.width, self.height);
         gl.ClearColor(clear.x, clear.y, clear.z, 1.0);
         gl.Clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    }
+
+    /// Blit the multisample scene into the single-sample textures. Split out of
+    /// `end` because SSAO reads the resolved depth and runs before the tone map.
+    pub fn resolve(self: *Post) void {
+        gl.BindFramebuffer(gl.READ_FRAMEBUFFER, self.msaa_fbo);
+        gl.BindFramebuffer(gl.DRAW_FRAMEBUFFER, self.fbo);
+        gl.BlitFramebuffer(
+            0, 0, self.width, self.height,
+            0, 0, self.width, self.height,
+            gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT,
+            gl.NEAREST,
+        );
+        gl.BindFramebuffer(gl.READ_FRAMEBUFFER, 0);
+        gl.BindFramebuffer(gl.DRAW_FRAMEBUFFER, 0);
     }
 
     /// Resolve to the window. `width`/`height` are the drawable size, which can
