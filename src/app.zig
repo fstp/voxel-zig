@@ -206,7 +206,11 @@ pub const App = struct {
     clouds_enabled: bool = true,
     /// 5.6: water animation.
     waves: bool = true,
-    foam: bool = true,
+    /// 6.3: foam is off by default. A crest threshold alone cannot tell a breaking
+    /// wave from a flat swell, so at grazing angles it smeared into long white bands
+    /// that read as lines across the sea. It needs a shoreline source before it can
+    /// be turned back on.
+    foam: bool = false,
     wave_time: f32 = 0,
     debug_flat_water: bool = false,
     /// Wind offset in cloud space, advanced on the fixed step (3.11).
