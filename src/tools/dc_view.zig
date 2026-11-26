@@ -9,16 +9,27 @@ const vz = @import("voxel_zig");
 
 const dc = vz.voxel.dc;
 const noise = vz.world.noise;
+const sun_mod = vz.world.sun;
+const Mat4 = vz.math.Mat4;
+const Vec3 = vz.math.Vec3;
 const gfx = vz.gfx;
 const sdl = @import("sdl3");
 const gl = @import("gl");
 
 const CHUNK: usize = 32;
+
+const TimeSpec = extern struct { tv_sec: i64, tv_nsec: i64 };
+extern "c" fn clock_gettime(clk_id: c_int, tp: *TimeSpec) c_int;
+fn nowNs() i64 {
+    var ts: TimeSpec = undefined;
+    _ = clock_gettime(1, &ts);
+    return ts.tv_sec * 1_000_000_000 + ts.tv_nsec;
+}
 const SEED: u32 = 1337;
-// 10x10 chunks: at PATCH=4 the 16-chunk boundary was visible in frame and accounted for
+// 16x16 chunks (256 chunks, 1024 m^2): at PATCH=4 the boundary was visible in frame and accounted for
 // 99.6% of the background pixels counted as "holes". A bigger patch pushes the world edge out of
 // shot, which is the honest way to separate a mesher defect from the edge of the world.
-const PATCH: i32 = 10;
+const PATCH: i32 = 16;
 const CELL: f32 = 1.0;
 
 fn heightAt(x: f32, z: f32) f32 {
@@ -243,8 +254,8 @@ pub fn main(init: std.process.Init) !void {
 
     var window = try gfx.Window.init(.{
         .title = "voxel-zig dc spike",
-        .width = 1600,
-        .height = 900,
+        .width = 1920,
+        .height = 1080,
         .vsync = true,
     });
     defer window.deinit();
@@ -252,6 +263,15 @@ pub fn main(init: std.process.Init) !void {
     // The engine loads its GL entry points into a ProcTable; without this every gl call
     // below is a null pointer, which is what segfaulted the first build.
     try vz.gl.init();
+
+    // The engine's own sky and volumetric clouds (ADR 0010), ported rather than reimplemented:
+    // the point of the spike is to judge the DC surface, and it should be lit by the same sky the
+    // block world uses so the two are comparable by eye.
+    var sky = try vz.gfx.SkyRenderer.init();
+    defer sky.deinit();
+    var sun = sun_mod.Sun.init();
+    sun.setTime(0.30); // ADR 0009: noon sits at t = 0.30 of the 300 s cycle
+    var cloud_shift = Vec3.init(0, 0, 0);
 
     // Chunk-by-chunk, each with a one-cell skirt. Ownership is a half-open cube of sample
     // indices, so each border quad is emitted exactly once - by the chunk that owns it -
@@ -350,7 +370,11 @@ pub fn main(init: std.process.Init) !void {
     const centre: f32 = @floatFromInt(@as(usize, @intCast(PATCH)) * CHUNK / 2);
     const index_count: u32 = @intCast(all_idx_s.len);
 
+    var frames: u64 = 0;
+    var window_start = nowNs();
+    var worst_ns: i64 = 0;
     frame: while (true) {
+        const frame_start = nowNs();
         var ev: sdl.SDL_Event = undefined;
         while (sdl.SDL_PollEvent(&ev)) {
             if (ev.type == sdl.SDL_EVENT_QUIT) break :frame;
@@ -365,12 +389,37 @@ pub fn main(init: std.process.Init) !void {
 
         const radius: f32 = 78.0;
         const eye = [3]f32{ centre + radius * 0.75, 92.0, centre + radius * 0.95 };
-        const view = lookAt(eye, .{ centre, 58.0, centre }, .{ 0, 1, 0 });
+        // Aim near the horizon: the clouds live in a 380..700 block slab (ADR 0010), so a camera
+        // pointed down at the terrain never sees them, which is exactly what the first sky capture
+        // showed - a clean gradient with nothing in it.
+        const view = lookAt(eye, .{ centre, 86.0, centre }, .{ 0, 1, 0 });
         const proj = perspective(0.9, w / @max(h, 1.0), 0.5, 900.0);
+        const vp_m = mul(proj, view);
+        const eye_v = Vec3.init(eye[0], eye[1], eye[2]);
+        cloud_shift = Vec3.init(cloud_shift.x + 0.016 * 2.0, 0, cloud_shift.z + 0.016 * 0.6);
+        sky.draw(Mat4{ .m = vp_m }, eye_v, &sun, true, cloud_shift);
+
         shader.use();
-        shader.setMat4("u_view_proj", mul(proj, view));
+        shader.setMat4("u_view_proj", vp_m);
         gl.BindVertexArray(vao);
         gl.DrawElements(gl.TRIANGLES, @intCast(index_count), gl.UNSIGNED_INT, 0);
         window.swap();
+
+        const frame_ns = nowNs() - frame_start;
+        if (frame_ns > worst_ns) worst_ns = frame_ns;
+        frames += 1;
+        const elapsed = nowNs() - window_start;
+        if (elapsed >= 1_000_000_000) {
+            const fps = @as(f64, @floatFromInt(frames)) * 1e9 / @as(f64, @floatFromInt(elapsed));
+            std.debug.print("fps {d:.1}  worst frame {d:.2} ms  verts {d}  quads {d}\n", .{
+                fps,
+                @as(f64, @floatFromInt(worst_ns)) / 1e6,
+                all_verts_s.len,
+                quads,
+            });
+            frames = 0;
+            worst_ns = 0;
+            window_start = nowNs();
+        }
     }
 }

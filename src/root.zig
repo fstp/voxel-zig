@@ -68,6 +68,7 @@ pub const gfx = struct {
     pub const TextureArray = @import("gfx/texture.zig").TextureArray;
     pub const BlockRenderer = @import("gfx/block_renderer.zig").BlockRenderer;
     pub const ChunkRenderer = @import("gfx/chunk_renderer.zig").ChunkRenderer;
+    pub const SkyRenderer = @import("gfx/sky_renderer.zig").SkyRenderer;
 };
 
 test {
