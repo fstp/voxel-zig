@@ -29,7 +29,7 @@ const SEED: u32 = 1337;
 
 /// Bumped whenever the field or the mesher changes. Printed at startup so a stale binary cannot be
 /// mistaken for a change that "made no difference" - which is what the last commit could not rule out.
-const BUILD_TAG = "inside-v7";
+const BUILD_TAG = "slab-v9";
 // 8x8 chunks (64 chunks, 256 m^2), re-meshed as the camera crosses a chunk border:: at PATCH=4 the boundary was visible in frame and accounted for
 // 99.6% of the background pixels counted as "holes". A bigger patch pushes the world edge out of
 // shot, which is the honest way to separate a mesher defect from the edge of the world.
@@ -289,13 +289,22 @@ fn meshChunkInto(
             );
         }
     }
+    // The sampled slab has to CONTAIN the surface. It used to start at y = 40 and span 34 m, while
+    // the fBm terrain peaks near 87 - so every peak above 75 was cut open and drew as a hole, which
+    // is exactly where the big holes were reported. Anchoring the slab to the chunk's own lowest
+    // column keeps the whole surface inside it.
+    var min_h: f32 = 1e9;
+    for (heights) |h| {
+        if (h < min_h) min_h = h;
+    }
+    const y0 = min_h - 2.0;
     var k: usize = 0;
     while (k < side) : (k += 1) {
         var j: usize = 0;
         while (j < side) : (j += 1) {
             var i: usize = 0;
             while (i < side) : (i += 1) {
-                const y = 40.0 + (@as(f32, @floatFromInt(j)) - 1.0) * CELL;
+                const y = y0 + (@as(f32, @floatFromInt(j)) - 1.0) * CELL;
                 vals[i + side * (j + side * k)] = y - heights[i + side * k];
             }
         }
@@ -307,7 +316,7 @@ fn meshChunkInto(
         .skirt = 1,
         .origin = .{
             @as(f32, @floatFromInt((patch_origin + cx) * @as(i32, @intCast(CHUNK)))),
-            40.0,
+            y0,
             @as(f32, @floatFromInt((patch_origin_z + cz) * @as(i32, @intCast(CHUNK)))),
         },
         .cell = CELL,
@@ -371,6 +380,66 @@ fn uploadMesh(vao: *u32, vbo: *u32, ebo: *u32, verts: []const Coloured, idx: []c
     gl.BindVertexArray(0);
 }
 
+
+/// Counts near-duplicate vertices. If the skirt ownership rule has an off-by-one, adjacent chunks
+/// put a vertex at *almost* the same point instead of exactly the same one, and the quad that should
+/// bridge them leaves a hairline. Welding by position in the tiling test hides precisely this, so it
+/// has to be measured on the raw mesh.
+fn countNearDuplicates(alloc: std.mem.Allocator, verts: []const Coloured) !struct { exact: usize, near: usize } {
+    const Cell = struct {
+        fn key(x: f32, y: f32, z: f32, inv: f32) [3]i32 {
+            return .{
+                @intFromFloat(@floor(x * inv)),
+                @intFromFloat(@floor(y * inv)),
+                @intFromFloat(@floor(z * inv)),
+            };
+        }
+    };
+    const inv: f32 = 4.0; // buckets of 0.25 blocks, so a pair within half a block shares buckets
+    var map = std.AutoHashMap([3]i32, std.ArrayListUnmanaged(u32)).init(alloc);
+    defer {
+        var it = map.valueIterator();
+        while (it.next()) |list| list.deinit(alloc);
+        map.deinit();
+    }
+    for (verts, 0..) |v, i| {
+        const k = Cell.key(v.pos[0], v.pos[1], v.pos[2], inv);
+        const gop = try map.getOrPut(k);
+        if (!gop.found_existing) gop.value_ptr.* = .empty;
+        try gop.value_ptr.append(alloc, @intCast(i));
+    }
+    var exact: usize = 0;
+    var near: usize = 0;
+    for (verts, 0..) |v, i| {
+        const base = Cell.key(v.pos[0], v.pos[1], v.pos[2], inv);
+        var dx: i32 = -1;
+        while (dx <= 1) : (dx += 1) {
+            var dy: i32 = -1;
+            while (dy <= 1) : (dy += 1) {
+                var dz: i32 = -1;
+                while (dz <= 1) : (dz += 1) {
+                    const k = [3]i32{ base[0] + dx, base[1] + dy, base[2] + dz };
+                    const list = map.get(k) orelse continue;
+                    for (list.items) |j| {
+                        if (j <= i) continue;
+                        const o = verts[j].pos;
+                        const ddx = o[0] - v.pos[0];
+                        const ddy = o[1] - v.pos[1];
+                        const ddz = o[2] - v.pos[2];
+                        const d2 = ddx * ddx + ddy * ddy + ddz * ddz;
+                        if (d2 <= 1e-10) {
+                            exact += 1;
+                        } else if (d2 < 0.25) {
+                            near += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return .{ .exact = exact, .near = near };
+}
+
 pub fn main(init: std.process.Init) !void {
     // VOXEL_DC_BG=magenta paints the background a colour that terrain shading cannot produce, so a
     // hole count can never be confused with a pixel that merely happens to land near the sky tone.
@@ -428,6 +497,10 @@ pub fn main(init: std.process.Init) !void {
     const all_verts_s = all_verts.items;
     const all_idx_s = all_idx.items;
     std.debug.print("DC viewer: {d} verts, {d} quads over {d} skirted chunks\n", .{ all_verts_s.len, quads, PATCH * PATCH });
+    {
+        const dup = try countNearDuplicates(alloc, all_verts_s);
+        std.debug.print("duplicates: exact {d}, near (<0.5 block, >1e-5) {d}\n", .{ dup.exact, dup.near });
+    }
 
     // Streaming plan step 1 and 2: a rebuild is just a second call, so prove that first.
     // Identical counts mean the build is a pure function of the origin; the timing says what a
