@@ -29,7 +29,7 @@ const SEED: u32 = 1337;
 
 /// Bumped whenever the field or the mesher changes. Printed at startup so a stale binary cannot be
 /// mistaken for a change that "made no difference" - which is what the last commit could not rule out.
-const BUILD_TAG = "slab-v9";
+const BUILD_TAG = "slab-v11";
 // 8x8 chunks (64 chunks, 256 m^2), re-meshed as the camera crosses a chunk border:: at PATCH=4 the boundary was visible in frame and accounted for
 // 99.6% of the background pixels counted as "holes". A bigger patch pushes the world edge out of
 // shot, which is the honest way to separate a mesher defect from the edge of the world.
@@ -269,7 +269,10 @@ fn meshChunkInto(
     idx: *std.ArrayList(u32),
 ) !usize {
     const n = CHUNK;
-    const side = n + 3; // owned cells + 2 skirt cells
+    // One skirt cell each side. Tried two, on the theory that the QEF gradient stencil was clamped
+    // at the boundary in one chunk and central in its neighbour: it made the hairline count WORSE
+    // (10,394 -> 19,805 near-duplicates), so the theory is wrong and this stays at one.
+    const side = n + 3;
     const vals = try alloc.alloc(f32, side * side * side);
     defer alloc.free(vals);
 
