@@ -60,3 +60,35 @@ unchanged: the pass is not the frame's bottleneck.
   time of day.
 - The march is per-pixel at full resolution. Half resolution with an upsample is
   the obvious next optimisation if the budget tightens.
+
+## Amendment: less dense, and no wall on the horizon
+
+The first cut of the layer was a uniform deck and, seen edge-on, a flat band sitting
+on the horizon. Four changes, all inside `cloudDensity()` and the march:
+
+- **Third octave** (0.55 / 0.29 / 0.16). Two octaves gave smooth blobs; the third
+  breaks the edge into ragged detail.
+- **Coverage is a field, not a constant.** A low-frequency sample (0.19 per block)
+  adds +-0.17 to the coverage threshold, so clear spells and heavy patches sit next
+  to each other. This is most of what makes the sky look unplanned rather than
+  tiled, and it is one noise sample.
+- **The base moves with that same field**, +-35 blocks, so the underside of the deck
+  is uneven instead of a table top. It reuses the sample above, so it is free.
+- **The march is bounded.** Seen edge-on the slab is thousands of blocks deep, and a
+  fixed 20 steps over that distance averages the density into a wall. The ray now
+  stops at 3000 blocks and fades toward the sky from 2200, which is aerial
+  perspective doing the job a distance cut would otherwise fake.
+- Density gained `pow(d, 1.35) * 1.7`: the curve gives puffs a defined edge instead
+  of a fog ramp, the scale compensates for what the curve compresses.
+
+| | before | after |
+|---|---|---|
+| coverage | 0.47 flat | 0.43 +- 0.17 weather field |
+| octaves | 2 | 3 |
+| march | 20 steps, unbounded | 22 steps, 3000 blocks, aerial fade 2200-3000 |
+| sky pass at 1280x720 | 0.76-0.88 ms | **0.91-0.92 ms** |
+
+Tuning note, because it cost two build cycles: raising coverage to 0.56 while adding
+the weather field emptied the sky, and pushing the aerial fade in to 650 blocks
+erased clouds directly overhead, since an overhead cloud at a shallow pitch is
+already 1000 blocks away. Coverage down and the fade out is the direction that works.

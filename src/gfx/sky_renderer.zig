@@ -68,12 +68,23 @@ const FRAG_SRC: [:0]const u8 =
     \\}
     \\
     \\float cloudDensity(vec3 p) {
-    \\    vec3 q = p * 0.0042 + u_cloud_shift;
-    \\    float n = vnoise(q) * 0.62 + vnoise(q * 2.7) * 0.38;
-    \\    // Fade the slab edges so the layer has no visible ceiling or floor.
-    \\    float vertical = smoothstep(u_cloud_bottom, u_cloud_bottom + 60.0, p.y)
-    \\                   * (1.0 - smoothstep(u_cloud_top - 60.0, u_cloud_top, p.y));
-    \\    return clamp((n - u_cloud_coverage) / max(1.0 - u_cloud_coverage, 0.05), 0.0, 1.0) * vertical;
+    \\    vec3 q = p * 0.0038 + u_cloud_shift;
+    \\    // Three octaves: the third is what breaks the edge into ragged detail
+    \\    // instead of a smooth blob.
+    \\    float n = vnoise(q) * 0.55 + vnoise(q * 2.6) * 0.29 + vnoise(q * 6.3) * 0.16;
+    \\    // Coverage is weather, not a constant: a low-frequency field puts clear
+    \\    // spells next to heavy patches, which is most of what makes a cloudscape
+    \\    // look unplanned.
+    \\    float weather = vnoise(q * 0.19 + 13.0);
+    \\    float cover = u_cloud_coverage + (weather - 0.5) * 0.34;
+    \\    // The base is uneven: offsetting the fade by the same weather field costs
+    \\    // nothing and stops the deck reading as a table top at the horizon.
+    \\    float base = u_cloud_bottom + (weather - 0.5) * 70.0;
+    \\    float vertical = smoothstep(base, base + 70.0, p.y)
+    \\                   * (1.0 - smoothstep(u_cloud_top - 70.0, u_cloud_top, p.y));
+    \\    float d = clamp((n - cover) / max(1.0 - cover, 0.05), 0.0, 1.0);
+    \\    // A linear ramp reads as fog; the curve gives the puffs a defined edge.
+    \\    return pow(d, 1.35) * 1.7 * vertical;
     \\}
     \\
     \\// Single scattering through one slab: 20 march steps, two light taps each.
@@ -81,10 +92,15 @@ const FRAG_SRC: [:0]const u8 =
     \\vec4 clouds(vec3 dir) {
     \\    if (u_clouds < 0.5 || dir.y < 0.02) return vec4(0.0, 0.0, 0.0, 1.0);
     \\    float t0 = max((u_cloud_bottom - u_eye.y) / dir.y, 0.0);
-    \\    float t1 = (u_cloud_top - u_eye.y) / dir.y;
+    \\    // Stop the ray after a fixed distance. Seen edge-on the slab is thousands
+    \\    // of blocks deep, and marching that with a fixed step budget averages the
+    \\    // density into a flat band on the horizon; cutting the ray short and
+    \\    // fading what is left into haze is both cheaper and what the eye expects.
+    \\    const float MAX_TRAVEL = 3000.0;
+    \\    float t1 = min((u_cloud_top - u_eye.y) / dir.y, t0 + MAX_TRAVEL);
     \\    if (t1 <= t0) return vec4(0.0, 0.0, 0.0, 1.0);
     \\
-    \\    const int STEPS = 20;
+    \\    const int STEPS = 22;
     \\    float dt = (t1 - t0) / float(STEPS);
     \\    float cos_angle = dot(dir, u_sun_dir);
     \\    // Henyey-Greenstein, forward peaked: thin edges glow when backlit.
@@ -98,15 +114,21 @@ const FRAG_SRC: [:0]const u8 =
     \\    float jitter = hash31(vec3(gl_FragCoord.xy, 7.0));
     \\    for (int i = 0; i < STEPS; ++i) {
     \\        vec3 p = u_eye + dir * (t0 + (float(i) + jitter) * dt);
+    \\        float distance = t0 + (float(i) + jitter) * dt;
     \\        float density = cloudDensity(p);
     \\        if (density > 0.002) {
     \\            float shadow = cloudDensity(p + u_sun_dir * 45.0)
     \\                         + cloudDensity(p + u_sun_dir * 110.0) * 0.6;
     \\            float light = exp(-shadow * 2.2);
+    \\            // Extinction per block: the layer has to be thin enough to see through
+    \\            // at the edges and thick enough to read as cloud in the middle.
     \\            float extinction = exp(-density * dt * 0.02);
+    \\            // Aerial perspective: air between the eye and a distant puff washes
+    \\            // it toward the sky, and it stops occluding at the same rate.
+    \\            float aerial = 1.0 - smoothstep(2200.0, MAX_TRAVEL, distance);
     \\            vec3 lit = u_cloud_light * light * phase * 9.0 + u_zenith * 0.7;
-    \\            scattered += transmittance * (1.0 - extinction) * lit;
-    \\            transmittance *= extinction;
+    \\            scattered += transmittance * (1.0 - extinction) * lit * aerial;
+    \\            transmittance *= mix(1.0, extinction, aerial);
     \\        }
     \\    }
     \\    return vec4(scattered, transmittance);
@@ -209,7 +231,7 @@ pub const SkyRenderer = struct {
         // well above the terrain and from a hilltop still overhead.
         const cloud_ramp = sun.ramp();
         self.shader.setFloat("u_clouds", if (clouds_enabled) 1.0 else 0.0);
-        self.shader.setFloat("u_cloud_coverage", 0.47);
+        self.shader.setFloat("u_cloud_coverage", 0.43);
         self.shader.setVec3("u_cloud_shift", .{ cloud_shift.x, cloud_shift.y, cloud_shift.z });
         self.shader.setFloat("u_cloud_bottom", 380.0);
         self.shader.setFloat("u_cloud_top", 700.0);
