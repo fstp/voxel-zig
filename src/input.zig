@@ -14,6 +14,12 @@ pub const Input = struct {
     relative_mouse: bool = false,
     /// Set on the frame F3 goes down; the app clears it when consumed.
     debug_toggle: bool = false,
+    /// Set on the frame F goes down (fly mode toggle).
+    fly_toggle: bool = false,
+    /// One-frame mouse button edges: left = break, right = place, middle = pick.
+    primary_click: bool = false,
+    secondary_click: bool = false,
+    middle_click: bool = false,
 
     pub fn init() Input {
         return .{ .keys = sdl.SDL_GetKeyboardState(null) };
@@ -29,6 +35,7 @@ pub const Input = struct {
                     // Tab releases the mouse so the desktop is usable again.
                     if (ev.key.key == sdl.SDLK_TAB) self.setRelativeMouse(window, !self.relative_mouse);
                     if (ev.key.key == sdl.SDLK_F3) self.debug_toggle = true;
+                    if (ev.key.key == sdl.SDLK_F) self.fly_toggle = true;
                 },
                 sdl.SDL_EVENT_MOUSE_MOTION => {
                     self.mouse_dx += ev.motion.xrel;
@@ -36,6 +43,14 @@ pub const Input = struct {
                 },
                 sdl.SDL_EVENT_MOUSE_WHEEL => {
                     self.wheel += ev.wheel.y;
+                },
+                sdl.SDL_EVENT_MOUSE_BUTTON_DOWN => {
+                    switch (ev.button.button) {
+                        1 => self.primary_click = true,
+                        2 => self.middle_click = true,
+                        3 => self.secondary_click = true,
+                        else => {},
+                    }
                 },
                 sdl.SDL_EVENT_WINDOW_RESIZED, sdl.SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED => window.syncSize(),
                 else => {},
@@ -48,6 +63,11 @@ pub const Input = struct {
         self.mouse_dx = 0;
         self.mouse_dy = 0;
         self.wheel = 0;
+        self.primary_click = false;
+        self.secondary_click = false;
+        self.middle_click = false;
+        self.fly_toggle = false;
+        self.debug_toggle = false;
     }
 
     pub fn setRelativeMouse(self: *Input, window: *Window, enabled: bool) void {

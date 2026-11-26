@@ -10,6 +10,7 @@
 pub const version = "0.1.0";
 
 pub const App = @import("app.zig").App;
+pub const Player = @import("player/player.zig").Player;
 pub const Camera = @import("camera.zig").Camera;
 pub const Input = @import("input.zig").Input;
 
@@ -28,6 +29,7 @@ pub const voxel = struct {
     pub const BlockPos = coords.BlockPos;
     pub const ChunkPos = coords.ChunkPos;
     pub const mesher = @import("voxel/mesher.zig");
+    pub const raycast = @import("voxel/raycast.zig");
 };
 
 pub const world = struct {
@@ -65,5 +67,7 @@ test {
     _ = @import("world/chunk_mesher.zig");
     _ = @import("world/terrain.zig");
     _ = @import("world/noise.zig");
+    _ = @import("voxel/raycast.zig");
+    _ = @import("player/player.zig");
     _ = @import("app.zig");
 }
