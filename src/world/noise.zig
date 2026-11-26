@@ -39,6 +39,64 @@ fn lerp(a: f32, b: f32, t: f32) f32 {
     return a + (b - a) * t;
 }
 
+/// Three-round mix over (seed, ix, iy, iz), used for the 3D cave field.
+pub fn hash3(seed: u32, ix: i32, iy: i32, iz: i32) u32 {
+    var h: u32 = seed;
+    h ^= @as(u32, @bitCast(ix));
+    h = (h ^ (h >> 16)) *% 0x7FEB352D;
+    h ^= @as(u32, @bitCast(iy));
+    h = (h ^ (h >> 15)) *% 0x846CA68B;
+    h ^= @as(u32, @bitCast(iz));
+    h = (h ^ (h >> 16)) *% 0x9E3779B1;
+    return h ^ (h >> 15);
+}
+
+fn dotGradient3(seed: u32, ix: i32, iy: i32, iz: i32, x: f32, y: f32, z: f32) f32 {
+    // 12 edge gradients of a cube, picked by three hash bits.
+    const g = gradients3[hash3(seed, ix, iy, iz) % 12];
+    return g[0] * x + g[1] * y + g[2] * z;
+}
+
+const gradients3 = [12][3]f32{
+    .{ 1, 1, 0 },  .{ -1, 1, 0 }, .{ 1, -1, 0 }, .{ -1, -1, 0 },
+    .{ 1, 0, 1 },  .{ -1, 0, 1 }, .{ 1, 0, -1 }, .{ -1, 0, -1 },
+    .{ 0, 1, 1 },  .{ 0, -1, 1 }, .{ 0, 1, -1 }, .{ 0, -1, -1 },
+};
+
+/// 3D Perlin noise, normalised to roughly -1..1. Used for caves: sampling a
+/// threshold band around zero gives tunnels rather than blobs.
+pub fn perlin3(seed: u32, x: f32, y: f32, z: f32) f32 {
+    const fx0 = @floor(x);
+    const fy0 = @floor(y);
+    const fz0 = @floor(z);
+    const ix: i32 = @intFromFloat(fx0);
+    const iy: i32 = @intFromFloat(fy0);
+    const iz: i32 = @intFromFloat(fz0);
+    const fx = x - fx0;
+    const fy = y - fy0;
+    const fz = z - fz0;
+    const u = fade(fx);
+    const v = fade(fy);
+    const w = fade(fz);
+
+    const n000 = dotGradient3(seed, ix, iy, iz, fx, fy, fz);
+    const n100 = dotGradient3(seed, ix + 1, iy, iz, fx - 1, fy, fz);
+    const n010 = dotGradient3(seed, ix, iy + 1, iz, fx, fy - 1, fz);
+    const n110 = dotGradient3(seed, ix + 1, iy + 1, iz, fx - 1, fy - 1, fz);
+    const n001 = dotGradient3(seed, ix, iy, iz + 1, fx, fy, fz - 1);
+    const n101 = dotGradient3(seed, ix + 1, iy, iz + 1, fx - 1, fy, fz - 1);
+    const n011 = dotGradient3(seed, ix, iy + 1, iz + 1, fx, fy - 1, fz - 1);
+    const n111 = dotGradient3(seed, ix + 1, iy + 1, iz + 1, fx - 1, fy - 1, fz - 1);
+
+    const x00 = lerp(n000, n100, u);
+    const x10 = lerp(n010, n110, u);
+    const x01 = lerp(n001, n101, u);
+    const x11 = lerp(n011, n111, u);
+    const y0 = lerp(x00, x10, v);
+    const y1 = lerp(x01, x11, v);
+    return lerp(y0, y1, w);
+}
+
 /// 2D Perlin noise, normalised to roughly -1..1 (the raw range for eight unit
 /// gradients is +-sqrt(2)/2).
 pub fn perlin2(seed: u32, x: f32, z: f32) f32 {

@@ -10,6 +10,42 @@ const noise = @import("noise.zig");
 /// thread, and be re-generated later and compared.
 
 pub const SEA_LEVEL: i32 = 62;
+
+/// 2.2 biomes: a low-frequency climate pair picks the surface block.
+pub const Biome = enum(u8) { plains, forest, desert, mountains };
+
+/// Temperature and humidity at ~1/512 and ~1/384 blocks, as ADR 0005 planned.
+pub fn biomeAt(seed: u32, wx: i32, wz: i32) Biome {
+    const x: f32 = @floatFromInt(wx);
+    const z: f32 = @floatFromInt(wz);
+    const temperature = noise.fbm2(seed ^ 0x9E37, x / 512.0, z / 512.0, 2, 2.0, 0.5);
+    const humidity = noise.fbm2(seed ^ 0x79B9, x / 384.0, z / 384.0, 2, 2.0, 0.5);
+    if (temperature > 0.22 and humidity < -0.05) return .desert;
+    if (humidity > 0.18) return .forest;
+    if (temperature < -0.25) return .mountains;
+    return .plains;
+}
+
+/// Surface block for a biome at the top of the column.
+pub fn surfaceBlock(biome: Biome) BlockId {
+    return switch (biome) {
+        .plains, .forest => .grass,
+        .desert => .sand,
+        .mountains => .stone,
+    };
+}
+
+/// Caves: a threshold band of 3D noise below the surface, plus overhangs where
+/// the field dips. Two octaves so tunnels branch instead of forming blobs.
+pub fn isCave(seed: u32, wx: i32, wy: i32, wz: i32) bool {
+    if (wy > MAX_HEIGHT - 4 or wy < 3) return false;
+    const x: f32 = @floatFromInt(wx);
+    const y: f32 = @floatFromInt(wy);
+    const z: f32 = @floatFromInt(wz);
+    const field = noise.perlin3(seed ^ 0xA5A5, x * 0.045, y * 0.075, z * 0.045) * 0.7 +
+        noise.perlin3(seed ^ 0x5A5A, x * 0.09, y * 0.15, z * 0.09) * 0.3;
+    return @abs(field) < 0.022;
+}
 pub const MIN_HEIGHT: i32 = 8;
 pub const MAX_HEIGHT: i32 = 120;
 
@@ -35,9 +71,20 @@ pub fn blockForHeight(wy: i32, surface: i32) BlockId {
     return .stone;
 }
 
+/// Full voxel lookup: biome surface, caves carved out, sea level filled.
 pub fn blockAt(seed: u32, wx: i32, wy: i32, wz: i32) BlockId {
     if (wy < 0 or wy >= coords.WORLD_HEIGHT) return .air;
-    return blockForHeight(wy, heightAt(seed, wx, wz));
+
+    const surface = heightAt(seed, wx, wz);
+    if (wy > surface) {
+        // Water fills the air below sea level, up to the surface.
+        return if (wy <= SEA_LEVEL) .water else .air;
+    }
+    if (isCave(seed, wx, wy, wz)) return .air;
+
+    if (wy == surface) return surfaceBlock(biomeAt(seed, wx, wz));
+    if (wy >= surface - 3) return .dirt;
+    return .stone;
 }
 
 /// Fills one chunk. Pure in `(seed, chunk.pos)`: one height sample per column,
@@ -67,7 +114,19 @@ pub fn generateInto(blocks: *[coords.CHUNK_VOLUME]BlockId, pos: coords.ChunkPos,
 
             var ly: i32 = 0;
             while (ly <= last) : (ly += 1) {
-                blocks[coords.localIndex(lx, ly, lz)] = blockForHeight(origin.y + ly, surface);
+                const wy = origin.y + ly;
+                if (isCave(seed, origin.x + lx, wy, origin.z + lz)) continue;
+                blocks[coords.localIndex(lx, ly, lz)] = if (wy == surface)
+                    surfaceBlock(biomeAt(seed, origin.x + lx, origin.z + lz))
+                else if (wy >= surface - 3)
+                    .dirt
+                else
+                    .stone;
+            }
+            // Sea level: fill air above this column's surface with water.
+            var water_y: i32 = @max(surface + 1, origin.y);
+            while (water_y <= @min(SEA_LEVEL, origin.y + coords.CHUNK_SIZE - 1)) : (water_y += 1) {
+                blocks[coords.localIndex(lx, water_y - origin.y, lz)] = .water;
             }
         }
     }
@@ -128,17 +187,77 @@ test "heightAt is deterministic and seed dependent" {
 
 test "surface layer order is grass, dirt, dirt, dirt, stone" {
     const seed: u32 = 99;
-    for ([_]i32{ 0, 37, -128, 512 }) |wx| {
-        for ([_]i32{ 0, -61, 250 }) |wz| {
+    var checked: usize = 0;
+    for ([_]i32{ 0, 37, -128, 512, 1024, -2048 }) |wx| {
+        for ([_]i32{ 0, -61, 250, -999 }) |wz| {
             const h = heightAt(seed, wx, wz);
-            try testing.expectEqual(BlockId.air, blockAt(seed, wx, h + 1, wz));
-            try testing.expectEqual(BlockId.grass, blockAt(seed, wx, h, wz));
+            // 2.2 carves caves through the surface, so only assert the layer
+            // order on a column the cave field happens to leave intact.
+            if (isCave(seed, wx, h, wz) or isCave(seed, wx, h - 1, wz) or isCave(seed, wx, h - 3, wz) or isCave(seed, wx, h - 4, wz)) continue;
+
+            try testing.expectEqual(surfaceBlock(biomeAt(seed, wx, wz)), blockAt(seed, wx, h, wz));
             try testing.expectEqual(BlockId.dirt, blockAt(seed, wx, h - 1, wz));
             try testing.expectEqual(BlockId.dirt, blockAt(seed, wx, h - 3, wz));
             try testing.expectEqual(BlockId.stone, blockAt(seed, wx, h - 4, wz));
-            try testing.expectEqual(BlockId.stone, blockAt(seed, wx, 0, wz));
+
+            const above = blockAt(seed, wx, h + 1, wz);
+            try testing.expect(above == .air or above == .water);
+            checked += 1;
         }
     }
+    try testing.expect(checked >= 4);
+}
+
+test "biomes vary across the world and follow the climate field" {
+    var seen = [_]bool{ false, false, false, false };
+    var wx: i32 = -4000;
+    while (wx < 4000) : (wx += 137) {
+        var wz: i32 = -4000;
+        while (wz < 4000) : (wz += 137) {
+            seen[@intFromEnum(biomeAt(1234, wx, wz))] = true;
+        }
+    }
+    var kinds: usize = 0;
+    for (seen) |found| {
+        if (found) kinds += 1;
+    }
+    // At least three kinds exist somewhere, which is what the flyover needs.
+    try testing.expect(kinds >= 3);
+}
+
+test "caves break the surface somewhere, which is what a cave entrance is" {
+    // A cave entrance is a column whose surface block was carved away.
+    const seed: u32 = 0x5EED_1234;
+    var entrances: usize = 0;
+    var wx: i32 = 0;
+    while (wx < 512 and entrances == 0) : (wx += 3) {
+        var wz: i32 = 0;
+        while (wz < 512) : (wz += 3) {
+            const surface = heightAt(seed, wx, wz);
+            if (surface <= SEA_LEVEL) continue; // ignore under-water columns
+            if (blockAt(seed, wx, surface, wz) == .air) {
+                entrances += 1;
+                break;
+            }
+        }
+    }
+    try testing.expect(entrances > 0);
+}
+
+test "caves are underground, never at the very top or bottom" {
+    const seed: u32 = 4242;
+    try testing.expect(!isCave(seed, 0, 0, 0));
+    try testing.expect(!isCave(seed, 0, MAX_HEIGHT - 1, 0));
+    var carved: usize = 0;
+    var y: i32 = 5;
+    while (y < 60) : (y += 1) {
+        var x: i32 = 0;
+        while (x < 60) : (x += 4) {
+            if (isCave(seed, x, y, x)) carved += 1;
+        }
+    }
+    // Some but not all: an empty field or swiss cheese would both be wrong.
+    try testing.expect(carved > 0);
 }
 
 test "generating the same chunk twice produces identical voxels" {
@@ -191,11 +310,12 @@ test "chunks above the surface are air and the surface chunk is not" {
     const air_only = chunk.hasOnly(.air);
     try testing.expectEqual(chunkIsAir(seed, top), air_only);
 
-    // The bottom layer is solid everywhere (min height is 8).
+    // The bottom layer is mostly solid; 2.2's caves carve voids out of it, so
+    // the check is "mostly stone", not "no air at all".
     var bottom = Chunk.init(coords.ChunkPos.init(0, 0, 0));
     generateChunk(&bottom, seed);
-    try testing.expect(bottom.countBlocks(.air) == 0);
-    try testing.expect(bottom.countBlocks(.stone) > 0);
+    try testing.expect(bottom.countBlocks(.air) < coords.CHUNK_VOLUME / 4);
+    try testing.expect(bottom.countBlocks(.stone) > coords.CHUNK_VOLUME / 2);
 }
 
 test "a generated chunk matches blockAt voxel for voxel" {

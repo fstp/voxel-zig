@@ -110,6 +110,19 @@ const faces = [6]FaceInfo{
 
 const face_order = [6]Face{ .px, .nx, .py, .ny, .pz, .nz };
 
+/// Whether a face between `block` and `neighbour` should be emitted.
+/// Water is decoration in the PoC (ADR 0005 scopes fluids out), so it only draws
+/// where it meets air: no faces inside a water body, and none against terrain.
+fn faceVisible(block: BlockId, neighbour: BlockId) bool {
+    if (block.isSolid()) return !neighbour.isOpaque();
+    if (block == .water) return neighbour == .air;
+    return false;
+}
+
+fn isRenderable(block: BlockId) bool {
+    return block.isSolid() or block == .water;
+}
+
 /// Builds the geometry of one chunk (ADR 0004: naive face culling, one quad
 /// per visible face, no merging).
 ///
@@ -129,13 +142,13 @@ pub fn mesh(padded: *const PaddedBlocks, out_vertices: []Vertex, out_indices: []
             var x: i32 = 0;
             while (x < coords.CHUNK_SIZE) : (x += 1) {
                 const block = padded.get(x, y, z);
-                if (!block.isSolid()) continue;
+                if (!isRenderable(block)) continue;
 
                 inline for (faces, face_order) |info, face| {
                     const n = info.normal;
                     // An opaque neighbour hides the face; air, water and leaves
-                    // do not (ADR 0004's boundary table).
-                    if (!padded.get(x + n[0], y + n[1], z + n[2]).isOpaque()) {
+                    // do not (ADR 0004's boundary table). Water has its own rule.
+                    if (faceVisible(block, padded.get(x + n[0], y + n[1], z + n[2]))) {
                         if (vertex_count + 4 > out_vertices.len) return error.VertexBufferTooSmall;
                         const face_id: u8 = @intCast(@intFromEnum(face));
                         const layer = block.layerFor(face);
@@ -254,8 +267,8 @@ pub fn meshGreedy(padded: *const PaddedBlocks, out_vertices: []Vertex, out_indic
                     coord[u_axis] = u;
                     coord[v_axis] = v;
                     const block = padded.get(coord[0], coord[1], coord[2]);
-                    if (!block.isSolid()) continue;
-                    if (padded.get(coord[0] + n[0], coord[1] + n[1], coord[2] + n[2]).isOpaque()) continue;
+                    if (!isRenderable(block)) continue;
+                    if (!faceVisible(block, padded.get(coord[0] + n[0], coord[1] + n[1], coord[2] + n[2]))) continue;
 
                     var cell = Cell{ .present = true, .block = block, .layer = block.layerFor(face) };
                     for (info.corners, 0..) |c, k| {
@@ -453,22 +466,48 @@ test "air, water and leaves do not occlude" {
         const buffers = try Buffers.init(testing.allocator, 12);
         defer buffers.deinit(testing.allocator);
         const stats = try meshAll(&padded, buffers.vertices, buffers.indices);
-        // Water is not solid so it emits nothing; leaves are solid, so they add
-        // five faces (the one facing the stone is culled by the stone itself).
-        const expected: usize = if (n == .leaves) 11 else 6;
+        // Leaves are solid and add five faces (the one facing the stone is
+        // culled); water draws only against air, so it adds five as well.
+        const expected: usize = switch (n) {
+            .air => 6,
+            else => 11,
+        };
         try testing.expectEqual(expected, stats.quads);
     }
 }
 
-test "transparent and non-solid blocks emit nothing of their own" {
-    const blocks = [_]BlockId{ .air, .water };
-    for (blocks) |b| {
-        var padded = PaddedBlocks.init();
-        padded.set(5, 5, 5, b);
+test "air emits nothing and water only draws where it meets air" {
+    var air = PaddedBlocks.init();
+    air.set(5, 5, 5, .air);
+    {
         const buffers = try Buffers.init(testing.allocator, 1);
         defer buffers.deinit(testing.allocator);
-        const stats = try meshAll(&padded, buffers.vertices, buffers.indices);
+        const stats = try meshAll(&air, buffers.vertices, buffers.indices);
         try testing.expectEqual(@as(usize, 0), stats.quads);
+    }
+
+    // A lone water block is all surface.
+    var water = PaddedBlocks.init();
+    water.set(5, 5, 5, .water);
+    {
+        const buffers = try Buffers.init(testing.allocator, 8);
+        defer buffers.deinit(testing.allocator);
+        const stats = try meshAll(&water, buffers.vertices, buffers.indices);
+        try testing.expectEqual(@as(usize, 6), stats.quads);
+    }
+
+    // Water against water has no internal faces; against stone it is hidden.
+    var pooled = PaddedBlocks.init();
+    pooled.set(5, 5, 5, .water);
+    pooled.set(6, 5, 5, .water);
+    pooled.set(7, 5, 5, .stone);
+    {
+        const buffers = try Buffers.init(testing.allocator, 32);
+        defer buffers.deinit(testing.allocator);
+        const stats = try meshAll(&pooled, buffers.vertices, buffers.indices);
+        // 10 faces between the two waters minus the two touching each other,
+        // plus the stone's five exposed faces.
+        try testing.expectEqual(@as(usize, 15), stats.quads);
     }
 }
 
