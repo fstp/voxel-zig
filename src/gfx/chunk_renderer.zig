@@ -142,6 +142,9 @@ pub const ChunkRenderer = struct {
         textures.bind(0);
 
         gl.Enable(gl.DEPTH_TEST);
+        // Explicit, not inherited: the sky pass runs with depth writes off and a
+        // restore bug there must not silently break occlusion here.
+        gl.DepthMask(gl.TRUE);
         gl.Enable(gl.CULL_FACE);
         gl.CullFace(gl.BACK);
         gl.FrontFace(gl.CCW);

@@ -22,6 +22,7 @@ const undo_mod = @import("world/undo.zig");
 const sun_mod = @import("world/sun.zig");
 const physics = @import("physics/bodies.zig");
 const BlockRenderer = @import("gfx/block_renderer.zig").BlockRenderer;
+const SkyRenderer = @import("gfx/sky_renderer.zig").SkyRenderer;
 const net = @import("net/udp.zig");
 const block = @import("voxel/block.zig");
 const coords = @import("voxel/coords.zig");
@@ -174,6 +175,7 @@ pub const App = struct {
     edits: usize = 0,
     undo: undo_mod.Undo,
     block_renderer: BlockRenderer,
+    sky_renderer: SkyRenderer,
     bodies: physics.Bodies,
     body_items: []physics.Body,
     rng: u32 = 0x1234_5678,
@@ -224,6 +226,10 @@ pub const App = struct {
         // 2.3: single-block renderer reused for the physics toys.
         var block_renderer = try BlockRenderer.init();
         errdefer block_renderer.deinit();
+
+        // 3.6: the procedural sky, drawn before everything else.
+        var sky_renderer = try SkyRenderer.init();
+        errdefer sky_renderer.deinit();
 
         gl.gl.Enable(gl.gl.DEPTH_TEST);
         gl.gl.Enable(gl.gl.CULL_FACE);
@@ -280,6 +286,7 @@ pub const App = struct {
             .meshes = .{},
             .undo = undo_mod.Undo.init(gpa),
             .block_renderer = block_renderer,
+            .sky_renderer = sky_renderer,
             .bodies = undefined,
             .peer = peer,
             .body_items = try gpa.alloc(physics.Body, MAX_BODIES),
@@ -327,6 +334,7 @@ pub const App = struct {
         if (self.peer) |*p| p.deinit(self.io);
         self.undo.deinit();
         self.block_renderer.deinit();
+        self.sky_renderer.deinit();
         self.allocator.free(self.body_items);
         self.hud.deinit();
         self.chunk_renderer.deinit();
@@ -812,7 +820,7 @@ pub const App = struct {
                 self.recount();
                 const seconds = @as(f64, @floatFromInt(report_dt_ns)) / 1e9;
                 std.debug.print(
-                    "fps {d:6.1} frame {d:5.2}ms worst {d:5.2}ms  loaded {d} meshed {d} drawn {d} quads {d}  jobs {d} boxes {d}  sun t{d:.3} el {d:5.1} az {d:6.1} day {d:.2}{s}  pos ({d:.1},{d:.1},{d:.1}) {s}{s}\n",
+                    "fps {d:6.1} frame {d:5.2}ms worst {d:5.2}ms  loaded {d} meshed {d} drawn {d} quads {d}  jobs {d} boxes {d}  sun t{d:.3} el {d:5.1} az {d:6.1} day {d:.2}{s}  yaw {d:5.2} pitch {d:5.2}  pos ({d:.1},{d:.1},{d:.1}) {s}{s}\n",
                     .{
                         @as(f64, @floatFromInt(frames)) / seconds,
                         @as(f64, @floatFromInt(report_dt_ns)) / 1e6 / @as(f64, @floatFromInt(frames)),
@@ -828,6 +836,8 @@ pub const App = struct {
                         self.sun.azimuth(),
                         self.sun.daylight(),
                         if (self.sun.paused) " PAUSED" else "",
+                        self.player.yaw,
+                        self.player.pitch,
                         self.player.position.x,
                         self.player.position.y,
                         self.player.position.z,
@@ -983,6 +993,9 @@ pub const App = struct {
         const vp = self.camera.viewProjection(aspect);
         const frustum = Frustum.fromViewProjection(vp);
 
+        // Sky first, over the cleared colour buffer, then terrain on top of it.
+        self.sky_renderer.draw(vp, self.camera.position, &self.sun);
+
         const lighting = self.sun.lighting();
         self.chunk_renderer.begin(vp, &self.textures, lighting, self.legacy_lighting, self.show_normals);
         var drawn: usize = 0;
@@ -1052,7 +1065,7 @@ pub const App = struct {
         if (std.fmt.bufPrint(&buffer, "FPS {d:.1}", .{if (self.frame_ms > 0) 1000.0 / self.frame_ms else 0})) |text| {
             self.hud.text(10, 8, text);
         } else |_| {}
-        if (std.fmt.bufPrint(&buffer, "FRAME {d:.2} MS  WORST {d:.2} MS", .{ self.frame_ms, self.worst_frame_ms })) |text| {
+        if (std.fmt.bufPrint(&buffer, "FRAME {d:.2} MS  WORST {d:.2} MS  SKY {d:.3} MS", .{ self.frame_ms, self.worst_frame_ms, self.sky_renderer.last_ms })) |text| {
             self.hud.text(10, 26, text);
         } else |_| {}
         line = 2;
