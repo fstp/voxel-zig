@@ -35,6 +35,8 @@ pub const world = struct {
     pub const Chunk = @import("world/chunk.zig").Chunk;
     pub const ChunkState = @import("world/chunk.zig").ChunkState;
     pub const ChunkSlab = @import("world/chunk_slab.zig").ChunkSlab;
+    pub const chunk_mesher = @import("world/chunk_mesher.zig");
+    pub const fixture = @import("world/fixture.zig");
 };
 
 pub const gfx = struct {
@@ -43,6 +45,7 @@ pub const gfx = struct {
     pub const Shader = @import("gfx/shader.zig").Shader;
     pub const TextureArray = @import("gfx/texture.zig").TextureArray;
     pub const BlockRenderer = @import("gfx/block_renderer.zig").BlockRenderer;
+    pub const ChunkRenderer = @import("gfx/chunk_renderer.zig").ChunkRenderer;
 };
 
 test {
@@ -58,5 +61,7 @@ test {
     _ = @import("world/chunk_slab.zig");
     _ = @import("world/world.zig");
     _ = @import("voxel/mesher.zig");
+    _ = @import("world/chunk_mesher.zig");
+    _ = @import("world/fixture.zig");
     _ = @import("app.zig");
 }

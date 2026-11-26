@@ -4,14 +4,17 @@ const Window = @import("gfx/window.zig").Window;
 const gl = @import("gfx/gl.zig");
 const DebugDraw = @import("gfx/debug_draw.zig").DebugDraw;
 const Input = @import("input.zig").Input;
-const TextureArray = @import("gfx/texture.zig").TextureArray;
-const BlockRenderer = @import("gfx/block_renderer.zig").BlockRenderer;
-const block = @import("voxel/block.zig");
 const Camera = @import("camera.zig").Camera;
+const TextureArray = @import("gfx/texture.zig").TextureArray;
+const ChunkRenderer = @import("gfx/chunk_renderer.zig").ChunkRenderer;
 const Frustum = @import("math/frustum.zig").Frustum;
 const Aabb = @import("math/aabb.zig").Aabb;
 const Vec3 = @import("math/vec.zig").Vec3;
-const Mat4 = @import("math/mat4.zig").Mat4;
+const World = @import("world/world.zig").World;
+const chunk_mesher = @import("world/chunk_mesher.zig");
+const mesher = @import("voxel/mesher.zig");
+const fixture = @import("world/fixture.zig");
+const block = @import("voxel/block.zig");
 
 pub const Config = struct {
     title: [:0]const u8 = "voxel-zig",
@@ -30,14 +33,6 @@ pub const Step = struct {
 
 pub const FIXED_DT: f64 = 1.0 / 60.0;
 pub const MAX_STEPS_PER_FRAME: u32 = 5;
-
-/// Debug scene: a 5 x 3 x 5 grid of wireframe boxes, 6 units apart.
-pub const BOX_GRID_X = 5;
-pub const BOX_GRID_Y = 3;
-pub const BOX_GRID_Z = 5;
-pub const BOX_COUNT = BOX_GRID_X * BOX_GRID_Y * BOX_GRID_Z;
-pub const BOX_SIZE = 2.0;
-pub const BOX_SPACING = 6.0;
 
 /// Advances a fixed-timestep accumulator by `dt` seconds.
 ///
@@ -59,24 +54,10 @@ pub fn advance(accumulator: f64, dt: f64, fixed_dt: f64, max_steps: u32) Step {
     return .{ .accumulator = acc, .steps = steps, .clamped = clamped };
 }
 
-pub fn buildDebugBoxes() [BOX_COUNT]Aabb {
-    var boxes: [BOX_COUNT]Aabb = undefined;
-    var index: usize = 0;
-    for (0..BOX_GRID_X) |ix| {
-        for (0..BOX_GRID_Y) |iy| {
-            for (0..BOX_GRID_Z) |iz| {
-                const centre = Vec3.init(
-                    (@as(f32, @floatFromInt(ix)) - 2.0) * BOX_SPACING,
-                    @as(f32, @floatFromInt(iy)) * BOX_SPACING,
-                    (@as(f32, @floatFromInt(iz)) - 2.0) * BOX_SPACING,
-                );
-                boxes[index] = Aabb.fromCenterSize(centre, Vec3.splat(BOX_SIZE));
-                index += 1;
-            }
-        }
-    }
-    return boxes;
-}
+/// First guess for a chunk's geometry buffers; a chunk that needs more is
+/// meshed again into a bigger buffer (the checkerboard worst case is 98k quads
+/// and not worth reserving up front).
+const INITIAL_QUAD_CAPACITY: usize = 4096;
 
 pub const App = struct {
     io: std.Io,
@@ -84,12 +65,18 @@ pub const App = struct {
     frame_arena: std.heap.ArenaAllocator,
     accumulator: f64 = 0,
     sim_ticks: u64 = 0,
-    camera: Camera = .{},
+    camera: Camera,
     input: Input,
     debug: DebugDraw,
     textures: TextureArray,
-    block_renderer: BlockRenderer,
-    boxes: [BOX_COUNT]Aabb,
+    world: World,
+    chunk_renderer: ChunkRenderer,
+    meshes: []ChunkRenderer.Mesh,
+    scratch_vertices: []mesher.Vertex,
+    scratch_indices: []u32,
+    total_quads: usize = 0,
+    show_wire: bool = false,
+    allocator: std.mem.Allocator,
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io, config: Config) !App {
         var window = try Window.init(.{
@@ -115,8 +102,14 @@ pub const App = struct {
         errdefer textures.deinit();
         std.debug.print("textures: {d} layers of {d}x{d}\n", .{ textures.layers, textures.size, textures.size });
 
-        var block_renderer = try BlockRenderer.init();
-        errdefer block_renderer.deinit();
+        // 1.7 draws a fixed 5x5x2 chunk field (fixture terrain; 1.8 replaces it
+        // with noise worldgen).
+        var world = World.init(gpa);
+        errdefer world.deinit();
+        try fixture.build(&world);
+
+        var chunk_renderer = try ChunkRenderer.init();
+        errdefer chunk_renderer.deinit();
 
         gl.gl.Enable(gl.gl.DEPTH_TEST);
         gl.gl.Enable(gl.gl.CULL_FACE);
@@ -126,24 +119,99 @@ pub const App = struct {
         var input = Input.init();
         input.setRelativeMouse(&window, true);
 
-        return .{
+        var app = App{
             .io = io,
             .window = window,
             .frame_arena = std.heap.ArenaAllocator.init(gpa),
+            .camera = .{
+                .position = Vec3.init(80, 74, 196),
+                .yaw = 0,
+                .pitch = -0.26,
+                .speed = 24,
+            },
             .input = input,
             .debug = debug,
             .textures = textures,
-            .block_renderer = block_renderer,
-            .boxes = buildDebugBoxes(),
+            .world = world,
+            .chunk_renderer = chunk_renderer,
+            .meshes = try gpa.alloc(ChunkRenderer.Mesh, fixture.CHUNK_COUNT),
+            .scratch_vertices = try gpa.alloc(mesher.Vertex, INITIAL_QUAD_CAPACITY * 4),
+            .scratch_indices = try gpa.alloc(u32, INITIAL_QUAD_CAPACITY * 6),
+            .allocator = gpa,
         };
+        errdefer {
+            gpa.free(app.meshes);
+            gpa.free(app.scratch_vertices);
+            gpa.free(app.scratch_indices);
+        }
+        @memset(app.meshes, .{});
+
+        try app.meshWorld();
+        return app;
     }
 
     pub fn deinit(self: *App) void {
-        self.block_renderer.deinit();
+        for (self.meshes) |*mesh| self.chunk_renderer.destroyMesh(mesh);
+        self.allocator.free(self.meshes);
+        self.allocator.free(self.scratch_vertices);
+        self.allocator.free(self.scratch_indices);
+        self.chunk_renderer.deinit();
+        self.world.deinit();
         self.textures.deinit();
         self.debug.deinit();
         self.frame_arena.deinit();
         self.window.deinit();
+        self.* = undefined;
+    }
+
+    /// Meshes every chunk in the world once and uploads it. 1.13 moves this to
+    /// worker threads; 1.11 remeshes on demand.
+    fn meshWorld(self: *App) !void {
+        var padded = mesher.PaddedBlocks.init();
+        const positions = fixture.chunkPositions();
+        var total_quads: usize = 0;
+
+        for (positions, 0..) |pos, index| {
+            while (true) {
+                // meshChunk's only error is the capacity one, so the loop can
+                // grow and retry rather than reserving the 98k-quad bound.
+                const stats = chunk_mesher.meshChunk(&self.world, pos, &padded, self.scratch_vertices, self.scratch_indices) catch |err| switch (err) {
+                    error.VertexBufferTooSmall => {
+                        try self.growScratch();
+                        continue;
+                    },
+                };
+                const origin = pos.blockOrigin();
+                self.chunk_renderer.upload(
+                    &self.meshes[index],
+                    Vec3.init(@floatFromInt(origin.x), @floatFromInt(origin.y), @floatFromInt(origin.z)),
+                    self.scratch_vertices[0..stats.vertices],
+                    self.scratch_indices[0..stats.indices],
+                );
+                total_quads += stats.quads;
+                break;
+            }
+        }
+        self.total_quads = total_quads;
+        std.debug.print(
+            "world: {d} chunks, {d} quads, {d} vertices ({d:.1} MB of vertex data)\n",
+            .{
+                positions.len,
+                total_quads,
+                total_quads * 4,
+                @as(f64, @floatFromInt(total_quads * 4 * @sizeOf(mesher.Vertex))) / (1024.0 * 1024.0),
+            },
+        );
+    }
+
+    fn growScratch(self: *App) !void {
+        const quads = self.scratch_vertices.len / 4;
+        const bigger = quads * 2;
+        std.debug.print("chunk needs more than {d} quads, growing to {d}\n", .{ quads, bigger });
+        self.allocator.free(self.scratch_vertices);
+        self.allocator.free(self.scratch_indices);
+        self.scratch_vertices = try self.allocator.alloc(mesher.Vertex, bigger * 4);
+        self.scratch_indices = try self.allocator.alloc(u32, bigger * 6);
     }
 
     pub fn run(self: *App) !void {
@@ -152,7 +220,7 @@ pub const App = struct {
         var frames: u32 = 0;
         var worst_ms: f64 = 0;
         var first_frame = true;
-        var visible: usize = 0;
+        var drawn: usize = 0;
 
         while (true) {
             self.input.pump(&self.window);
@@ -163,9 +231,11 @@ pub const App = struct {
             last = now;
             const dt = @as(f64, @floatFromInt(dt_ns)) / 1e9;
 
-            // Look is frame-rate shaped by the mouse; movement uses the frame
-            // delta so the camera is smooth on a 120 Hz display without
-            // interpolation. Physics (1.9) will run on the fixed step below.
+            if (self.input.debug_toggle) {
+                self.input.debug_toggle = false;
+                self.show_wire = !self.show_wire;
+            }
+
             self.camera.look(self.input.mouse_dx, self.input.mouse_dy);
             if (self.input.wheel != 0) self.camera.adjustSpeed(self.input.wheel);
 
@@ -189,7 +259,7 @@ pub const App = struct {
             }
 
             _ = self.frame_arena.reset(.retain_capacity);
-            visible = self.render();
+            drawn = self.render();
             self.window.swap();
 
             if (first_frame) {
@@ -207,18 +277,18 @@ pub const App = struct {
             if (report_dt_ns >= std.time.ns_per_s) {
                 const seconds = @as(f64, @floatFromInt(report_dt_ns)) / 1e9;
                 std.debug.print(
-                    "fps {d:6.1} frame {d:5.2}ms worst {d:5.2}ms  vis {d}/{d}  pos ({d:.1},{d:.1},{d:.1}) yaw {d:.2} speed {d:.0}\n",
+                    "fps {d:6.1} frame {d:5.2}ms worst {d:5.2}ms  chunks {d}/{d} quads {d}  pos ({d:.1},{d:.1},{d:.1}) yaw {d:.2}\n",
                     .{
                         @as(f64, @floatFromInt(frames)) / seconds,
                         @as(f64, @floatFromInt(report_dt_ns)) / 1e6 / @as(f64, @floatFromInt(frames)),
                         worst_ms,
-                        visible,
-                        BOX_COUNT,
+                        drawn,
+                        self.meshes.len,
+                        self.total_quads,
                         self.camera.position.x,
                         self.camera.position.y,
                         self.camera.position.z,
                         self.camera.yaw,
-                        self.camera.speed,
                     },
                 );
                 frames = 0;
@@ -234,8 +304,8 @@ pub const App = struct {
         _ = dt;
     }
 
-    /// Draws the debug grid, culling boxes against the frustum. Returns the
-    /// number of boxes that survived culling.
+    /// Draws every chunk that survives the frustum test. Returns how many were
+    /// drawn.
     fn render(self: *App) usize {
         gl.gl.Viewport(0, 0, self.window.width, self.window.height);
         gl.gl.ClearColor(0.53, 0.72, 0.92, 1.0);
@@ -245,20 +315,22 @@ pub const App = struct {
         const vp = self.camera.viewProjection(aspect);
         const frustum = Frustum.fromViewProjection(vp);
 
-        // Textured blocks: a grass block and a leaves block to exercise the
-        // alpha cutout. The chunk mesher replaces this in 1.6.
-        self.block_renderer.begin(vp, &self.textures);
-        self.block_renderer.draw(.grass, .{ .x = 0, .y = 4, .z = 0 }, 6, Mat4.identity);
-        self.block_renderer.draw(.leaves, .{ .x = 8, .y = 4, .z = 0 }, 6, Mat4.identity);
-
-        self.debug.begin(vp);
-        var visible: usize = 0;
-        for (self.boxes) |box| {
-            if (!frustum.containsAabb(box)) continue;
-            visible += 1;
-            self.debug.box(box, .{ 0.15, 0.95, 0.75 });
+        self.chunk_renderer.begin(vp, &self.textures);
+        var drawn: usize = 0;
+        for (self.meshes) |*mesh| {
+            if (!frustum.containsAabb(mesh.bounds)) continue;
+            drawn += 1;
+            self.chunk_renderer.draw(mesh);
         }
-        return visible;
+
+        if (self.show_wire) {
+            self.debug.begin(vp);
+            for (self.meshes) |*mesh| {
+                if (!frustum.containsAabb(mesh.bounds)) continue;
+                self.debug.box(mesh.bounds, .{ 0.9, 0.85, 0.4 });
+            }
+        }
+        return drawn;
     }
 };
 
@@ -295,14 +367,15 @@ test "fractional frames accumulate rather than dropping time" {
     try std.testing.expectEqual(@as(u32, 60), steps);
 }
 
-test "debug grid is 75 boxes centred on the origin in x and z" {
-    const boxes = buildDebugBoxes();
-    try std.testing.expectEqual(@as(usize, 75), boxes.len);
-    var min_x: f32 = std.math.inf(f32);
-    var max_x: f32 = -std.math.inf(f32);
-    for (boxes) |b| {
-        min_x = @min(min_x, b.min.x);
-        max_x = @max(max_x, b.max.x);
+test "the fixture field spans the camera's view" {
+    const positions = fixture.chunkPositions();
+    var min_x: i32 = std.math.maxInt(i32);
+    var max_x: i32 = std.math.minInt(i32);
+    for (positions) |p| {
+        min_x = @min(min_x, p.x);
+        max_x = @max(max_x, p.x);
     }
-    try std.testing.expectApproxEqAbs(@as(f32, 0), min_x + max_x, 1e-5);
+    try std.testing.expectEqual(@as(i32, 0), min_x);
+    try std.testing.expectEqual(@as(i32, 4), max_x);
+    try std.testing.expectEqual(fixture.CHUNK_COUNT, positions.len);
 }

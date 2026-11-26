@@ -42,6 +42,15 @@ Treating an unloaded neighbour as opaque keeps the frontier from emitting a wall
 faces into nothing (and from re-emitting them when the chunk loads). The remesh-on-load
 rule is what opens the seam; 1.11 queues it.
 
+### Note from 1.7 (fixed field, no streaming)
+
+The rule above is written for streaming. 1.7 draws one fixed 5 x 5 field with nothing beyond it, so
+treating those borders as opaque would delete the island's outer walls and you would see straight
+through the terrain into the sky. `world/chunk_mesher.zig` therefore samples the border from the
+world and lets an unloaded chunk read as air, which emits the shell. The flip back to "opaque at the
+frontier" belongs with 1.11, when loading actually fills those neighbours and the remesh-on-arrival
+rule exists to open the seam again.
+
 ## Measured
 
 Probe at `~/voxel-spikes/meshprobe`: same 32^3 terrain chunk(s), ReleaseFast, 32-wide

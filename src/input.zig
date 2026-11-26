@@ -12,6 +12,8 @@ pub const Input = struct {
     wheel: f32 = 0,
     quit: bool = false,
     relative_mouse: bool = false,
+    /// Set on the frame F3 goes down; the app clears it when consumed.
+    debug_toggle: bool = false,
 
     pub fn init() Input {
         return .{ .keys = sdl.SDL_GetKeyboardState(null) };
@@ -26,6 +28,7 @@ pub const Input = struct {
                     if (ev.key.key == sdl.SDLK_ESCAPE) self.quit = true;
                     // Tab releases the mouse so the desktop is usable again.
                     if (ev.key.key == sdl.SDLK_TAB) self.setRelativeMouse(window, !self.relative_mouse);
+                    if (ev.key.key == sdl.SDLK_F3) self.debug_toggle = true;
                 },
                 sdl.SDL_EVENT_MOUSE_MOTION => {
                     self.mouse_dx += ev.motion.xrel;
