@@ -11,46 +11,13 @@ const sun_mod = @import("../world/sun.zig");
 const SIZE: i32 = 64;
 const MIPS: i32 = 7;
 
-const VERT_SRC: [:0]const u8 =
-    \\#version 460 core
-    \\out vec2 v_uv;
-    \\void main() {
-    \\    vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
-    \\    v_uv = p;
-    \\    gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
-    \\}
-;
+const VERT_SRC: [:0]const u8 = @embedFile("../shaders/envprobe_vert.vert");
 
 /// Mirrors sky_renderer's gradient: the colours come from the same `sun.ramp()`
 /// call, so the probe and the visible sky agree unless the disc/glow constants
 /// here drift. Clouds are deliberately absent - they move every second and the
 /// probe only re-renders when the sun does.
-const FRAG_SRC: [:0]const u8 =
-    \\#version 460 core
-    \\uniform mat4 u_inv_vp;
-    \\uniform vec3 u_zenith;
-    \\uniform vec3 u_horizon;
-    \\uniform vec3 u_sun_colour;
-    \\uniform vec3 u_sun_dir;
-    \\uniform float u_night; // 1 at night, for the star-free ambient floor
-    \\in vec2 v_uv;
-    \\out vec4 f_colour;
-    \\void main() {
-    \\    vec4 far = u_inv_vp * vec4(v_uv * 2.0 - 1.0, 1.0, 1.0);
-    \\    vec3 dir = normalize(far.xyz / far.w);
-    \\    float up = pow(max(dir.y, 0.0), 0.45);
-    \\    vec3 colour = mix(u_horizon, u_zenith, up);
-    \\    // Sun disc and glow, same constants as the sky pass (ADR 0009): this is
-    \\    // what puts a highlight in the reflection at water roughness.
-    \\    float d = dot(dir, u_sun_dir);
-    \\    colour += u_sun_colour * smoothstep(0.99985, 0.99995, d);
-    \\    colour += u_sun_colour * pow(max(d, 0.0), 220.0) * 0.55;
-    \\    // Below the horizon the probe is dark ground, not sky, or a metal face
-    \\    // pointing down would reflect daylight from the floor.
-    \\    colour *= mix(1.0, 0.18, smoothstep(0.0, -0.35, dir.y));
-    \\    f_colour = vec4(colour, 1.0);
-    \\}
-;
+const FRAG_SRC: [:0]const u8 = @embedFile("../shaders/envprobe_frag.frag");
 
 /// A six-face cube map of the sky, re-rendered only when the sun moves.
 ///

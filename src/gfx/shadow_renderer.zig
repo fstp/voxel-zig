@@ -13,21 +13,10 @@ const Vec3 = @import("../math/vec.zig").Vec3;
 ///
 /// Sampling lives in the chunk shader (3x3 PCF with a normal offset); this file
 /// only produces the map and the matrix to read it with.
-const VERT_SRC: [:0]const u8 =
-    \\#version 460 core
-    \\layout(location = 0) in vec3 a_pos;
-    \\uniform mat4 u_light_vp;
-    \\uniform mat4 u_model;
-    \\void main() {
-    \\    gl_Position = u_light_vp * u_model * vec4(a_pos, 1.0);
-    \\}
-;
+const VERT_SRC: [:0]const u8 = @embedFile("../shaders/shadow_vert.vert");
 
 /// Depth only: the FBO has no colour attachment, so there is nothing to write.
-const FRAG_SRC: [:0]const u8 =
-    \\#version 460 core
-    \\void main() {}
-;
+const FRAG_SRC: [:0]const u8 = @embedFile("../shaders/shadow_frag.frag");
 
 pub const ShadowRenderer = struct {
     fbo: gl.uint = 0,

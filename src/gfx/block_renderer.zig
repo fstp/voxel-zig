@@ -13,49 +13,9 @@ fn asArray(v: Vec3) [3]f32 {
     return .{ v.x, v.y, v.z };
 }
 
-const VERT_SRC: [:0]const u8 =
-    \\#version 460 core
-    \\layout(location = 0) in vec3 a_pos;
-    \\layout(location = 1) in vec2 a_uv;
-    \\layout(location = 2) in float a_layer;
-    \\layout(location = 3) in vec3 a_normal;
-    \\uniform mat4 u_vp;
-    \\uniform mat4 u_model;
-    \\out vec2 v_uv;
-    \\out float v_layer;
-    \\out vec3 v_normal;
-    \\void main() {
-    \\    v_uv = a_uv;
-    \\    v_layer = a_layer;
-    \\    v_normal = a_normal;
-    \\    gl_Position = u_vp * u_model * vec4(a_pos, 1.0);
-    \\}
-;
+const VERT_SRC: [:0]const u8 = @embedFile("../shaders/block_vert.vert");
 
-const FRAG_SRC: [:0]const u8 =
-    \\#version 460 core
-    \\uniform sampler2DArray u_tex;
-    \\uniform float u_legacy;
-    \\uniform vec3 u_sun_dir;
-    \\uniform vec3 u_sun_colour;
-    \\uniform vec3 u_ambient_sky;
-    \\uniform vec3 u_ambient_ground;
-    \\in vec2 v_uv;
-    \\in float v_layer;
-    \\in vec3 v_normal;
-    \\out vec4 f_colour;
-    \\void main() {
-    \\    vec4 c = texture(u_tex, vec3(v_uv, v_layer));
-    \\    if (c.a < 0.5) discard; // alpha cutout (leaves), ADR 0002
-    \\    // Same model as the terrain (3.5, C22), without AO: a single block has no
-    \\    // neighbours to occlude it.
-    \\    float ndl = max(dot(v_normal, u_sun_dir), 0.0);
-    \\    vec3 hemi = mix(u_ambient_ground, u_ambient_sky, v_normal.y * 0.5 + 0.5);
-    \\    vec3 lit = hemi + u_sun_colour * ndl;
-    \\    vec3 unlit = vec3(1.0);
-    \\    f_colour = vec4(c.rgb * mix(lit, unlit, u_legacy), c.a);
-    \\}
-;
+const FRAG_SRC: [:0]const u8 = @embedFile("../shaders/block_frag.frag");
 
 const Vertex = extern struct {
     pos: [3]f32,

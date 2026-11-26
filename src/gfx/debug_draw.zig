@@ -3,24 +3,9 @@ const gl = @import("gl");
 const Mat4 = @import("../math/mat4.zig").Mat4;
 const Aabb = @import("../math/aabb.zig").Aabb;
 
-const VERT_SRC: [:0]const u8 =
-    \\#version 460 core
-    \\layout(location = 0) in vec3 a_pos;
-    \\uniform mat4 u_vp;
-    \\uniform mat4 u_model;
-    \\void main() {
-    \\    gl_Position = u_vp * u_model * vec4(a_pos, 1.0);
-    \\}
-;
+const VERT_SRC: [:0]const u8 = @embedFile("../shaders/debugdraw_vert.vert");
 
-const FRAG_SRC: [:0]const u8 =
-    \\#version 460 core
-    \\uniform vec3 u_colour;
-    \\out vec4 f_colour;
-    \\void main() {
-    \\    f_colour = vec4(u_colour, 1.0);
-    \\}
-;
+const FRAG_SRC: [:0]const u8 = @embedFile("../shaders/debugdraw_frag.frag");
 
 /// Minimal wireframe box renderer for debugging the camera and culling.
 /// Throwaway-grade: one shader, one static VBO of unit-cube edges.
