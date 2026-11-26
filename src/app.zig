@@ -1268,7 +1268,7 @@ pub const App = struct {
         // A dark panel behind the text: white-on-sky was half of why the HUD was
         // hard to read, and no font fixes that on its own.
         self.hud.panel(0, 0, 1120, 8 + 7 * self.hud.lineHeight(), 0.55);
-        self.hud.panel(0, @as(f32, @floatFromInt(self.window.height)) - 78, 1120, 78, 0.55);
+        self.hud.panel(0, @as(f32, @floatFromInt(self.window.height)) - 3 * self.hud.lineHeight() - 12, 1120, 3 * self.hud.lineHeight() + 12, 0.55);
         self.hud.scale = 2.0;
 
         const world_mb = @as(f64, @floatFromInt(self.world.count())) * @as(f64, @floatFromInt(coords.CHUNK_VOLUME)) / (1024.0 * 1024.0);
@@ -1326,7 +1326,7 @@ pub const App = struct {
                 self.edits_received,
             }) catch "";
             self.hud.setColour(0.6, 1.0, 1.0);
-            self.hud.text(10, @as(f32, @floatFromInt(self.window.height)) - 44, text);
+            self.hud.text(10, @as(f32, @floatFromInt(self.window.height)) - 2 * self.hud.lineHeight() - 4, text);
         }
 
         {
@@ -1345,12 +1345,12 @@ pub const App = struct {
                 if (self.sun.mode == .pinned) "  PINNED (O/arrows)" else "",
             }) catch "";
             self.hud.setColour(0.95, 0.9, 0.6);
-            self.hud.text(10, @as(f32, @floatFromInt(self.window.height)) - 66, text);
+            self.hud.text(10, @as(f32, @floatFromInt(self.window.height)) - 3 * self.hud.lineHeight() - 4, text);
         }
 
         const keys = "F1 HUD  F FLY  F3 BOXES  F4 LIGHT A/B  F6 NORMALS  F7 FOG  F8 SHADOWS  F10 CLOUDS  F11 TONEMAP  F12 SSAO  F13 FXAA  -/= EXPOSURE  P PAUSE SUN  1-4 TIMES";
         self.hud.setColour(0.6, 0.6, 0.6);
-        self.hud.text(10, @as(f32, @floatFromInt(self.window.height)) - 22, keys);
+        self.hud.text(10, @as(f32, @floatFromInt(self.window.height)) - self.hud.lineHeight() - 4, keys);
 
         self.hud.end();
     }
