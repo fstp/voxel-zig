@@ -261,6 +261,7 @@ void main() {
     vec3 f0 = mix(vec3(0.04), c.rgb, metallic);
     vec3 fresnel = F_Schlick(f0, vdh);
     vec3 specular = D_GGX(ndh, roughness) * V_SmithGGX(ndv, ndl, roughness) * fresnel;
+    if (is_water) specular *= 0.55;
     // Energy conservation: whatever is reflected specularly cannot also diffuse.
     vec3 diffuse = (vec3(1.0) - fresnel) * (1.0 - metallic) * albedo / PI;
 

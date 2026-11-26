@@ -119,7 +119,10 @@ pub const layer_materials = [_]Material{
     .{ .roughness = 0.82, .metallic = 0.0 }, // leaves
     // Water: smooth, and with almost no diffuse. Leaving it at 1.0 was why the
     // sea read as flat blue - its own albedo swamped the 4 percent reflection.
-    .{ .roughness = 0.08, .metallic = 0.0, .diffuse = 0.28 },
+    // 6.3: 0.08 was a knife edge - the sun's reflection smeared into long bright
+    // streaks across the sea and aliased into flicker. 0.22 widens the lobe into a
+    // broad glint that also stays stable when the camera moves.
+    .{ .roughness = 0.22, .metallic = 0.0, .diffuse = 0.30 },
 };
 
 pub const texture_paths = [_][:0]const u8{
