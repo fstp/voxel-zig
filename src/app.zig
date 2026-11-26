@@ -21,6 +21,7 @@ const brush = @import("world/brush.zig");
 const undo_mod = @import("world/undo.zig");
 const physics = @import("physics/bodies.zig");
 const BlockRenderer = @import("gfx/block_renderer.zig").BlockRenderer;
+const net = @import("net/udp.zig");
 const block = @import("voxel/block.zig");
 const coords = @import("voxel/coords.zig");
 const raycast = @import("voxel/raycast.zig");
@@ -36,6 +37,11 @@ pub const Config = struct {
     seed: u32 = 0x5EED_1234,
     /// 2.1: greedy meshing on by default; the naive mesher stays for comparison.
     greedy: bool = true,
+    /// 2.4 spike: 0 disables networking. Otherwise this is the UDP port to bind.
+    net_port: u16 = 0,
+    /// "ip:port" of the other side; the peer is learned from the first packet if
+    /// this is null.
+    net_peer: ?[]const u8 = null,
 };
 
 /// 1.11 streaming: a cylinder of LOAD_RADIUS chunks around the player, unloaded
@@ -168,6 +174,14 @@ pub const App = struct {
     bodies: physics.Bodies,
     body_items: []physics.Body,
     rng: u32 = 0x1234_5678,
+    peer: ?net.Peer = null,
+    remote_position: ?Vec3 = null,
+    remote_yaw: f32 = 0,
+    net_accumulator: f32 = 0,
+    edit_seq: u32 = 0,
+    remote_seq_seen: u32 = 0,
+    edits_sent: usize = 0,
+    edits_received: usize = 0,
     brush_mode: ?brush.Mode = null,
     brush_radius: i32 = 3,
     last_stroke_blocks: usize = 0,
@@ -228,6 +242,19 @@ pub const App = struct {
         const spawn_z: i32 = 144;
         const surface = terrain.heightAt(config.seed, spawn_x, spawn_z);
 
+        var peer: ?net.Peer = null;
+        if (config.net_port != 0) {
+            peer = try net.Peer.init(io, config.net_port);
+            if (config.net_peer) |text| {
+                if (parseAddress(text)) |address| peer.?.setRemote(address);
+            }
+            std.debug.print("net: listening on udp {d}{s}\n", .{
+                peer.?.port,
+                if (peer.?.remote != null) " with a known peer" else ", peer learned from traffic",
+            });
+        }
+        errdefer if (peer) |*p| p.deinit(io);
+
         var app = App{
             .io = io,
             .window = window,
@@ -251,6 +278,7 @@ pub const App = struct {
             .undo = undo_mod.Undo.init(gpa),
             .block_renderer = block_renderer,
             .bodies = undefined,
+            .peer = peer,
             .body_items = try gpa.alloc(physics.Body, MAX_BODIES),
             .scratch_vertices = try gpa.alloc(mesher.Vertex, INITIAL_QUAD_CAPACITY * 4),
             .scratch_indices = try gpa.alloc(u32, INITIAL_QUAD_CAPACITY * 6),
@@ -293,6 +321,7 @@ pub const App = struct {
         self.meshes.deinit(self.allocator);
         self.allocator.free(self.scratch_vertices);
         self.allocator.free(self.scratch_indices);
+        if (self.peer) |*p| p.deinit(self.io);
         self.undo.deinit();
         self.block_renderer.deinit();
         self.allocator.free(self.body_items);
@@ -613,6 +642,55 @@ pub const App = struct {
         const sprint = self.input.down(sdl.SDL_SCANCODE_LSHIFT);
         self.player.update(&self.world, @floatCast(dt), self.wishVector(), up, sprint);
         self.bodies.step(&self.world, @floatCast(dt));
+        self.stepNetwork(@floatCast(dt));
+    }
+
+    /// 2.4: positions go out at POSITION_INTERVAL, edits go out as they happen.
+    /// Incoming edits are applied with a sequence check so a duplicated datagram
+    /// cannot re-apply a stale block.
+    fn stepNetwork(self: *App, dt: f32) void {
+        const peer = if (self.peer) |*p| p else return;
+
+        self.net_accumulator += dt;
+        if (self.net_accumulator >= net.POSITION_INTERVAL) {
+            self.net_accumulator = 0;
+            peer.send(self.io, .{ .position = .{
+                .ids = 1,
+                .x = self.player.position.x,
+                .y = self.player.position.y,
+                .z = self.player.position.z,
+                .yaw = self.player.yaw,
+            } });
+        }
+
+        var message: net.Message = undefined;
+        var budget: usize = 8;
+        while (budget > 0 and peer.receive(self.io, &message)) : (budget -= 1) {
+            switch (message) {
+                .position => |position| {
+                    self.remote_position = Vec3.init(position.x, position.y, position.z);
+                    self.remote_yaw = position.yaw;
+                },
+                .edit => |edit| {
+                    if (edit.seq <= self.remote_seq_seen) continue;
+                    self.remote_seq_seen = edit.seq;
+                    const block_id: block.BlockId = @enumFromInt(edit.block);
+                    if (self.world.setBlock(edit.x, edit.y, edit.z, block_id)) {
+                        self.edits_received += 1;
+                        std.debug.print("net: applied edit {d} at ({d},{d},{d}) -> {d}\n", .{ edit.seq, edit.x, edit.y, edit.z, edit.block });
+                        self.remeshDirty();
+                    }
+                },
+            }
+        }
+    }
+
+    fn sendEdit(self: *App, pos: BlockPos, block_id: block.BlockId) void {
+        const peer = if (self.peer) |*p| p else return;
+        self.edit_seq += 1;
+        peer.send(self.io, .{ .edit = .{ .seq = self.edit_seq, .x = pos.x, .y = pos.y, .z = pos.z, .block = @intFromEnum(block_id) } });
+        self.edits_sent += 1;
+        std.debug.print("net: sent edit {d} at ({d},{d},{d}) -> {d}\n", .{ self.edit_seq, pos.x, pos.y, pos.z, @intFromEnum(block_id) });
     }
 
     pub fn run(self: *App) !void {
@@ -824,6 +902,7 @@ pub const App = struct {
         const hit = self.highlight orelse return;
         if (self.world.setBlock(hit.block.x, hit.block.y, hit.block.z, .air)) {
             self.edits += 1;
+            self.sendEdit(hit.block, .air);
             self.remeshDirty();
         }
     }
@@ -838,6 +917,7 @@ pub const App = struct {
         if (self.blockIntersectsPlayer(target)) return;
         if (self.world.setBlock(target.x, target.y, target.z, self.selected)) {
             self.edits += 1;
+            self.sendEdit(target, self.selected);
             self.remeshDirty();
         }
     }
@@ -878,6 +958,12 @@ pub const App = struct {
             if (!frustum.containsAabb(mesh.bounds)) continue;
             drawn += 1;
             self.chunk_renderer.draw(mesh);
+        }
+
+        if (self.remote_position) |remote| {
+            // The other player is a floating cube for now: enough to see them move.
+            self.block_renderer.begin(vp, &self.textures);
+            self.block_renderer.draw(.sand, Vec3.init(remote.x, remote.y + 0.9, remote.z), 1.6, Mat4.identity);
         }
 
         if (self.bodies.count > 0) {
@@ -966,6 +1052,20 @@ pub const App = struct {
         self.hud.text(10, 8 + @as(f32, @floatFromInt(line)) * 18, where);
         line += 1;
 
+        if (self.peer != null) {
+            var peer_line: [128]u8 = undefined;
+            const text = std.fmt.bufPrint(&peer_line, "NET PORT {d} REMOTE {d:.1} {d:.1} {d:.1} SENT {d} RECV {d}", .{
+                self.peer.?.port,
+                if (self.remote_position) |r| r.x else 0,
+                if (self.remote_position) |r| r.y else 0,
+                if (self.remote_position) |r| r.z else 0,
+                self.edits_sent,
+                self.edits_received,
+            }) catch "";
+            self.hud.setColour(0.6, 1.0, 1.0);
+            self.hud.text(10, @as(f32, @floatFromInt(self.window.height)) - 44, text);
+        }
+
         const keys = "F1 HUD  F FLY  F3 BOXES  F4 SHADING  F5 SAVE";
         self.hud.setColour(0.6, 0.6, 0.6);
         self.hud.text(10, @as(f32, @floatFromInt(self.window.height)) - 22, keys);
@@ -973,6 +1073,22 @@ pub const App = struct {
         self.hud.end();
     }
 };
+
+/// "ip:port" into an IpAddress, or null when it does not parse.
+fn parseAddress(text: []const u8) ?std.Io.net.IpAddress {
+    const colon = std.mem.lastIndexOfScalar(u8, text, ':') orelse return null;
+    const host = text[0..colon];
+    const port = std.fmt.parseInt(u16, text[colon + 1 ..], 10) catch return null;
+    var octets: [4]u8 = undefined;
+    var it = std.mem.splitScalar(u8, host, '.');
+    var i: usize = 0;
+    while (it.next()) |part| : (i += 1) {
+        if (i >= 4) return null;
+        octets[i] = std.fmt.parseInt(u8, part, 10) catch return null;
+    }
+    if (i != 4) return null;
+    return .{ .ip4 = .{ .bytes = octets, .port = port } };
+}
 
 fn overlaps(a: Aabb, b: Aabb) bool {
     return a.min.x < b.max.x and a.max.x > b.min.x and

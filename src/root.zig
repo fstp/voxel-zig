@@ -10,7 +10,13 @@
 pub const version = "0.1.0";
 
 pub const App = @import("app.zig").App;
+pub const Config = @import("app.zig").Config;
 pub const Player = @import("player/player.zig").Player;
+pub const net = struct {
+    pub const Peer = @import("net/udp.zig").Peer;
+    pub const Message = @import("net/udp.zig").Message;
+};
+
 pub const physics = struct {
     pub const Bodies = @import("physics/bodies.zig").Bodies;
     pub const Body = @import("physics/bodies.zig").Body;
@@ -80,5 +86,6 @@ test {
     _ = @import("voxel/raycast.zig");
     _ = @import("player/player.zig");
     _ = @import("physics/bodies.zig");
+    _ = @import("net/udp.zig");
     _ = @import("app.zig");
 }

@@ -12,12 +12,20 @@ pub fn main(init: std.process.Init) !void {
     }
     const gpa = debug_allocator.allocator();
 
-    var app = try engine.App.init(gpa, init.io, .{
+    var config: engine.Config = .{
         .title = "voxel-zig",
         .width = 1280,
         .height = 720,
         .vsync = true,
-    });
+    };
+    // 2.4 spike: VOXEL_NET_PORT binds a UDP socket, VOXEL_PEER points at the
+    // other instance ("127.0.0.1:4567"). No flags, no config file.
+    if (init.environ_map.get("VOXEL_NET_PORT")) |port| {
+        config.net_port = std.fmt.parseInt(u16, port, 10) catch 0;
+    }
+    if (init.environ_map.get("VOXEL_PEER")) |peer| config.net_peer = peer;
+
+    var app = try engine.App.init(gpa, init.io, config);
     defer app.deinit();
 
     try app.run();
