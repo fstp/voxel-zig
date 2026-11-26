@@ -16,6 +16,8 @@ const chunk_mesher = @import("world/chunk_mesher.zig");
 const mesher = @import("voxel/mesher.zig");
 const terrain = @import("world/terrain.zig");
 const save = @import("world/save.zig");
+const brush = @import("world/brush.zig");
+const undo_mod = @import("world/undo.zig");
 const block = @import("voxel/block.zig");
 const coords = @import("voxel/coords.zig");
 const raycast = @import("voxel/raycast.zig");
@@ -154,6 +156,10 @@ pub const App = struct {
     highlight: ?raycast.Hit = null,
     selected: block.BlockId = .stone,
     edits: usize = 0,
+    undo: undo_mod.Undo,
+    brush_mode: ?brush.Mode = null,
+    brush_radius: i32 = 3,
+    last_stroke_blocks: usize = 0,
     allocator: std.mem.Allocator,
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io, config: Config) !App {
@@ -227,6 +233,7 @@ pub const App = struct {
             .chunk_renderer = chunk_renderer,
             .hud = hud,
             .meshes = .{},
+            .undo = undo_mod.Undo.init(gpa),
             .scratch_vertices = try gpa.alloc(mesher.Vertex, INITIAL_QUAD_CAPACITY * 4),
             .scratch_indices = try gpa.alloc(u32, INITIAL_QUAD_CAPACITY * 6),
             .padded = mesher.PaddedBlocks.init(),
@@ -266,6 +273,7 @@ pub const App = struct {
         self.meshes.deinit(self.allocator);
         self.allocator.free(self.scratch_vertices);
         self.allocator.free(self.scratch_indices);
+        self.undo.deinit();
         self.hud.deinit();
         self.chunk_renderer.deinit();
         self.saved.deinit();
@@ -605,6 +613,20 @@ pub const App = struct {
             if (self.input.debug_toggle) self.show_wire = !self.show_wire;
             if (self.input.shading_toggle) self.shading = !self.shading;
             if (self.input.hud_toggle) self.show_hud = !self.show_hud;
+            if (self.input.brush_cycle) self.cycleBrush();
+            if (self.input.radius_delta != 0) {
+                self.brush_radius = std.math.clamp(self.brush_radius + self.input.radius_delta, 1, 12);
+            }
+            if (self.input.undo_pressed) {
+                const reverted = self.undo.undo(&self.world);
+                std.debug.print("undo: {d} blocks reverted (cursor {d}/{d})\n", .{ reverted, self.undo.cursor, self.undo.len });
+                if (reverted > 0) self.remeshDirty();
+            }
+            if (self.input.redo_pressed) {
+                const reapplied = self.undo.redo(&self.world);
+                std.debug.print("redo: {d} blocks re-applied (cursor {d}/{d})\n", .{ reapplied, self.undo.cursor, self.undo.len });
+                if (reapplied > 0) self.remeshDirty();
+            }
             if (self.input.fly_toggle) self.player.flying = !self.player.flying;
 
             self.player.yaw += self.input.mouse_dx * Camera.SENSITIVITY;
@@ -634,7 +656,9 @@ pub const App = struct {
             self.t_stream_ms = @as(f64, @floatFromInt(std.Io.Timestamp.now(self.io, .awake).nanoseconds - stream_start.nanoseconds)) / 1e6;
 
             self.updateHighlight();
-            if (self.input.primary_click) self.breakBlock();
+            if (self.input.primary_click) {
+                if (self.brush_mode) |mode| self.applyBrush(mode) else self.breakBlock();
+            }
             if (self.input.secondary_click) self.placeBlock();
             if (self.input.middle_click) self.pickBlock();
             self.input.endFrame();
@@ -700,6 +724,45 @@ pub const App = struct {
 
     fn updateHighlight(self: *App) void {
         self.highlight = raycast.raycast(&self.world, self.player.eyePosition(), self.player.forward(), REACH);
+    }
+
+    /// B cycles: off -> lower -> raise -> smooth -> box -> off.
+    fn cycleBrush(self: *App) void {
+        self.brush_mode = if (self.brush_mode) |mode| switch (mode) {
+            .lower => .raise,
+            .raise => .smooth,
+            .smooth => .box_fill,
+            .box_fill => null,
+        } else .lower;
+    }
+
+    fn applyBrush(self: *App, mode: brush.Mode) void {
+        const hit = self.highlight orelse return;
+        // Build outward from the face for the fill modes, inward for carving.
+        const centre = switch (mode) {
+            .raise, .box_fill => BlockPos.init(
+                hit.block.x + hit.normal[0],
+                hit.block.y + hit.normal[1],
+                hit.block.z + hit.normal[2],
+            ),
+            else => hit.block,
+        };
+        const stroke = brush.apply(self.allocator, &self.world, centre, self.brush_radius, mode, self.selected) catch |err| {
+            std.debug.print("brush failed: {s}\n", .{@errorName(err)});
+            return;
+        };
+        self.last_stroke_blocks = stroke.changes.len;
+        std.debug.print("brush {s} r{d}: {d} blocks at ({d},{d},{d})\n", .{ @tagName(mode), self.brush_radius, stroke.changes.len, centre.x, centre.y, centre.z });
+        if (stroke.changes.len == 0) {
+            stroke.deinit(self.allocator);
+            return;
+        }
+        self.undo.push(stroke.changes) catch {
+            stroke.deinit(self.allocator);
+            return;
+        };
+        self.edits += 1;
+        self.remeshDirty();
     }
 
     fn breakBlock(self: *App) void {

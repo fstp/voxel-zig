@@ -22,6 +22,11 @@ pub const Input = struct {
     save_toggle: bool = false,
     /// Set on the frame F1 goes down (debug HUD).
     hud_toggle: bool = false,
+    /// Scripting: B cycles the brush, brackets resize it, ctrl+z/y undo/redo.
+    brush_cycle: bool = false,
+    radius_delta: i8 = 0,
+    undo_pressed: bool = false,
+    redo_pressed: bool = false,
     /// One-frame mouse button edges: left = break, right = place, middle = pick.
     primary_click: bool = false,
     secondary_click: bool = false,
@@ -45,6 +50,12 @@ pub const Input = struct {
                     if (ev.key.key == sdl.SDLK_F4) self.shading_toggle = true;
                     if (ev.key.key == sdl.SDLK_F5) self.save_toggle = true;
                     if (ev.key.key == sdl.SDLK_F1) self.hud_toggle = true;
+                    if (ev.key.key == sdl.SDLK_B) self.brush_cycle = true;
+                    if (ev.key.key == sdl.SDLK_LEFTBRACKET) self.radius_delta = -1;
+                    if (ev.key.key == sdl.SDLK_RIGHTBRACKET) self.radius_delta = 1;
+                    const ctrl_held = ev.key.mod & sdl.SDL_KMOD_CTRL != 0;
+                    if (ctrl_held and ev.key.key == sdl.SDLK_Z) self.undo_pressed = true;
+                    if (ctrl_held and ev.key.key == sdl.SDLK_Y) self.redo_pressed = true;
                 },
                 sdl.SDL_EVENT_MOUSE_MOTION => {
                     self.mouse_dx += ev.motion.xrel;
@@ -80,6 +91,10 @@ pub const Input = struct {
         self.shading_toggle = false;
         self.save_toggle = false;
         self.hud_toggle = false;
+        self.brush_cycle = false;
+        self.radius_delta = 0;
+        self.undo_pressed = false;
+        self.redo_pressed = false;
     }
 
     pub fn setRelativeMouse(self: *Input, window: *Window, enabled: bool) void {
