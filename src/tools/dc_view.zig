@@ -29,7 +29,7 @@ const SEED: u32 = 1337;
 
 /// Bumped whenever the field or the mesher changes. Printed at startup so a stale binary cannot be
 /// mistaken for a change that "made no difference" - which is what the last commit could not rule out.
-const BUILD_TAG = "skirt2";
+const BUILD_TAG = "controls-4";
 // 8x8 chunks (64 chunks, 256 m^2), re-meshed as the camera crosses a chunk border:: at PATCH=4 the boundary was visible in frame and accounted for
 // 99.6% of the background pixels counted as "holes". A bigger patch pushes the world edge out of
 // shot, which is the honest way to separate a mesher defect from the edge of the world.
@@ -87,6 +87,178 @@ fn materialColour(pos: [3]f32, nrm: [3]f32, out_material: *u8) [3]f32 {
         ground[1] + (stone[1] - ground[1]) * rock,
         ground[2] + (stone[2] - ground[2]) * rock,
     };
+}
+
+/// Walking and flying player for the DC patch.
+///
+/// The engine's `Player` collides its AABB against the voxel grid; a DC world has no blocks. The
+/// same motion model runs against the height field the surface is extracted from, with the engine's
+/// constants: axis-separated moves sub-stepped at 0.25 m, gravity 32, jump 9, walk 4.5, sprint 7,
+/// fly 24, and a 1.05 m step-up. `groundAt` is the tallest of the four AABB footprint corners -
+/// the terrain is single-valued in y, so that is the whole collision query. A rise greater than the
+/// step height blocks the move, which is what a slope becomes.
+const DcPlayer = struct {
+    position: Vec3,
+    velocity: Vec3 = Vec3.zero,
+    yaw: f32,
+    pitch: f32,
+    flying: bool = false,
+    on_ground: bool = false,
+    /// Fly-mode speed in m/s, changed by the scroll wheel like `vz.Camera.adjustSpeed`.
+    fly_speed: f32 = FLY_SPEED,
+
+    const EYE: f32 = 1.62;
+    const GRAVITY: f32 = 32.0;
+    const TERMINAL_VELOCITY: f32 = 60.0;
+    const JUMP_IMPULSE: f32 = 9.0;
+    const WALK_SPEED: f32 = 4.5;
+    const SPRINT_SPEED: f32 = 7.0;
+    const FLY_SPEED: f32 = 24.0;
+    const STEP_HEIGHT: f32 = 1.05;
+    const RADIUS: f32 = 0.3;
+    const MAX_SUBSTEP: f32 = 0.25;
+
+    fn eyePosition(self: DcPlayer) Vec3 {
+        return Vec3.init(self.position.x, self.position.y + EYE, self.position.z);
+    }
+
+    fn forward(self: DcPlayer) Vec3 {
+        const cp = @cos(self.pitch);
+        return Vec3.init(@sin(self.yaw) * cp, @sin(self.pitch), -@cos(self.yaw) * cp);
+    }
+
+    fn groundAt(x: f32, z: f32) f32 {
+        var h = heightAt(x - RADIUS, z - RADIUS);
+        h = @max(h, heightAt(x + RADIUS, z - RADIUS));
+        h = @max(h, heightAt(x - RADIUS, z + RADIUS));
+        h = @max(h, heightAt(x + RADIUS, z + RADIUS));
+        return h;
+    }
+
+    fn blockedAt(self: DcPlayer, x: f32, z: f32) bool {
+        return groundAt(x, z) > self.position.y + STEP_HEIGHT;
+    }
+
+    const Axis = enum { x, z };
+
+    fn moveAxis(self: *DcPlayer, axis: Axis, delta: f32) void {
+        var remaining = delta;
+        while (@abs(remaining) > 0.00001) {
+            const step = std.math.clamp(remaining, -MAX_SUBSTEP, MAX_SUBSTEP);
+            const nx = if (axis == .x) self.position.x + step else self.position.x;
+            const nz = if (axis == .z) self.position.z + step else self.position.z;
+            if (self.blockedAt(nx, nz)) {
+                self.velocity.x = 0;
+                self.velocity.z = 0;
+                return;
+            }
+            self.position.x = nx;
+            self.position.z = nz;
+            // Walk up a gentle rise without a jump. The engine does this by lifting and testing the
+            // block ledge; here the surface is continuous, so the rise itself is the test.
+            const ground = groundAt(nx, nz);
+            if (ground > self.position.y and ground <= self.position.y + STEP_HEIGHT and self.velocity.y <= 0) {
+                self.position.y = ground;
+                self.on_ground = true;
+            }
+            remaining -= step;
+        }
+    }
+
+    /// One fixed 60 Hz tick. `wish` is the yaw-relative horizontal direction (length 0 or 1),
+    /// `up` is +1 for Space and -1 for Ctrl in fly mode.
+    fn update(self: *DcPlayer, dt: f32, wish: Vec3, up: f32, sprint: bool) void {
+        if (self.flying) {
+            const speed = self.fly_speed * (if (sprint) @as(f32, 3.0) else 1.0);
+            self.velocity = Vec3.init(wish.x * speed, up * speed, wish.z * speed);
+            self.position = self.position.add(self.velocity.scale(dt));
+            self.on_ground = false;
+            return;
+        }
+
+        const speed = if (sprint) SPRINT_SPEED else WALK_SPEED;
+        self.velocity.x = wish.x * speed;
+        self.velocity.z = wish.z * speed;
+
+        if (up > 0 and self.on_ground) self.velocity.y = JUMP_IMPULSE;
+        self.velocity.y = @max(self.velocity.y - GRAVITY * dt, -TERMINAL_VELOCITY);
+
+        self.on_ground = false;
+        self.moveAxis(.x, self.velocity.x * dt);
+        self.moveAxis(.z, self.velocity.z * dt);
+        self.position.y += self.velocity.y * dt;
+
+        const ground = groundAt(self.position.x, self.position.z);
+        if (self.position.y <= ground) {
+            self.position.y = ground;
+            self.velocity.y = 0;
+            self.on_ground = true;
+        }
+    }
+};
+
+const HudStats = struct {
+    fps: f64,
+    frame_ms: f64,
+    worst_ms: f64,
+    verts: usize,
+    quads: usize,
+    patch_x: i32,
+    patch_z: i32,
+    rebuilds: usize,
+    player_x: f32,
+    player_y: f32,
+    player_z: f32,
+    yaw: f32,
+    pitch: f32,
+    flying: bool,
+    on_ground: bool,
+    fly_speed: f32,
+};
+
+/// The engine's HUD (baked atlas, panel behind the text), at a small scale for a 4K window.
+fn drawHud(hud: *vz.gfx.Hud, width: i32, height: i32, s: HudStats) void {
+    hud.begin(width, height);
+    hud.scale = 0.85;
+    hud.panel(0, 0, 620, 8 + 5 * hud.lineHeight(), 0.55);
+
+    var buffer: [192]u8 = undefined;
+    var y: f32 = 8;
+
+    hud.setColour(1.0, 1.0, 0.6);
+    if (std.fmt.bufPrint(&buffer, "FPS {d:.1}  FRAME {d:.2} MS  WORST {d:.2} MS", .{ s.fps, s.frame_ms, s.worst_ms })) |text| {
+        hud.text(10, y, text);
+    } else |_| {}
+    y += hud.lineHeight();
+
+    hud.setColour(0.85, 0.95, 1.0);
+    if (std.fmt.bufPrint(&buffer, "VERTS {d}  QUADS {d}  PATCH {d},{d}  REBUILDS {d}", .{ s.verts, s.quads, s.patch_x, s.patch_z, s.rebuilds })) |text| {
+        hud.text(10, y, text);
+    } else |_| {}
+    y += hud.lineHeight();
+
+    hud.setColour(0.8, 0.8, 0.8);
+    if (std.fmt.bufPrint(&buffer, "POS {d:.1} {d:.1} {d:.1}  YAW {d:.2}  PITCH {d:.2}", .{ s.player_x, s.player_y, s.player_z, s.yaw, s.pitch })) |text| {
+        hud.text(10, y, text);
+    } else |_| {}
+    y += hud.lineHeight();
+
+    hud.setColour(0.7, 1.0, 0.7);
+    if (std.fmt.bufPrint(&buffer, "{s}  {s}  FLY SPEED {d:.0}", .{
+        if (s.flying) "FLY" else "WALK", if (s.on_ground) "GROUND" else "AIR", s.fly_speed,
+    })) |text| {
+        hud.text(10, y, text);
+    } else |_| {}
+    y += hud.lineHeight();
+
+    hud.setColour(0.6, 0.6, 0.6);
+    if (std.fmt.bufPrint(&buffer, "F1 HUD  F FLY  TAB MOUSE  WHEEL FLY SPEED", .{})) |text| {
+        hud.text(10, y, text);
+    } else |_| {}
+
+    hud.setColour(0.55, 0.55, 0.55);
+    hud.text(10, @as(f32, @floatFromInt(height)) - hud.lineHeight() - 4, "WASD MOVE  SHIFT SPRINT  SPACE JUMP/UP  CTRL DOWN  ESC QUIT");
+    hud.end();
 }
 
 const vertex_src: [:0]const u8 =
@@ -656,17 +828,40 @@ pub fn main(init: std.process.Init) !void {
 
     std.debug.print("dc spike {s}\n", .{BUILD_TAG});
 
+    // 4K by default: the point of the viewer is surface detail, and the panel is 3840x2160 at
+    // 120 Hz. VOXEL_DC_SIZE=WxH overrides it for a quick low-res run.
+    var win_w: i32 = 3840;
+    var win_h: i32 = 2160;
+    if (init.environ_map.get("VOXEL_DC_SIZE")) |raw| {
+        if (std.mem.indexOfScalar(u8, raw, 'x')) |sep| {
+            win_w = std.fmt.parseInt(i32, raw[0..sep], 10) catch win_w;
+            win_h = std.fmt.parseInt(i32, raw[sep + 1 ..], 10) catch win_h;
+        }
+    }
     var window = try gfx.Window.init(.{
         .title = "voxel-zig dc spike",
-        .width = 1920,
-        .height = 1080,
+        .width = win_w,
+        .height = win_h,
         .vsync = true,
     });
     defer window.deinit();
+    // A native-4K window plus decorations does not fit a 4K screen; borderless at the top-left
+    // uses the whole panel and leaves the window manager nothing to clip.
+    _ = sdl.SDL_SetWindowBordered(window.handle, false);
+    _ = sdl.SDL_SetWindowPosition(window.handle, 0, 0);
+    window.syncSize();
 
     // The engine loads its GL entry points into a ProcTable; without this every gl call
     // below is a null pointer, which is what segfaulted the first build.
     try vz.gl.init();
+
+    // The engine's own input and HUD rather than copies: the controls should feel like the block
+    // world (0.0022 rad/px look, clamped pitch, wheel fly speed, Tab releases the mouse).
+    var input = vz.Input.init();
+    input.setRelativeMouse(&window, true);
+    var hud = try vz.gfx.Hud.init();
+    defer hud.deinit();
+    var show_hud = true;
 
     // The engine's own sky and volumetric clouds (ADR 0010), ported rather than reimplemented:
     // the point of the spike is to judge the DC surface, and it should be lit by the same sky the
@@ -682,9 +877,20 @@ pub fn main(init: std.process.Init) !void {
     var all_idx: std.ArrayList(u32) = .empty;
     defer all_idx.deinit(alloc);
 
-    var patch_origin: i32 = -PATCH / 2;
-    var patch_origin_z: i32 = -PATCH / 2;
-    var sim_time: f32 = 0.0;
+    // Spawn standing on the surface at the patch's south-east corner, looking back across it.
+    const spawn_x: f32 = 48.0;
+    const spawn_z: f32 = 48.0;
+    // Spawn flying 40 m above the surface looking across the patch, the way the orbit view saw it.
+    // F drops into walk mode and the height-field physics takes over.
+    var player = DcPlayer{
+        .position = Vec3.init(spawn_x, DcPlayer.groundAt(spawn_x, spawn_z) + 40.0, spawn_z),
+        .yaw = -0.785,
+        .pitch = -0.18,
+        .flying = true,
+    };
+    var camera = vz.Camera{ .fov_y_deg = 70, .near = 0.1, .far = 1000 };
+    var patch_origin: i32 = @divFloor(@as(i32, @intFromFloat(spawn_x)), @as(i32, @intCast(CHUNK))) - @divFloor(PATCH, 2);
+    var patch_origin_z: i32 = @divFloor(@as(i32, @intFromFloat(spawn_z)), @as(i32, @intCast(CHUNK))) - @divFloor(PATCH, 2);
     // Double buffering: the new patch is built a few chunks per frame into `next_*` while the old
     // one keeps rendering. Swapping only when it is complete means no frame ever sees a half-built
     // patch, and no frame pays the full 40-50 ms.
@@ -744,32 +950,70 @@ pub fn main(init: std.process.Init) !void {
     var frames: u64 = 0;
     var window_start = nowNs();
     var worst_ns: i64 = 0;
+    var last_frame_ns = nowNs();
+    var accumulator: f64 = 0;
+    const fixed_dt: f64 = 1.0 / 60.0;
+    var frame_ms: f64 = 0;
+    var fps_now: f64 = 0;
     frame: while (true) {
         const frame_start = nowNs();
-        var ev: sdl.SDL_Event = undefined;
-        while (sdl.SDL_PollEvent(&ev)) {
-            if (ev.type == sdl.SDL_EVENT_QUIT) break :frame;
-            if (ev.type == sdl.SDL_EVENT_KEY_DOWN and ev.key.key == sdl.SDLK_ESCAPE) break :frame;
+        var frame_dt = @as(f64, @floatFromInt(frame_start - last_frame_ns)) / 1e9;
+        last_frame_ns = frame_start;
+        frame_dt = @min(frame_dt, 0.1);
+
+        input.pump(&window);
+        if (input.quit) break :frame;
+        if (input.hud_toggle) show_hud = !show_hud;
+        if (input.fly_toggle) player.flying = !player.flying;
+        if (input.wheel != 0) {
+            player.fly_speed *= std.math.pow(f32, 1.25, input.wheel);
+            player.fly_speed = std.math.clamp(player.fly_speed, 1, 400);
         }
+        // Same look response as the engine's player (Camera.SENSITIVITY, clamped pitch).
+        player.yaw += input.mouse_dx * vz.Camera.SENSITIVITY;
+        player.pitch = std.math.clamp(
+            player.pitch - input.mouse_dy * vz.Camera.SENSITIVITY,
+            -vz.Camera.MAX_PITCH,
+            vz.Camera.MAX_PITCH,
+        );
+
+        var wish = Vec3.zero;
+        {
+            const forward_amount: f32 = @floatFromInt(@intFromBool(input.down(sdl.SDL_SCANCODE_W)));
+            const back_amount: f32 = @floatFromInt(@intFromBool(input.down(sdl.SDL_SCANCODE_S)));
+            const right_amount: f32 = @floatFromInt(@intFromBool(input.down(sdl.SDL_SCANCODE_D)));
+            const left_amount: f32 = @floatFromInt(@intFromBool(input.down(sdl.SDL_SCANCODE_A)));
+            const forward = Vec3.init(@sin(player.yaw), 0, -@cos(player.yaw));
+            const right = Vec3.init(@cos(player.yaw), 0, @sin(player.yaw));
+            const v = forward.scale(forward_amount - back_amount).add(right.scale(right_amount - left_amount));
+            const len = @sqrt(v.x * v.x + v.z * v.z);
+            if (len > 1e-5) wish = Vec3.init(v.x / len, 0, v.z / len);
+        }
+        // Signed on purpose: subtracting two @intFromBool values infers u1 and overflows on Ctrl.
+        const up: f32 = @floatFromInt(@as(i8, @intFromBool(input.down(sdl.SDL_SCANCODE_SPACE))) - @as(i8, @intFromBool(input.down(sdl.SDL_SCANCODE_LCTRL))));
+        const sprint = input.down(sdl.SDL_SCANCODE_LSHIFT);
+
+        // Player physics on the engine's fixed step; rendering on the frame delta.
+        accumulator += frame_dt;
+        var steps: u32 = 0;
+        while (accumulator >= fixed_dt and steps < 5) : (steps += 1) {
+            player.update(@floatCast(fixed_dt), wish, up, sprint);
+            accumulator -= fixed_dt;
+        }
+        if (steps == 5) accumulator = @mod(accumulator, fixed_dt);
+        input.endFrame();
+
         window.syncSize();
         const w: f32 = @floatFromInt(window.width);
         const h: f32 = @floatFromInt(window.height);
+        const aspect = w / @max(h, 1.0);
         gl.Viewport(0, 0, window.width, window.height);
         if (bg_magenta) gl.ClearColor(1.0, 0.0, 1.0, 1.0) else gl.ClearColor(0.30, 0.38, 0.50, 1.0);
         gl.Clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
-        // Streaming: the camera orbits, so the patch has to follow. Crossing a chunk border rebuilds
-        // the whole patch synchronously - 39.7 ms measured - a visible hitch, and exactly why step 3
-        // of the plan moves meshing to a worker thread.
-        sim_time += 0.0167;
-        const orbit: f32 = 0.05 * sim_time;
-                // Radius 60, not 260: the patch is 8x8 chunks = 256 m across, so half-extent is 128 m and
-        // an orbit at 260 m put the camera OUTSIDE the world - which made the patch boundary the
-        // dominant thing in frame and looked exactly like holes in the surface. Two mesher hypotheses
-        // (ambiguous cells, degenerate quads) both measured zero, which is what pointed here.
-        const eye = [3]f32{ @cos(orbit) * 60.0, 92.0, @sin(orbit) * 60.0 };
-        const cur_cx: i32 = @divFloor(@as(i32, @intFromFloat(eye[0])), @as(i32, @intCast(CHUNK)));
-        const cur_cz: i32 = @divFloor(@as(i32, @intFromFloat(eye[2])), @as(i32, @intCast(CHUNK)));
+        // Streaming: the patch follows the player's chunk now that the camera is free.
+        const cur_cx: i32 = @divFloor(@as(i32, @intFromFloat(player.position.x)), @as(i32, @intCast(CHUNK)));
+        const cur_cz: i32 = @divFloor(@as(i32, @intFromFloat(player.position.z)), @as(i32, @intCast(CHUNK)));
         const want_x = cur_cx - @divFloor(PATCH, 2);
         const want_z = cur_cz - @divFloor(PATCH, 2);
         if (!pending and (want_x != patch_origin or want_z != patch_origin_z)) {
@@ -807,39 +1051,75 @@ pub fn main(init: std.process.Init) !void {
                 });
             }
         }
-        const look_x: f32 = @as(f32, @floatFromInt(patch_origin + @divFloor(PATCH, 2))) * @as(f32, @floatFromInt(CHUNK));
-        const look_z: f32 = @as(f32, @floatFromInt(patch_origin_z + @divFloor(PATCH, 2))) * @as(f32, @floatFromInt(CHUNK));
-        const view = lookAt(eye, .{ look_x, 86.0, look_z }, .{ 0, 1, 0 });
-        const proj = perspective(0.9, w / @max(h, 1.0), 0.5, 900.0);
-        const vp_m = mul(proj, view);
-        const eye_v = Vec3.init(eye[0], eye[1], eye[2]);
-        cloud_shift = Vec3.init(cloud_shift.x + 0.016 * 2.0, 0, cloud_shift.z + 0.016 * 0.6);
+
+        camera.position = player.eyePosition();
+        camera.yaw = player.yaw;
+        camera.pitch = player.pitch;
+        const vp = camera.viewProjection(aspect);
+
+        // Clouds drift on the frame delta instead of a fixed 0.016 per frame: the old code moved
+        // 0.016*2.0 per frame, i.e. 3.84 m/s on this 120 Hz display (2 m/s only at 60 Hz). The
+        // speed here is 75 % of what was on screen and no longer depends on the frame rate.
+        const dt_f: f32 = @floatCast(frame_dt);
+        cloud_shift = Vec3.init(cloud_shift.x + dt_f * 2.9, 0, cloud_shift.z + dt_f * 0.85);
         // The sky pass fills the whole screen, so with it running the magenta clear colour is never
         // visible and a hole shows sky instead. In the diagnostic mode the background is left empty
         // so every hole is the one colour the render cannot produce.
-        if (!bg_magenta) sky.draw(Mat4{ .m = vp_m }, eye_v, &sun, true, cloud_shift);
+        if (!bg_magenta) sky.draw(vp, camera.position, &sun, true, cloud_shift);
 
+        // hud.end() leaves depth writing off and blending on; restore the terrain state explicitly
+        // every frame rather than trusting that the HUD put it back.
+        gl.Enable(gl.DEPTH_TEST);
+        gl.Disable(gl.BLEND);
+        gl.Disable(gl.CULL_FACE);
         shader.use();
-        shader.setMat4("u_view_proj", vp_m);
+        shader.setMat4("u_view_proj", vp.m);
         gl.BindVertexArray(vao);
         // Read the live index count: after a streaming swap the startup slice is stale.
         gl.DrawElements(gl.TRIANGLES, @intCast(all_idx.items.len), gl.UNSIGNED_INT, 0);
+
+        if (show_hud) {
+            drawHud(&hud, window.width, window.height, .{
+                .fps = if (fps_now > 0) fps_now else 1000.0 / @max(frame_ms, 0.001),
+                .frame_ms = frame_ms,
+                .worst_ms = @as(f64, @floatFromInt(worst_ns)) / 1e6,
+                .verts = all_verts.items.len,
+                .quads = all_idx.items.len / 6,
+                .patch_x = patch_origin,
+                .patch_z = patch_origin_z,
+                .rebuilds = rebuilds,
+                .player_x = player.position.x,
+                .player_y = player.position.y,
+                .player_z = player.position.z,
+                .yaw = player.yaw,
+                .pitch = player.pitch,
+                .flying = player.flying,
+                .on_ground = player.on_ground,
+                .fly_speed = player.fly_speed,
+            });
+        }
         window.swap();
 
         const frame_ns = nowNs() - frame_start;
+        frame_ms = @as(f64, @floatFromInt(frame_ns)) / 1e6;
         if (frame_ns > worst_ns) worst_ns = frame_ns;
         frames += 1;
         const elapsed = nowNs() - window_start;
         if (elapsed >= 1_000_000_000) {
-            const fps = @as(f64, @floatFromInt(frames)) * 1e9 / @as(f64, @floatFromInt(elapsed));
-            // Live counts, not the startup ones: after a streaming swap the slice captured at
-            // startup describes a patch that is no longer on screen. Quads come from the index
-            // buffer (6 indices per quad) so there is no second number to keep in sync.
-            std.debug.print("fps {d:.1}  worst frame {d:.2} ms  verts {d}  quads {d}\n", .{
-                fps,
+            fps_now = @as(f64, @floatFromInt(frames)) * 1e9 / @as(f64, @floatFromInt(elapsed));
+            std.debug.print("fps {d:.1}  worst frame {d:.2} ms  verts {d}  quads {d}  pos {d:.1} {d:.1} {d:.1}  yaw {d:.3} pitch {d:.3}  {s} {s} speed {d:.0}\n", .{
+                fps_now,
                 @as(f64, @floatFromInt(worst_ns)) / 1e6,
                 all_verts.items.len,
                 all_idx.items.len / 6,
+                player.position.x,
+                player.position.y,
+                player.position.z,
+                player.yaw,
+                player.pitch,
+                if (player.flying) "FLY" else "WALK",
+                if (player.on_ground) "GROUND" else "AIR",
+                player.fly_speed,
             });
             frames = 0;
             worst_ns = 0;
@@ -847,17 +1127,3 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 }
-
-// Streaming, the next step and why it is not here yet.
-//
-// This viewer meshes one patch at startup and uploads it once. Making the world follow the camera
-// needs two things this file does not have: the build-and-upload block factored into a callable
-// function (it currently lives inline in `main`, appending into two ArrayLists and then binding a
-// VAO), and key handling that moves the camera. Both are mechanical, but the cost is a synchronous
-// rebuild of the whole patch - 64 chunks x ~0.37 ms = ~24 ms - paid whenever the camera crosses a
-// chunk border, so streaming properly means meshing off the main thread and swapping buffers, which
-// is the same worker-pool design the block world already uses.
-//
-// Order that keeps each step verifiable: (1) factor build+upload into `meshPatch(alloc, origin, ...)`
-// and call it twice in a row, asserting identical vertex counts; (2) call it on a chunk crossing
-// and time the rebuild; (3) move meshing to a worker and upload on completion.
