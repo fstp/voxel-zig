@@ -52,8 +52,14 @@ pub const Surface = struct {
 pub const Field = struct {
     /// Corner samples, x fastest. Length must be (n+1)^3.
     values: []const f32,
-    /// Cells per axis.
+    /// Cells per axis on X and Z.
     n: usize,
+    /// Cells along Y, when the volume is not a cube. A world with a tall terrain and a small chunk
+    /// needs one global Y range so every chunk samples the SAME y planes - otherwise two neighbours
+    /// evaluate a shared border cell from different slabs and their vertices do not coincide, which
+    /// is measured as thousands of near-duplicate vertices and draws as a hairline at every border.
+    /// Null means cube (`n` per axis), which keeps every existing caller and test unchanged.
+    ny: ?usize = null,
     /// Extra cells meshed beyond the owned range on every side. A chunk meshes these so
     /// the cells straddling its border exist locally; because the field is deterministic,
     /// the neighbour computes the same vertices for them and the border quad welds exactly.
@@ -66,9 +72,18 @@ pub const Field = struct {
         return self.n + 1 + 2 * self.skirt;
     }
 
+    pub fn nyCells(self: Field) usize {
+        return self.ny orelse self.n;
+    }
+
+    pub fn sideY(self: Field) usize {
+        return self.nyCells() + 1 + 2 * self.skirt;
+    }
+
     pub fn at(self: Field, i: usize, j: usize, k: usize) f32 {
-        const s = self.side();
-        return self.values[i + s * (j + s * k)];
+        const sx = self.side();
+        const sy = self.sideY();
+        return self.values[i + sx * (j + sy * k)];
     }
 
     pub fn samplePos(self: Field, i: usize, j: usize, k: usize) [3]f32 {
@@ -83,12 +98,12 @@ pub const Field = struct {
     /// Gradient by central differences on the sampled grid, falling back to a one-sided
     /// difference at the border. Normalised; zero if the field is locally flat.
     pub fn gradient(self: Field, i: usize, j: usize, k: usize) [3]f32 {
-        const n = self.side() - 1;
+        const lim = [3]usize{ self.side() - 1, self.sideY() - 1, self.side() - 1 };
         var g: [3]f32 = undefined;
         inline for (0..3) |axis| {
             const idx: [3]usize = .{ i, j, k };
             const a = if (idx[axis] == 0) 0 else idx[axis] - 1;
-            const b = if (idx[axis] >= n) n else idx[axis] + 1;
+            const b = if (idx[axis] >= lim[axis]) lim[axis] else idx[axis] + 1;
             var pa: [3]usize = .{ i, j, k };
             var pb: [3]usize = .{ i, j, k };
             pa[axis] = a;
@@ -234,13 +249,15 @@ pub fn extract(alloc: std.mem.Allocator, field: Field) !Surface {
     // Cells cover the whole sample grid, skirts included, so the cells straddling a chunk
     // border exist locally.
     const cpa = field.side() - 1;
-    const cells = cpa * cpa * cpa;
+    const cpay = field.sideY() - 1;
+    const cells = cpa * cpa * cpay;
     const sk = field.skirt;
     // Owned edges: the along-axis cell index must sit in [sk, sk + n - 1], which makes the
     // ownership ranges of adjacent chunks disjoint - so each border quad is emitted once,
     // by the chunk that owns it, using a skirt vertex its neighbour computes identically.
     const own_lo = sk;
     const own_hi = sk + field.n - 1;
+    const own_hi_y = sk + field.nyCells() - 1;
 
     var verts: std.ArrayList(Vertex) = .empty;
     errdefer verts.deinit(alloc);
@@ -251,8 +268,8 @@ pub fn extract(alloc: std.mem.Allocator, field: Field) !Surface {
     @memset(cell_vert, -1);
 
     const cellIndex = struct {
-        fn f(x: usize, y: usize, z: usize, nn: usize) usize {
-            return x + nn * (y + nn * z);
+        fn f(x: usize, y: usize, z: usize, nx: usize, ny_cells: usize) usize {
+            return x + nx * (y + ny_cells * z);
         }
     }.f;
 
@@ -263,7 +280,7 @@ pub fn extract(alloc: std.mem.Allocator, field: Field) !Surface {
         var cj: usize = 0;
         while (cj < cpa) : (cj += 1) {
             var ck: usize = 0;
-            while (ck < cpa) : (ck += 1) {
+            while (ck < cpay) : (ck += 1) {
                 var v: [8]f32 = undefined;
                 var mask: u8 = 0;
                 for (corners, 0..) |c, idx| {
@@ -321,7 +338,7 @@ pub fn extract(alloc: std.mem.Allocator, field: Field) !Surface {
                 // hard-coded up vector gives the quad the wrong side - which renders as a
                 // dark speck, not as an obvious bug. Fall back to the field gradient.
                 const nrm = normalize(qef.nsum) orelse (normalize(field.gradient(ci, cj, ck)) orelse .{ 0.0, 1.0, 0.0 });
-                cell_vert[cellIndex(ci, cj, ck, cpa)] = @intCast(verts.items.len);
+                cell_vert[cellIndex(ci, cj, ck, cpa, cpay)] = @intCast(verts.items.len);
                 try verts.append(alloc, .{ .pos = pos, .normal = nrm });
             }
         }
@@ -336,12 +353,12 @@ pub fn extract(alloc: std.mem.Allocator, field: Field) !Surface {
     var i: usize = own_lo;
     while (i <= own_hi) : (i += 1) {
         var j: usize = own_lo;
-        while (j <= own_hi) : (j += 1) {
+        while (j <= own_hi_y) : (j += 1) {
             var k: usize = own_lo;
             while (k <= own_hi) : (k += 1) {
-                try emitEdge(field, cell_vert, verts.items, &tris, alloc, cpa, .x, i, j, k);
-                try emitEdge(field, cell_vert, verts.items, &tris, alloc, cpa, .y, i, j, k);
-                try emitEdge(field, cell_vert, verts.items, &tris, alloc, cpa, .z, i, j, k);
+                try emitEdge(field, cell_vert, verts.items, &tris, alloc, cpa, cpay, .x, i, j, k);
+                try emitEdge(field, cell_vert, verts.items, &tris, alloc, cpa, cpay, .y, i, j, k);
+                try emitEdge(field, cell_vert, verts.items, &tris, alloc, cpa, cpay, .z, i, j, k);
             }
         }
     }
@@ -361,12 +378,14 @@ fn emitEdge(
     tris: *std.ArrayList(u32),
     alloc: std.mem.Allocator,
     cpa: usize,
+    cpay: usize,
     axis: Axis,
     i: usize,
     j: usize,
     k: usize,
 ) !void {
-    const n = cpa;
+    const n = cpa; // cells on X and Z
+    const nyc = cpay; // cells on Y
     // A grid edge crosses the surface when its two corner samples disagree in sign.
     const a = switch (axis) {
         .x => field.at(i, j, k),
@@ -384,21 +403,21 @@ fn emitEdge(
     var c: [4][3]usize = undefined;
     switch (axis) {
         .x => {
-            if (i >= n or j == 0 or k == 0) {
+            if (i >= n or j == 0 or j >= nyc or k == 0 or k >= n) {
                 skipped_bounds += 1;
                 return;
             }
             c = .{ .{ i, j - 1, k - 1 }, .{ i, j, k - 1 }, .{ i, j, k }, .{ i, j - 1, k } };
         },
         .y => {
-            if (j >= n or i == 0 or k == 0) {
+            if (j >= nyc or i == 0 or i >= n or k == 0 or k >= n) {
                 skipped_bounds += 1;
                 return;
             }
             c = .{ .{ i - 1, j, k - 1 }, .{ i, j, k - 1 }, .{ i, j, k }, .{ i - 1, j, k } };
         },
         .z => {
-            if (k >= n or i == 0 or j == 0) {
+            if (k >= n or i == 0 or i >= n or j == 0 or j >= nyc) {
                 skipped_bounds += 1;
                 return;
             }
@@ -408,7 +427,7 @@ fn emitEdge(
 
     var idx: [4]u32 = undefined;
     for (c, 0..) |cc, m| {
-        const vi = cell_vert[cc[0] + n * (cc[1] + n * cc[2])];
+        const vi = cell_vert[cc[0] + n * (cc[1] + nyc * cc[2])];
         if (vi < 0) {
             // A cell on this edge produced no vertex, so the surface is open here. Counting
             // these is what distinguishes a sampling miss from a quad-ordering problem.
