@@ -8,6 +8,14 @@
 
 const std = @import("std");
 
+/// Diagnostics: reset by `extract`. `skipped_missing_cell` counts quads not emitted because one
+/// of the four surrounding cells produced no vertex; `skipped_bounds` counts those rejected for
+/// sitting outside the sample grid. Between them they say whether a hole is a sampling miss or
+/// something in the ordering.
+pub var skipped_missing_cell: usize = 0;
+pub var skipped_bounds: usize = 0;
+pub var emitted_quads: usize = 0;
+
 pub const Vertex = extern struct {
     pos: [3]f32,
     normal: [3]f32,
@@ -204,6 +212,9 @@ const edges: [12][2]u8 = .{
 
 /// Extract the isosurface at value 0 (negative is inside).
 pub fn extract(alloc: std.mem.Allocator, field: Field) !Surface {
+    skipped_missing_cell = 0;
+    skipped_bounds = 0;
+    emitted_quads = 0;
     // Cells cover the whole sample grid, skirts included, so the cells straddling a chunk
     // border exist locally.
     const cpa = field.side() - 1;
@@ -344,15 +355,24 @@ fn emitEdge(
     var c: [4][3]usize = undefined;
     switch (axis) {
         .x => {
-            if (i >= n or j == 0 or k == 0) return;
+            if (i >= n or j == 0 or k == 0) {
+                skipped_bounds += 1;
+                return;
+            }
             c = .{ .{ i, j - 1, k - 1 }, .{ i, j, k - 1 }, .{ i, j, k }, .{ i, j - 1, k } };
         },
         .y => {
-            if (j >= n or i == 0 or k == 0) return;
+            if (j >= n or i == 0 or k == 0) {
+                skipped_bounds += 1;
+                return;
+            }
             c = .{ .{ i - 1, j, k - 1 }, .{ i, j, k - 1 }, .{ i, j, k }, .{ i - 1, j, k } };
         },
         .z => {
-            if (k >= n or i == 0 or j == 0) return;
+            if (k >= n or i == 0 or j == 0) {
+                skipped_bounds += 1;
+                return;
+            }
             c = .{ .{ i - 1, j - 1, k }, .{ i, j - 1, k }, .{ i, j, k }, .{ i - 1, j, k } };
         },
     }
@@ -360,10 +380,16 @@ fn emitEdge(
     var idx: [4]u32 = undefined;
     for (c, 0..) |cc, m| {
         const vi = cell_vert[cc[0] + n * (cc[1] + n * cc[2])];
-        if (vi < 0) return; // a cell on this edge has no vertex: the surface is open here
+        if (vi < 0) {
+            // A cell on this edge produced no vertex, so the surface is open here. Counting
+            // these is what distinguishes a sampling miss from a quad-ordering problem.
+            skipped_missing_cell += 1;
+            return;
+        }
         idx[m] = @intCast(vi);
     }
 
+    emitted_quads += 1;
     // Wind the quad so its geometric normal agrees with the surface normals it joins,
     // rather than reasoning about axis directions and sign conventions per case.
     const pa = verts[idx[0]].pos;
@@ -372,6 +398,11 @@ fn emitEdge(
     const quad_n = cross(sub(pb, pa), sub(pc, pa));
     var avg: [3]f32 = .{ 0, 0, 0 };
     for (idx) |vi| avg = add(avg, verts[vi].normal);
+    // Split along a fixed diagonal for now. The shorter-diagonal variant was tried to fix the
+    // scattered blue specks (which the counters proved are NOT missing quads: skipped_missing_cell
+    // is 0), but the flipped branch reverses the quad's cycle and breaks the winding invariant that
+    // the closed-mesh tests rely on - 12 tests failed. Reverted; the correct version has to rotate
+    // the cycle rather than swap endpoints, and that needs its own pass.
     if (dot(quad_n, avg) < 0) {
         try tris.append(alloc, idx[0]);
         try tris.append(alloc, idx[2]);

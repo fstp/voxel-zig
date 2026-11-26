@@ -123,6 +123,9 @@ pub fn main() !void {
         \\  quads per chunk  {d:.1}
         \\  verts per chunk  {d:.1}
         \\  mesh time        mean {d:.3} ms  worst {d:.3} ms  per chunk
+        \\  quads emitted    {d}
+        \\  skipped, no cell vertex on the edge  {d}
+        \\  skipped, out of sample grid bounds   {d}
         \\
     , .{
         cell,
@@ -133,6 +136,9 @@ pub fn main() !void {
         @as(f64, @floatFromInt(total_verts)) / @as(f64, @floatFromInt(total)),
         mean_ms,
         worst_ms,
+        dc.emitted_quads,
+        dc.skipped_missing_cell,
+        dc.skipped_bounds,
     });
 }
 
