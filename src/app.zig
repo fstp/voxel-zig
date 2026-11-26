@@ -7,6 +7,8 @@ const Input = @import("input.zig").Input;
 const Camera = @import("camera.zig").Camera;
 const TextureArray = @import("gfx/texture.zig").TextureArray;
 const ChunkRenderer = @import("gfx/chunk_renderer.zig").ChunkRenderer;
+const dc_renderer_mod = @import("gfx/dc_renderer.zig");
+const DcRenderer = dc_renderer_mod.DcRenderer;
 const Hud = @import("gfx/hud.zig").Hud;
 const Frustum = @import("math/frustum.zig").Frustum;
 const Aabb = @import("math/aabb.zig").Aabb;
@@ -160,6 +162,9 @@ pub const App = struct {
     rough_textures: TextureArray,
     world: World,
     chunk_renderer: ChunkRenderer,
+    /// ADR 0020: the dual-contouring path. Present always, uploaded only when dc_world is set.
+    dc_renderer: DcRenderer,
+    dc_world: bool,
     meshes: std.HashMapUnmanaged(ChunkPos, ChunkRenderer.Mesh, ChunkPos.Context, 80),
     scratch_vertices: []mesher.Vertex,
     scratch_indices: []u32,
@@ -268,6 +273,18 @@ pub const App = struct {
 
         var chunk_renderer = try ChunkRenderer.init();
         errdefer chunk_renderer.deinit();
+
+        var dc_renderer = try DcRenderer.init();
+        errdefer dc_renderer.deinit();
+        if (config.dc_world) {
+            var surf = try dc_renderer_mod.buildTerrainPatch(gpa, 1337, 6);
+            defer surf.deinit(gpa);
+            try dc_renderer.upload(gpa, surf);
+            std.debug.print(
+                "dc world: {d} verts, {d} indices over a 6x6 chunk patch (block world still built)\n",
+                .{ dc_renderer.vertex_count, dc_renderer.index_count },
+            );
+        }
 
         var hud = try Hud.init();
         errdefer hud.deinit();
@@ -379,6 +396,8 @@ pub const App = struct {
             .saved = saved,
             .world = world,
             .chunk_renderer = chunk_renderer,
+            .dc_renderer = dc_renderer,
+            .dc_world = config.dc_world,
             .hud = hud,
             .meshes = .{},
             .undo = undo_mod.Undo.init(gpa),
@@ -1171,6 +1190,12 @@ pub const App = struct {
         // Fog ends just inside the load radius so chunks fade in behind it rather
         // than popping through a hard frontier: radius 6 chunks = 192 blocks.
         const radius_blocks: f32 = @floatFromInt(LOAD_RADIUS * @as(i32, coords.CHUNK_SIZE));
+        if (self.dc_world) {
+            const d = self.sun.direction();
+            const sunlight = self.sun.lighting();
+            const sc = sunlight.sun_colour;
+            self.dc_renderer.draw(vp.m, .{ d.x, d.y, d.z }, .{ sc.x, sc.y, sc.z });
+        }
         self.chunk_renderer.begin(&self.textures, .{
             .view_projection = vp,
             .eye = self.camera.position,
