@@ -15,6 +15,9 @@ const ground_moss_jpg = @embedFile("../assets/textures/ground_moss.jpg");
 const snow_grass_jpg = @embedFile("../assets/textures/snow_grass.jpg");
 const snow_clean_jpg = @embedFile("../assets/textures/snow_clean.jpg");
 const snow_patch_jpg = @embedFile("../assets/textures/snow_patch.jpg");
+const shore_dirt_jpg = @embedFile("../assets/textures/shore_dirt.jpg");
+const shore_sand_jpg = @embedFile("../assets/textures/shore_sand.jpg");
+const shore_mud_jpg = @embedFile("../assets/textures/shore_mud.jpg");
 
 const depth_vertex_src: [:0]const u8 =
     \\#version 330 core
@@ -81,6 +84,10 @@ const fragment_src: [:0]const u8 =
     \\uniform sampler2D u_snow_tex1; // clean deep snow
     \\uniform sampler2D u_snow_tex2; // patchy snow and grass
     \\uniform float u_snow_enabled;
+    \\uniform sampler2D u_shore_tex0; // dry dirt
+    \\uniform sampler2D u_shore_tex1; // rippled sand
+    \\uniform sampler2D u_shore_tex2; // cracked wet mud
+    \\uniform float u_shore_enabled;
     \\uniform float u_surfaces;    // 0 = flat A/B path, 1 = snow/mud/wetness rules
     \\uniform float u_sea_level;   // world y of the sea surface (55 m in this world)
     \\uniform float u_snow_line;   // altitude where snow starts, before the noise warp
@@ -165,6 +172,19 @@ const fragment_src: [:0]const u8 =
     \\    vec3 mixed = mix(clean, patch, 0.22 + 0.45 * edge_amt);
     \\    mixed = mix(mixed, edge, edge_amt * 0.42);
     \\    return mixed * (0.86 + 0.22 * mott);
+    \\}
+    \\vec3 shoreTexture(vec2 p, float mott, float wet) {
+    \\    vec2 warp = vec2(noised(vec3(p * 0.053, 2.7)).x,
+    \\                     noised(vec3(p * 0.049, 7.2)).x) - 0.5;
+    \\    vec2 uv0 = rot2(1.07) * (p * 0.19 + warp * 0.07);
+    \\    vec2 uv1 = rot2(2.71) * (p * 0.31 - warp * 0.05);
+    \\    vec2 uv2 = rot2(5.19) * (p * 0.47 + warp * 0.04);
+    \\    vec3 dirt = texture(u_shore_tex0, uv0).rgb;
+    \\    vec3 sand = texture(u_shore_tex1, uv1).rgb;
+    \\    vec3 mud = texture(u_shore_tex2, uv2).rgb;
+    \\    vec3 mixed = mix(dirt, sand, 0.30 + 0.25 * wet);
+    \\    mixed = mix(mixed, mud, wet * 0.55);
+    \\    return mixed * (0.78 + 0.22 * mott);
     \\}
     \\vec3 shIrradiance(vec3 n) {
     \\    float x = n.x, y = n.y, z = n.z;
@@ -296,8 +316,13 @@ const fragment_src: [:0]const u8 =
     \\    // Without it, linear radiance above 1.0 clips to white once the sRGB framebuffer encodes,
     \\    // which is what turned the surface into a pale sheet the moment FRAMEBUFFER_SRGB went on.
     \\    vec3 surf = albedo;
-    \\    surf = mix(surf, vec3(0.34, 0.27, 0.20), mud * (1.0 - snow));
-    \\    surf = mix(surf, vec3(0.16, 0.13, 0.10), mud * wet * 0.55 * (1.0 - snow));
+    \\    if (mud > 0.001 && u_shore_enabled > 0.5) {
+    \\        vec3 shore = shoreTexture(v_pos.xz, mott, wet);
+    \\        surf = mix(surf, shore, mud * (1.0 - snow) * 0.90);
+    \\    } else {
+    \\        surf = mix(surf, vec3(0.34, 0.27, 0.20), mud * (1.0 - snow));
+    \\        surf = mix(surf, vec3(0.16, 0.13, 0.10), mud * wet * 0.55 * (1.0 - snow));
+    \\    }
     \\    if (snow > 0.001 && u_snow_enabled > 0.5) {
     \\        vec3 snow_col = snowTexture(v_pos.xz, mott, snow);
     \\        surf = mix(surf, snow_col, snow * 0.92);
@@ -350,6 +375,7 @@ pub const DcRenderer = struct {
     ao_enabled: bool = true,
     ground_tex: [3]u32 = .{ 0, 0, 0 },
     snow_tex: [3]u32 = .{ 0, 0, 0 },
+    shore_tex: [3]u32 = .{ 0, 0, 0 },
 
     pub fn init() !DcRenderer {
         var shader = try Shader.init(vertex_src, fragment_src);
@@ -409,7 +435,27 @@ pub const DcRenderer = struct {
         }
         gl.BindTexture(gl.TEXTURE_2D, 0);
 
-        return .{ .shader = shader, .depth_shader = depth_shader, .ao_tex = ao_tex, .ground_tex = ground_tex, .snow_tex = snow_tex };
+        const shore_jpgs = [_][]const u8{ shore_dirt_jpg, shore_sand_jpg, shore_mud_jpg };
+        var shore_tex: [3]u32 = .{ 0, 0, 0 };
+        for (shore_jpgs, 0..) |jpg, i| {
+            var sw: c_int = 0;
+            var sh: c_int = 0;
+            var sch: c_int = 0;
+            const pixels = stb.stbi_load_from_memory(jpg.ptr, @intCast(jpg.len), &sw, &sh, &sch, 4) orelse
+                return error.ShoreTextureLoad;
+            defer stb.stbi_image_free(pixels);
+            gl.GenTextures(1, @ptrCast(&shore_tex[i]));
+            gl.BindTexture(gl.TEXTURE_2D, shore_tex[i]);
+            gl.TexImage2D(gl.TEXTURE_2D, 0, gl.SRGB8_ALPHA8, sw, sh, 0, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+            gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+            gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+            gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+            gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+            gl.GenerateMipmap(gl.TEXTURE_2D);
+        }
+        gl.BindTexture(gl.TEXTURE_2D, 0);
+
+        return .{ .shader = shader, .depth_shader = depth_shader, .ao_tex = ao_tex, .ground_tex = ground_tex, .snow_tex = snow_tex, .shore_tex = shore_tex };
     }
 
     pub fn deinit(self: *DcRenderer) void {
@@ -422,6 +468,7 @@ pub const DcRenderer = struct {
         for (0..3) |i| {
             if (self.ground_tex[i] != 0) gl.DeleteTextures(1, @ptrCast(&self.ground_tex[i]));
             if (self.snow_tex[i] != 0) gl.DeleteTextures(1, @ptrCast(&self.snow_tex[i]));
+            if (self.shore_tex[i] != 0) gl.DeleteTextures(1, @ptrCast(&self.shore_tex[i]));
         }
         self.depth_shader.deinit();
         self.shader.deinit();
@@ -524,19 +571,21 @@ pub const DcRenderer = struct {
         self.shader.setFloat("u_ao_enabled", if (self.ao_enabled) 1.0 else 0.0);
         gl.ActiveTexture(gl.TEXTURE3);
         gl.BindTexture(gl.TEXTURE_2D, self.ao_tex);
-        const tex_names: [6][:0]const u8 = .{
+        const tex_names: [9][:0]const u8 = .{
             "u_ground_tex0", "u_ground_tex1", "u_ground_tex2",
             "u_snow_tex0",   "u_snow_tex1",   "u_snow_tex2",
+            "u_shore_tex0",  "u_shore_tex1",  "u_shore_tex2",
         };
         for (tex_names, 0..) |name, i| {
             const slot: c_int = 4 + @as(c_int, @intCast(i));
             self.shader.setInt(name, slot);
             gl.ActiveTexture(gl.TEXTURE4 + @as(u32, @intCast(i)));
-            const tex = if (i < 3) self.ground_tex[i] else self.snow_tex[i - 3];
+            const tex = if (i < 3) self.ground_tex[i] else if (i < 6) self.snow_tex[i - 3] else self.shore_tex[i - 6];
             gl.BindTexture(gl.TEXTURE_2D, tex);
         }
         self.shader.setFloat("u_ground_enabled", 1.0);
         self.shader.setFloat("u_snow_enabled", 1.0);
+        self.shader.setFloat("u_shore_enabled", 1.0);
         gl.ActiveTexture(gl.TEXTURE0);
         self.shader.setVec3("u_fog_colour", .{ fog_colour.x, fog_colour.y, fog_colour.z });
         self.shader.setVec3("u_fog_sun", .{ fog_sun.x, fog_sun.y, fog_sun.z });
