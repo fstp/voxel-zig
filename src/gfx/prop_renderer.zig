@@ -10,9 +10,9 @@ const Vec3 = @import("../math/vec.zig").Vec3;
 const Prop = @import("../world/scatter.zig").Prop;
 const ShadowRenderer = @import("shadow_renderer.zig").ShadowRenderer;
 const stb = @import("stb.zig");
-const rock_rough_jpg = @embedFile("../assets/textures/rock_rough.jpg");
-const rock_granite_jpg = @embedFile("../assets/textures/rock_granite.jpg");
-const rock_stone_jpg = @embedFile("../assets/textures/rock_stone.jpg");
+const rock_rough_png = @embedFile("../assets/textures/rock_rough.png");
+const rock_granite_png = @embedFile("../assets/textures/rock_granite.png");
+const rock_stone_png = @embedFile("../assets/textures/rock_stone.png");
 const animation = @import("../world/foliage_animation.zig");
 
 pub const Vertex = extern struct {
@@ -346,13 +346,20 @@ const fragment_src: [:0]const u8 =
     \\uniform float u_rock_tex_enabled;
     \\out vec4 frag;
     \\mat2 rockRot(float a) { return mat2(cos(a), -sin(a), sin(a), cos(a)); }
-    \\vec3 rockTexture(vec3 world, vec3 n) {
+    \\vec3 rockTexture(vec3 world, vec3 n, vec3 view) {
     \\    vec3 an = abs(n);
     \\    vec2 p = an.y > max(an.x, an.z) ? world.xz : (an.x > an.z ? world.zy : world.xy);
-    \\    vec2 w = vec2(0.0);
-    \\    vec2 uv0 = rockRot(0.71) * (p * 1.10 + w);
-    \\    vec2 uv1 = rockRot(2.41) * (p * 1.83 - w);
-    \\    vec2 uv2 = rockRot(4.19) * (p * 3.07 + w);
+    \\    vec2 v2 = normalize(an.y > max(an.x, an.z) ? view.xz : (an.x > an.z ? view.zy : view.xy));
+    \\    vec2 uv0 = rockRot(0.71) * (p * 1.10);
+    \\    vec2 uv1 = rockRot(2.41) * (p * 1.83);
+    \\    vec2 uv2 = rockRot(4.19) * (p * 3.07);
+    \\    // Rock POM: alpha carries a height map; march the layer height along the projected view.
+    \\    vec2 stepv = -normalize(v2) * 0.045;
+    \\    for (int i = 1; i <= 5; ++i) {
+    \\        float layer = float(i) / 5.0;
+    \\        float h = texture(u_rock_tex0, uv0 + stepv * layer).a;
+    \\        if (h > layer) { uv0 += stepv * layer; break; }
+    \\    }
     \\    vec3 a = texture(u_rock_tex0, uv0).rgb;
     \\    vec3 b = texture(u_rock_tex1, uv1).rgb;
     \\    vec3 c = texture(u_rock_tex2, uv2).rgb;
@@ -405,7 +412,7 @@ const fragment_src: [:0]const u8 =
     \\    amb *= mix(0.58, 1.0, shadow);
     \\    vec3 albedo = v_col;
     \\    if (u_rock_tex_enabled > 0.5) {
-    \\        albedo = mix(albedo, rockTexture(v_world, n), 0.80);
+    \\        albedo = mix(albedo, rockTexture(v_world, n, v_world - u_eye), 0.80);
     \\    }
     \\    vec3 c = albedo * (amb * 2.0 + u_sun_colour * ndl * 0.85 * shadow) * 0.20;
     \\    c = clamp((c * (2.51 * c + 0.03)) / (c * (2.43 * c + 0.59) + 0.14), 0.0, 1.0);
@@ -686,8 +693,8 @@ pub const PropRenderer = struct {
         self.assets.add(.bush, try uploadMesh(alloc, &bush, self.bush_instances));
 
         stb.stbi_set_flip_vertically_on_load(0);
-        const rock_jpgs = [_][]const u8{ rock_rough_jpg, rock_granite_jpg, rock_stone_jpg };
-        for (rock_jpgs, 0..) |jpg, i| {
+        const rock_pngs = [_][]const u8{ rock_rough_png, rock_granite_png, rock_stone_png };
+        for (rock_pngs, 0..) |jpg, i| {
             var rw: c_int = 0;
             var rh: c_int = 0;
             var rch: c_int = 0;

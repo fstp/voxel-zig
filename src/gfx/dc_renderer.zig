@@ -18,9 +18,9 @@ const snow_patch_jpg = @embedFile("../assets/textures/snow_patch.jpg");
 const shore_dirt_jpg = @embedFile("../assets/textures/shore_dirt.jpg");
 const shore_sand_jpg = @embedFile("../assets/textures/shore_sand.jpg");
 const shore_mud_jpg = @embedFile("../assets/textures/shore_mud.jpg");
-const rock_rough_jpg = @embedFile("../assets/textures/rock_rough.jpg");
-const rock_granite_jpg = @embedFile("../assets/textures/rock_granite.jpg");
-const rock_stone_jpg = @embedFile("../assets/textures/rock_stone.jpg");
+const rock_rough_png = @embedFile("../assets/textures/rock_rough.png");
+const rock_granite_png = @embedFile("../assets/textures/rock_granite.png");
+const rock_stone_png = @embedFile("../assets/textures/rock_stone.png");
 
 const depth_vertex_src: [:0]const u8 =
     \\#version 330 core
@@ -193,12 +193,19 @@ const fragment_src: [:0]const u8 =
     \\    mixed = mix(mixed, mud, wet * 0.55);
     \\    return mixed * (0.78 + 0.22 * mott);
     \\}
-    \\vec3 rockTexture(vec2 p, float mott) {
+    \\vec3 rockTexture(vec2 p, float mott, vec2 vdir) {
     \\    vec2 warp = vec2(noised(vec3(p * 0.047, 5.1)).x,
     \\                     noised(vec3(p * 0.039, 2.9)).x) - 0.5;
     \\    vec2 uv0 = rot2(0.87) * (p * 0.13 + warp * 0.05);
     \\    vec2 uv1 = rot2(2.39) * (p * 0.23 - warp * 0.04);
     \\    vec2 uv2 = rot2(4.77) * (p * 0.37 + warp * 0.03);
+    \\    // Rock POM: alpha carries a height map; march the layer height along the projected view.
+    \\    vec2 stepv = -normalize(vdir) * 0.050;
+    \\    for (int i = 1; i <= 5; ++i) {
+    \\        float layer = float(i) / 5.0;
+    \\        float h = texture(u_rock_tex0, uv0 + stepv * layer).a;
+    \\        if (h > layer) { uv0 += stepv * layer; break; }
+    \\    }
     \\    vec3 rough = texture(u_rock_tex0, uv0).rgb;
     \\    vec3 granite = texture(u_rock_tex1, uv1).rgb;
     \\    vec3 stone = texture(u_rock_tex2, uv2).rgb;
@@ -370,7 +377,9 @@ const fragment_src: [:0]const u8 =
     \\        vec2 rock_uv = v_pos.xz;
     \\        if (an.y <= max(an.x, an.z)) rock_uv = an.x > an.z ? v_pos.zy : v_pos.xy;
     \\        float rock_mask = smoothstep(0.45, 0.55, v_mat) * (1.0 - snow) * (1.0 - mud);
-    \\        vec3 rock = rockTexture(rock_uv, mott);
+    \\        vec3 vd = normalize(v_pos - u_eye);
+    \\        vec2 rv = an.y > max(an.x, an.z) ? vd.xz : (an.x > an.z ? vd.zy : vd.xy);
+    \\        vec3 rock = rockTexture(rock_uv, mott, rv);
     \\        albedo = mix(albedo, rock, rock_mask * 0.82);
     \\    }
     \\    // Lighting is deliberately shy of 1.0: albedo arrives already close to mid grey, and
@@ -519,9 +528,9 @@ pub const DcRenderer = struct {
         }
         gl.BindTexture(gl.TEXTURE_2D, 0);
 
-        const rock_jpgs = [_][]const u8{ rock_rough_jpg, rock_granite_jpg, rock_stone_jpg };
+        const rock_pngs = [_][]const u8{ rock_rough_png, rock_granite_png, rock_stone_png };
         var rock_tex: [3]u32 = .{ 0, 0, 0 };
-        for (rock_jpgs, 0..) |jpg, i| {
+        for (rock_pngs, 0..) |jpg, i| {
             var rw: c_int = 0;
             var rh: c_int = 0;
             var rch: c_int = 0;
