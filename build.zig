@@ -35,38 +35,11 @@ pub fn build(b: *std.Build) void {
     engine.addIncludePath(b.path("src/vendor"));
     engine.addCSourceFile(.{ .file = b.path("src/vendor/stb_impl.c"), .flags = &.{} });
 
+    // ADR 0022: the executable is the dual-contouring world. The block app and its tools are gone.
     const exe = b.addExecutable(.{
         .name = "voxel-zig",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "voxel_zig", .module = engine },
-            },
-        }),
-    });
-    b.installArtifact(exe);
-
-    // ADR 0018 spike: headless dual-contouring benchmark over the real terrain.
-    const dc_bench = b.addExecutable(.{
-        .name = "dc-bench",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/tools/dc_bench.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "voxel_zig", .module = engine },
-            },
-        }),
-    });
-    b.installArtifact(dc_bench);
-    const dc_step = b.step("dc-bench", "Run the dual-contouring benchmark");
-
-    const dc_view = b.addExecutable(.{
-        .name = "dc-view",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/tools/dc_view.zig"),
+            .root_source_file = b.path("src/dc_main.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
@@ -76,12 +49,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    b.installArtifact(dc_view);
-    const view_step = b.step("dc-view", "Run the dual-contouring viewer");
-    const view_run = b.addRunArtifact(dc_view);
-    view_step.dependOn(&view_run.step);
-    const dc_run = b.addRunArtifact(dc_bench);
-    dc_step.dependOn(&dc_run.step);
+    b.installArtifact(exe);
 
     const run_step = b.step("run", "Run voxel-zig");
     const run_cmd = b.addRunArtifact(exe);
@@ -97,35 +65,4 @@ pub fn build(b: *std.Build) void {
     const exe_tests = b.addTest(.{ .root_module = exe.root_module });
     test_step.dependOn(&b.addRunArtifact(exe_tests).step);
 
-    // Mesher benchmark (ADR 0004). Numbers only count in a release build:
-    //   zig build bench -Doptimize=ReleaseFast
-    const bench_step = b.step("bench", "Run the mesher benchmark (use -Doptimize=ReleaseFast)");
-    const bench_exe = b.addExecutable(.{
-        .name = "mesher-bench",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/bench/mesher_bench.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "voxel_zig", .module = engine },
-            },
-        }),
-    });
-    const bench_run = b.addRunArtifact(bench_exe);
-    bench_step.dependOn(&bench_run.step);
-
-    // Save/load benchmark (1.14): 100 edited chunks, RLE packed.
-    const save_bench_step = b.step("bench-save", "Run the save/load benchmark (use -Doptimize=ReleaseFast)");
-    const save_bench_exe = b.addExecutable(.{
-        .name = "save-bench",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/bench/save_bench.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "voxel_zig", .module = engine },
-            },
-        }),
-    });
-    save_bench_step.dependOn(&b.addRunArtifact(save_bench_exe).step);
 }

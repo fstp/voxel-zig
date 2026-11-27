@@ -1,26 +1,14 @@
-//! Root of the `voxel_zig` module: the engine's public surface.
+//! Root of the `voxel_zig` module: the engine's public surface for the dual-contouring world.
 //!
 //! Modules by responsibility:
-//!   math/   vectors, matrices, frustum, AABB   (1.2, 1.3)
-//!   voxel/  block ids, coordinates, mesher     (1.4 - 1.6)
-//!   world/  chunk storage, terrain, save       (1.5, 1.8, 1.14)
-//!   gfx/    window, GL, debug draw             (1.1, 1.3, 1.4)
-//!   player/ controller and collision           (1.9, 1.10)
+//!   math/   vectors, matrices, frustum, AABB
+//!   voxel/  dual-contouring kernel
+//!   world/  noise, sun
+//!   gfx/    window, GL, shader, sky, HUD
+//!   player  (the DC player lives in the executable, see src/dc_main.zig)
 
-pub const version = "0.1.0";
+pub const version = "0.2.0";
 
-pub const App = @import("app.zig").App;
-pub const Config = @import("app.zig").Config;
-pub const Player = @import("player/player.zig").Player;
-pub const net = struct {
-    pub const Peer = @import("net/udp.zig").Peer;
-    pub const Message = @import("net/udp.zig").Message;
-};
-
-pub const physics = struct {
-    pub const Bodies = @import("physics/bodies.zig").Bodies;
-    pub const Body = @import("physics/bodies.zig").Body;
-};
 pub const Camera = @import("camera.zig").Camera;
 pub const Input = @import("input.zig").Input;
 
@@ -34,27 +22,12 @@ pub const math = struct {
 };
 
 pub const voxel = struct {
-    pub const BlockId = @import("voxel/block.zig").BlockId;
-    pub const coords = @import("voxel/coords.zig");
-    pub const BlockPos = coords.BlockPos;
-    pub const ChunkPos = coords.ChunkPos;
-    pub const mesher = @import("voxel/mesher.zig");
     pub const dc = @import("voxel/dc.zig");
-    pub const raycast = @import("voxel/raycast.zig");
 };
 
 pub const world = struct {
-    pub const World = @import("world/world.zig").World;
-    pub const Chunk = @import("world/chunk.zig").Chunk;
-    pub const ChunkState = @import("world/chunk.zig").ChunkState;
-    pub const ChunkSlab = @import("world/chunk_slab.zig").ChunkSlab;
-    pub const chunk_mesher = @import("world/chunk_mesher.zig");
-    pub const terrain = @import("world/terrain.zig");
     pub const noise = @import("world/noise.zig");
-    pub const save = @import("world/save.zig");
     pub const sun = @import("world/sun.zig");
-    pub const brush = @import("world/brush.zig");
-    pub const undo = @import("world/undo.zig");
 };
 
 /// The GL ProcTable owner: any code outside the engine that draws must call `init()`
@@ -63,11 +36,7 @@ pub const gl = @import("gfx/gl.zig");
 
 pub const gfx = struct {
     pub const Window = @import("gfx/window.zig").Window;
-    pub const DebugDraw = @import("gfx/debug_draw.zig").DebugDraw;
     pub const Shader = @import("gfx/shader.zig").Shader;
-    pub const TextureArray = @import("gfx/texture.zig").TextureArray;
-    pub const BlockRenderer = @import("gfx/block_renderer.zig").BlockRenderer;
-    pub const ChunkRenderer = @import("gfx/chunk_renderer.zig").ChunkRenderer;
     pub const SkyRenderer = @import("gfx/sky_renderer.zig").SkyRenderer;
     pub const Hud = @import("gfx/hud.zig").Hud;
 };
@@ -79,23 +48,7 @@ test {
     _ = @import("math/aabb.zig");
     _ = @import("math/frustum.zig");
     _ = @import("camera.zig");
-    _ = @import("voxel/block.zig");
-    _ = @import("voxel/coords.zig");
-    _ = @import("world/chunk.zig");
-    _ = @import("world/chunk_slab.zig");
-    _ = @import("world/world.zig");
-    _ = @import("voxel/mesher.zig");
     _ = @import("voxel/dc.zig");
-    _ = @import("world/chunk_mesher.zig");
-    _ = @import("world/terrain.zig");
     _ = @import("world/noise.zig");
-    _ = @import("world/save.zig");
     _ = @import("world/sun.zig");
-    _ = @import("world/brush.zig");
-    _ = @import("world/undo.zig");
-    _ = @import("voxel/raycast.zig");
-    _ = @import("player/player.zig");
-    _ = @import("physics/bodies.zig");
-    _ = @import("net/udp.zig");
-    _ = @import("app.zig");
 }

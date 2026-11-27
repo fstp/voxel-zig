@@ -29,7 +29,7 @@ const SEED: u32 = 1337;
 
 /// Bumped whenever the field or the mesher changes. Printed at startup so a stale binary cannot be
 /// mistaken for a change that "made no difference" - which is what the last commit could not rule out.
-const BUILD_TAG = "atmosphere-2";
+const BUILD_TAG = "dc-main-1";
 // 8x8 chunks (64 chunks, 256 m^2), re-meshed as the camera crosses a chunk border:: at PATCH=4 the boundary was visible in frame and accounted for
 // 99.6% of the background pixels counted as "holes". A bigger patch pushes the world edge out of
 // shot, which is the honest way to separate a mesher defect from the edge of the world.
@@ -215,6 +215,7 @@ const HudStats = struct {
     flying: bool,
     on_ground: bool,
     fly_speed: f32,
+    edits: usize,
 };
 
 /// The engine's HUD (baked atlas, panel behind the text), at a small scale for a 4K window.
@@ -245,8 +246,8 @@ fn drawHud(hud: *vz.gfx.Hud, width: i32, height: i32, s: HudStats) void {
     y += hud.lineHeight();
 
     hud.setColour(0.7, 1.0, 0.7);
-    if (std.fmt.bufPrint(&buffer, "{s}  {s}  FLY SPEED {d:.0}", .{
-        if (s.flying) "FLY" else "WALK", if (s.on_ground) "GROUND" else "AIR", s.fly_speed,
+    if (std.fmt.bufPrint(&buffer, "{s}  {s}  FLY SPEED {d:.0}  EDITS {d}", .{
+        if (s.flying) "FLY" else "WALK", if (s.on_ground) "GROUND" else "AIR", s.fly_speed, s.edits,
     })) |text| {
         hud.text(10, y, text);
     } else |_| {}
@@ -453,11 +454,117 @@ const PatchStats = struct {
     min_area: f32 = 1e9,
 };
 
+/// A spherical brush edit on top of the base height field (ADR 0022). `add` unions the sphere
+/// with the terrain, giving a bump; a carve subtracts it, giving a cave or crater. The mesher
+/// evaluates the list per field sample, so the edit is part of the world, not a decal.
+const Edit = struct { x: f32, y: f32, z: f32, r: f32, add: bool };
+
+fn editField(edits: []const Edit, x: f32, y: f32, z: f32, base: f32) f32 {
+    var f = base;
+    for (edits) |e| {
+        const dx = x - e.x;
+        const dy = y - e.y;
+        const dz = z - e.z;
+        const s = @sqrt(dx * dx + dy * dy + dz * dz) - e.r;
+        f = if (e.add) @min(f, s) else @max(f, -s);
+    }
+    return f;
+}
+
+fn fieldAt(edits: []const Edit, p: Vec3) f32 {
+    return editField(edits, p.x, p.y, p.z, p.y - heightAt(p.x, p.z));
+}
+
+/// Sphere-trace the field from the eye. The SDF is 1-Lipschitz for the base height field and the
+/// sphere edits, so a march step of the current value cannot skip the surface.
+fn raycastField(edits: []const Edit, origin: Vec3, dir: Vec3, max_dist: f32) ?Vec3 {
+    var t: f32 = 0;
+    while (t < max_dist) {
+        const p = origin.add(dir.scale(t));
+        const f = fieldAt(edits, p);
+        if (f < 0.03) return p;
+        t += @max(f, 0.05);
+    }
+    return null;
+}
+
+const SAVE_HEADER = "voxel-zig dc 1";
+
+fn saveWorld(io: std.Io, path: []const u8, sun_time: f32, player: DcPlayer, edits: []const Edit) !void {
+    var file = try std.Io.Dir.cwd().createFile(io, path, .{});
+    defer file.close(io);
+    var buffer: [4096]u8 = undefined;
+    var writer = file.writer(io, &buffer);
+    const w = &writer.interface;
+    try w.print("{s}\n", .{SAVE_HEADER});
+    try w.print("sun {d:.4}\n", .{sun_time});
+    try w.print("player {d:.3} {d:.3} {d:.3} {d:.4} {d:.4} {d}\n", .{
+        player.position.x, player.position.y, player.position.z, player.yaw, player.pitch, @intFromBool(player.flying),
+    });
+    for (edits) |e| {
+        try w.print("edit {d:.3} {d:.3} {d:.3} {d:.3} {d}\n", .{ e.x, e.y, e.z, e.r, @intFromBool(e.add) });
+    }
+    try w.flush();
+}
+
+const LoadedWorld = struct {
+    sun_time: ?f32 = null,
+    player: ?DcPlayer = null,
+    edits: std.ArrayList(Edit) = .empty,
+
+    fn deinit(self: *LoadedWorld, alloc: std.mem.Allocator) void {
+        self.edits.deinit(alloc);
+    }
+};
+
+fn loadWorld(alloc: std.mem.Allocator, io: std.Io, path: []const u8) !LoadedWorld {
+    var out = LoadedWorld{};
+    errdefer out.deinit(alloc);
+    const data = std.Io.Dir.cwd().readFileAlloc(io, path, alloc, std.Io.Limit.limited(256 * 1024)) catch |err| switch (err) {
+        error.FileNotFound => return out,
+        else => return err,
+    };
+    defer alloc.free(data);
+
+    var lines = std.mem.splitScalar(u8, data, '\n');
+    const header = lines.next() orelse return error.BadSave;
+    if (!std.mem.eql(u8, std.mem.trim(u8, header, " \r"), SAVE_HEADER)) return error.BadSave;
+
+    while (lines.next()) |raw_line| {
+        const line = std.mem.trim(u8, raw_line, " \r");
+        if (line.len == 0) continue;
+        var it = std.mem.tokenizeScalar(u8, line, ' ');
+        const tag = it.next() orelse continue;
+        if (std.mem.eql(u8, tag, "sun")) {
+            out.sun_time = std.fmt.parseFloat(f32, it.next() orelse continue) catch null;
+        } else if (std.mem.eql(u8, tag, "player")) {
+            var p = DcPlayer{ .position = Vec3.zero, .yaw = 0, .pitch = 0 };
+            p.position.x = std.fmt.parseFloat(f32, it.next() orelse continue) catch continue;
+            p.position.y = std.fmt.parseFloat(f32, it.next() orelse continue) catch continue;
+            p.position.z = std.fmt.parseFloat(f32, it.next() orelse continue) catch continue;
+            p.yaw = std.fmt.parseFloat(f32, it.next() orelse continue) catch continue;
+            p.pitch = std.fmt.parseFloat(f32, it.next() orelse continue) catch continue;
+            p.flying = (std.fmt.parseInt(u8, it.next() orelse "0", 10) catch 0) != 0;
+            out.player = p;
+        } else if (std.mem.eql(u8, tag, "edit")) {
+            var e = Edit{ .x = 0, .y = 0, .z = 0, .r = 3.0, .add = true };
+            e.x = std.fmt.parseFloat(f32, it.next() orelse continue) catch continue;
+            e.y = std.fmt.parseFloat(f32, it.next() orelse continue) catch continue;
+            e.z = std.fmt.parseFloat(f32, it.next() orelse continue) catch continue;
+            e.r = std.fmt.parseFloat(f32, it.next() orelse continue) catch continue;
+            e.add = (std.fmt.parseInt(u8, it.next() orelse "1", 10) catch 1) != 0;
+            try out.edits.append(alloc, e);
+        }
+    }
+    return out;
+}
+
 /// Meshes ONE chunk of the patch into the given buffers. Split out so a rebuild can be spread across
 /// frames: 64 chunks x ~0.6 ms is a 40 ms hitch if done at once, and a fraction of a millisecond per
 /// frame if done a few at a time - which removes the need for a worker thread entirely.
 fn meshChunkInto(
     alloc: std.mem.Allocator,
+    edits: []const Edit,
     patch_origin: i32,
     patch_origin_z: i32,
     cx: i32,
@@ -492,6 +599,12 @@ fn meshChunkInto(
     // evaluated once per (x, z) and reused across all 35 y samples. Doing it per sample cost 140 ms
     // per patch against 5.7 ms this way.
     var heights: [side * side]f32 = undefined;
+    var xs: [side]f32 = undefined;
+    var zs: [side]f32 = undefined;
+    for (0..side) |i| {
+        xs[i] = @floatFromInt((patch_origin + cx) * @as(i32, @intCast(CHUNK)) + @as(i32, @intCast(i)) - @as(i32, @intCast(skirt)));
+        zs[i] = @floatFromInt((patch_origin_z + cz) * @as(i32, @intCast(CHUNK)) + @as(i32, @intCast(i)) - @as(i32, @intCast(skirt)));
+    }
     var ck: usize = 0;
     while (ck < side) : (ck += 1) {
         var ci: usize = 0;
@@ -514,7 +627,7 @@ fn meshChunkInto(
             var i: usize = 0;
             while (i < side) : (i += 1) {
                 const y = y0 + (@as(f32, @floatFromInt(j)) - @as(f32, @floatFromInt(skirt))) * CELL;
-                vals[i + side * (j + side_y * k)] = y - heights[i + side * k];
+                vals[i + side * (j + side_y * k)] = editField(edits, xs[i], y, zs[k], y - heights[i + side * k]);
             }
         }
     }
@@ -556,6 +669,7 @@ fn meshChunkInto(
 /// is exactly "call this again with a different origin".
 fn meshPatch(
     alloc: std.mem.Allocator,
+    edits: []const Edit,
     patch_origin: i32,
     patch_origin_z: i32,
     verts: *std.ArrayList(Coloured),
@@ -567,7 +681,7 @@ fn meshPatch(
     while (cz < PATCH) : (cz += 1) {
         var cx: i32 = 0;
         while (cx < PATCH) : (cx += 1) {
-            const st = try meshChunkInto(alloc, patch_origin, patch_origin_z, cx, cz, verts, idx);
+            const st = try meshChunkInto(alloc, edits, patch_origin, patch_origin_z, cx, cz, verts, idx);
             out.quads += st.quads;
             out.skipped_missing += st.skipped_missing;
             out.skipped_bounds += st.skipped_bounds;
@@ -901,6 +1015,18 @@ pub fn main(init: std.process.Init) !void {
     defer hud.deinit();
     var show_hud = true;
 
+    // ADR 0022: the save is a small line-based text file holding the player, the sun time and the
+    // sphere edits. F5 writes it and quitting writes it; a missing file is a fresh world.
+    const save_path = init.environ_map.get("VOXEL_DC_SAVE") orelse "dc_world.sav";
+    var loaded = loadWorld(alloc, init.io, save_path) catch |err| blk: {
+        std.debug.print("save load failed ({s}); starting fresh\n", .{@errorName(err)});
+        break :blk LoadedWorld{};
+    };
+    defer loaded.deinit(alloc);
+    var edits = loaded.edits;
+    loaded.edits = .empty;
+    defer edits.deinit(alloc);
+
     // The engine's own sky and volumetric clouds (ADR 0010), ported rather than reimplemented:
     // the point of the spike is to judge the DC surface, and it should be lit by the same sky the
     // block world uses so the two are comparable by eye.
@@ -917,7 +1043,7 @@ pub fn main(init: std.process.Init) !void {
     var sun = sun_mod.Sun.init();
     // ADR 0009: noon sits at t = 0.30 of the 300 s cycle. VOXEL_DC_SUN pins another time for the
     // dawn/noon/dusk acceptance shots.
-    var sun_time: f32 = 0.30;
+    var sun_time: f32 = loaded.sun_time orelse 0.30;
     if (init.environ_map.get("VOXEL_DC_SUN")) |raw| sun_time = std.fmt.parseFloat(f32, raw) catch sun_time;
     sun.setTime(sun_time);
     std.debug.print("sun time {d:.3} elevation {d:.1} deg\n", .{ sun_time, sun.elevation() });
@@ -945,9 +1071,11 @@ pub fn main(init: std.process.Init) !void {
         .pitch = -0.18,
         .flying = true,
     };
+    if (loaded.player) |p| player = p;
     var camera = vz.Camera{ .fov_y_deg = 70, .near = 0.1, .far = 1000 };
-    var patch_origin: i32 = @divFloor(@as(i32, @intFromFloat(spawn_x)), @as(i32, @intCast(CHUNK))) - @divFloor(PATCH, 2);
-    var patch_origin_z: i32 = @divFloor(@as(i32, @intFromFloat(spawn_z)), @as(i32, @intCast(CHUNK))) - @divFloor(PATCH, 2);
+    var patch_origin: i32 = @divFloor(@as(i32, @intFromFloat(player.position.x)), @as(i32, @intCast(CHUNK))) - @divFloor(PATCH, 2);
+    var patch_origin_z: i32 = @divFloor(@as(i32, @intFromFloat(player.position.z)), @as(i32, @intCast(CHUNK))) - @divFloor(PATCH, 2);
+    std.debug.print("world: {d} edits from {s}\n", .{ edits.items.len, save_path });
     // Double buffering: the new patch is built a few chunks per frame into `next_*` while the old
     // one keeps rendering. Swapping only when it is complete means no frame ever sees a half-built
     // patch, and no frame pays the full 40-50 ms.
@@ -960,7 +1088,7 @@ pub fn main(init: std.process.Init) !void {
     var pending_z: i32 = 0;
     var pending_cursor: i32 = 0;
     var rebuilds: usize = 0;
-    const first = try meshPatch(alloc, patch_origin, patch_origin_z, &all_verts, &all_idx);
+    const first = try meshPatch(alloc, edits.items, patch_origin, patch_origin_z, &all_verts, &all_idx);
     const all_verts_s = all_verts.items;
     const all_idx_s = all_idx.items;
     std.debug.print("DC viewer: {d} verts, {d} quads over {d} skirted chunks\n", .{ all_verts_s.len, first.quads, PATCH * PATCH });
@@ -981,7 +1109,7 @@ pub fn main(init: std.process.Init) !void {
     var probe_idx: std.ArrayList(u32) = .empty;
     defer probe_idx.deinit(alloc);
     const t_rebuild = nowNs();
-    const probe = try meshPatch(alloc, patch_origin, patch_origin_z, &probe_verts, &probe_idx);
+    const probe = try meshPatch(alloc, edits.items, patch_origin, patch_origin_z, &probe_verts, &probe_idx);
     const rebuild_ms = @as(f64, @floatFromInt(nowNs() - t_rebuild)) / 1e6;
     const identical = probe_verts.items.len == all_verts_s.len and probe_idx.items.len == all_idx_s.len and probe.quads == first.quads;
     std.debug.print("rebuild: {d} quads in {d:.1} ms, identical to the first build: {}\n", .{ probe.quads, rebuild_ms, identical });
@@ -1019,7 +1147,18 @@ pub fn main(init: std.process.Init) !void {
         frame_dt = @min(frame_dt, 0.1);
 
         input.pump(&window);
-        if (input.quit) break :frame;
+        if (input.quit) {
+            saveWorld(init.io, save_path, sun_time, player, edits.items) catch |err| {
+                std.debug.print("save on quit failed: {s}\n", .{@errorName(err)});
+            };
+            break :frame;
+        }
+        if (input.save_toggle) {
+            saveWorld(init.io, save_path, sun_time, player, edits.items) catch |err| {
+                std.debug.print("save failed: {s}\n", .{@errorName(err)});
+            };
+            std.debug.print("saved {s} ({d} edits)\n", .{ save_path, edits.items.len });
+        }
         if (input.hud_toggle) show_hud = !show_hud;
         if (input.fly_toggle) player.flying = !player.flying;
         if (input.wheel != 0) {
@@ -1033,6 +1172,24 @@ pub fn main(init: std.process.Init) !void {
             -vz.Camera.MAX_PITCH,
             vz.Camera.MAX_PITCH,
         );
+
+        // Dig (left) and place (right): sphere-trace the field, append a sphere edit and rebuild
+        // the current patch. The rebuild is spread over frames like a streaming swap.
+        if (input.primary_click or input.secondary_click) {
+            const add = input.secondary_click;
+            if (raycastField(edits.items, player.eyePosition(), player.forward(), 12.0)) |hit| {
+                try edits.append(alloc, .{ .x = hit.x, .y = hit.y, .z = hit.z, .r = 3.0, .add = add });
+                std.debug.print("edit {s} at ({d:.1},{d:.1},{d:.1}), {d} total\n", .{
+                    if (add) "add" else "carve", hit.x, hit.y, hit.z, edits.items.len,
+                });
+                pending = true;
+                pending_x = patch_origin;
+                pending_z = patch_origin_z;
+                pending_cursor = 0;
+                next_verts.clearRetainingCapacity();
+                next_idx.clearRetainingCapacity();
+            }
+        }
 
         var wish = Vec3.zero;
         {
@@ -1089,7 +1246,7 @@ pub fn main(init: std.process.Init) !void {
             while (done < 4 and pending_cursor < PATCH * PATCH) : (done += 1) {
                 const cx = @divTrunc(pending_cursor, PATCH);
                 const cz = @mod(pending_cursor, PATCH);
-                _ = try meshChunkInto(alloc, pending_x, pending_z, cx, cz, &next_verts, &next_idx);
+                _ = try meshChunkInto(alloc, edits.items, pending_x, pending_z, cx, cz, &next_verts, &next_idx);
                 pending_cursor += 1;
             }
             if (pending_cursor >= PATCH * PATCH) {
@@ -1172,6 +1329,7 @@ pub fn main(init: std.process.Init) !void {
                 .flying = player.flying,
                 .on_ground = player.on_ground,
                 .fly_speed = player.fly_speed,
+                .edits = edits.items.len,
             });
         }
         window.swap();

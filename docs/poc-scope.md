@@ -1,5 +1,9 @@
 # PoC scope contract
 
+> **Superseded for the world by ADR 0022 (2026-11-27).** The block world is gone; `voxel-zig` now
+> runs the dual-contouring world with field edits. The streaming, lighting and persistence
+> requirements below still describe the project's intent; the block-specific parts do not.
+
 Written before any game code exists, so that the project cannot sprawl. Every
 implementation task must trace back to a requirement below; anything that does not
 belongs to phase 2.
