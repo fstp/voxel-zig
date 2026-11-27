@@ -44,6 +44,7 @@ const HudStats = struct {
     yaw: f32,
     pitch: f32,
     flying: bool,
+    swimming: bool,
     on_ground: bool,
     fly_speed: f32,
     edits: usize,
@@ -77,8 +78,10 @@ fn drawHud(hud: *vz.gfx.Hud, width: i32, height: i32, s: HudStats) void {
     y += hud.lineHeight();
 
     hud.setColour(0.7, 1.0, 0.7);
+    const mode: []const u8 = if (s.flying) "FLY" else if (s.swimming) "SWIM" else "WALK";
+    const where: []const u8 = if (s.flying) "AIR" else if (s.swimming) "WATER" else if (s.on_ground) "GROUND" else "AIR";
     if (std.fmt.bufPrint(&buffer, "{s}  {s}  FLY SPEED {d:.0}  EDITS {d}", .{
-        if (s.flying) "FLY" else "WALK", if (s.on_ground) "GROUND" else "AIR", s.fly_speed, s.edits,
+        mode, where, s.fly_speed, s.edits,
     })) |text| {
         hud.text(10, y, text);
     } else |_| {}
@@ -262,6 +265,15 @@ pub fn main(init: std.process.Init) !void {
 
     var water = try WaterRenderer.init();
     defer water.deinit();
+    {
+        const t0 = nowNs();
+        water.ensurePatch(
+            @floatFromInt(patch_origin * @as(i32, @intCast(CHUNK))),
+            @floatFromInt(patch_origin_z * @as(i32, @intCast(CHUNK))),
+            @floatFromInt(PATCH * @as(i32, @intCast(CHUNK))),
+        );
+        std.debug.print("water: patch grid built in {d:.1} ms\n", .{@as(f64, @floatFromInt(nowNs() - t0)) / 1e6});
+    }
 
     // ADR 0008: the engine draws into an sRGB framebuffer and every shader writes LINEAR, so the
     // hardware does the encode. The spike omitted this line, which is why its terrain looked washed
@@ -278,6 +290,7 @@ pub fn main(init: std.process.Init) !void {
     var worst_ns: i64 = 0;
     var last_frame_ns = nowNs();
     var accumulator: f64 = 0;
+    var was_swimming = false;
     const fixed_dt: f64 = 1.0 / 60.0;
     var frame_ms: f64 = 0;
     var fps_now: f64 = 0;
@@ -356,6 +369,15 @@ pub fn main(init: std.process.Init) !void {
             accumulator -= fixed_dt;
         }
         if (steps == 5) accumulator = @mod(accumulator, fixed_dt);
+        if (player.swimming != was_swimming) {
+            std.debug.print("swim: {s} at ({d:.1},{d:.1},{d:.1})\n", .{
+                if (player.swimming) "enter" else "exit",
+                player.position.x,
+                player.position.y,
+                player.position.z,
+            });
+            was_swimming = player.swimming;
+        }
         input.endFrame();
 
         window.syncSize();
@@ -398,6 +420,15 @@ pub fn main(init: std.process.Init) !void {
                 renderer.upload(all_verts.items, all_idx.items);
                 patch_origin = pending_x;
                 patch_origin_z = pending_z;
+                {
+                    const wt = nowNs();
+                    water.ensurePatch(
+                        @floatFromInt(patch_origin * @as(i32, @intCast(CHUNK))),
+                        @floatFromInt(patch_origin_z * @as(i32, @intCast(CHUNK))),
+                        @floatFromInt(PATCH * @as(i32, @intCast(CHUNK))),
+                    );
+                    std.debug.print("water: patch grid rebuilt in {d:.1} ms\n", .{@as(f64, @floatFromInt(nowNs() - wt)) / 1e6});
+                }
                 pending = false;
                 rebuilds += 1;
                 std.debug.print("stream: patch ({d},{d}) ready, {d} verts, {d} rebuilds, {d:.2} ms this slice\n", .{
@@ -459,7 +490,6 @@ pub fn main(init: std.process.Init) !void {
             @floatFromInt(patch_origin * @as(i32, @intCast(CHUNK))),
             @floatFromInt(patch_origin_z * @as(i32, @intCast(CHUNK))),
             @floatFromInt(PATCH * @as(i32, @intCast(CHUNK))),
-            dcw.SEA_LEVEL,
         );
 
         if (show_hud) {
@@ -479,6 +509,7 @@ pub fn main(init: std.process.Init) !void {
                 .yaw = player.yaw,
                 .pitch = player.pitch,
                 .flying = player.flying,
+                .swimming = player.swimming,
                 .on_ground = player.on_ground,
                 .fly_speed = player.fly_speed,
                 .edits = edits.items.len,
@@ -503,8 +534,8 @@ pub fn main(init: std.process.Init) !void {
                 player.position.z,
                 player.yaw,
                 player.pitch,
-                if (player.flying) "FLY" else "WALK",
-                if (player.on_ground) "GROUND" else "AIR",
+                if (player.flying) "FLY" else if (player.swimming) "SWIM" else "WALK",
+                if (player.flying) "AIR" else if (player.swimming) "WATER" else if (player.on_ground) "GROUND" else "AIR",
                 player.fly_speed,
             });
             frames = 0;

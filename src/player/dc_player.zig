@@ -3,7 +3,7 @@
 
 const std = @import("std");
 const Vec3 = @import("../math/vec.zig").Vec3;
-const heightAt = @import("../world/dc_world.zig").heightAt;
+const dcw = @import("../world/dc_world.zig");
 
 pub const DcPlayer = struct {
     position: Vec3,
@@ -11,6 +11,7 @@ pub const DcPlayer = struct {
     yaw: f32,
     pitch: f32,
     flying: bool = false,
+    swimming: bool = false,
     on_ground: bool = false,
     /// Fly-mode speed in m/s, changed by the scroll wheel like `vz.Camera.adjustSpeed`.
     fly_speed: f32 = FLY_SPEED,
@@ -23,6 +24,11 @@ pub const DcPlayer = struct {
     const SPRINT_SPEED: f32 = 7.0;
     const FLY_SPEED: f32 = 24.0;
     const STEP_HEIGHT: f32 = 1.05;
+    const SWIM_SPEED: f32 = 3.0;
+    const SWIM_SPRINT: f32 = 4.2;
+    const SWIM_VERTICAL: f32 = 1.5;
+    const FLOAT_DEPTH: f32 = 0.35;
+    const ENTER_DEPTH: f32 = 0.6;
     const RADIUS: f32 = 0.3;
     const MAX_SUBSTEP: f32 = 0.25;
 
@@ -36,10 +42,10 @@ pub const DcPlayer = struct {
     }
 
     pub fn groundAt(x: f32, z: f32) f32 {
-        var h = heightAt(x - RADIUS, z - RADIUS);
-        h = @max(h, heightAt(x + RADIUS, z - RADIUS));
-        h = @max(h, heightAt(x - RADIUS, z + RADIUS));
-        h = @max(h, heightAt(x + RADIUS, z + RADIUS));
+        var h = dcw.heightAt(x - RADIUS, z - RADIUS);
+        h = @max(h, dcw.heightAt(x + RADIUS, z - RADIUS));
+        h = @max(h, dcw.heightAt(x - RADIUS, z + RADIUS));
+        h = @max(h, dcw.heightAt(x + RADIUS, z + RADIUS));
         return h;
     }
 
@@ -81,6 +87,39 @@ pub const DcPlayer = struct {
             self.velocity = Vec3.init(wish.x * speed, up * speed, wish.z * speed);
             self.position = self.position.add(self.velocity.scale(dt));
             self.on_ground = false;
+            self.swimming = false;
+            return;
+        }
+
+        const sea = dcw.SEA_LEVEL;
+        const ground_here = groundAt(self.position.x, self.position.z);
+        if (sea - ground_here > ENTER_DEPTH and self.position.y <= sea + 0.05) self.swimming = true;
+        if (sea - ground_here <= ENTER_DEPTH * 0.5) self.swimming = false;
+
+        if (self.swimming) {
+            const swim_speed = if (sprint) SWIM_SPRINT else SWIM_SPEED;
+            self.velocity = Vec3.init(wish.x * swim_speed, 0, wish.z * swim_speed);
+            self.moveAxis(.x, self.velocity.x * dt);
+            self.moveAxis(.z, self.velocity.z * dt);
+
+            if (up != 0) {
+                self.position.y += up * SWIM_VERTICAL * dt;
+            } else {
+                // Buoyancy: ease back to the float line with no input.
+                const target = sea - FLOAT_DEPTH;
+                self.position.y += (target - self.position.y) * @min(1.0, 4.0 * dt);
+            }
+
+            const ground = groundAt(self.position.x, self.position.z);
+            if (ground < sea) {
+                self.position.y = std.math.clamp(self.position.y, ground + 0.1, sea + 0.4);
+                self.on_ground = false;
+            } else {
+                // A shore within step height: stand up and leave the water.
+                self.position.y = ground;
+                self.swimming = false;
+                self.on_ground = true;
+            }
             return;
         }
 
