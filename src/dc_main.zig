@@ -340,9 +340,10 @@ pub fn main(init: std.process.Init) !void {
         @floatFromInt(patch_origin_z * @as(i32, @intCast(CHUNK))),
         @floatFromInt(PATCH * @as(i32, @intCast(CHUNK))),
     );
-    std.debug.print("scatter: {d} blades, {d} trees, {d} rocks, {d} snow, {d} shore in {d:.1} ms\n", .{
+    std.debug.print("scatter: {d} blades, {d} trees, {d} bushes, {d} rocks, {d} snow, {d} shore in {d:.1} ms\n", .{
         scatter.blades.items.len,
         scatter.trees.items.len,
+        scatter.bushes.items.len,
         scatter.rocks.items.len,
         scatter.snow.items.len,
         scatter.shore.items.len,
@@ -355,6 +356,7 @@ pub fn main(init: std.process.Init) !void {
     var props = try PropRenderer.init(alloc);
     defer props.deinit(alloc);
     props.uploadRocks(scatter.rocks.items);
+    props.uploadBushes(scatter.bushes.items);
     props.uploadSnow(scatter.snow.items);
     props.uploadShore(scatter.shore.items);
     if (init.environ_map.get("VOXEL_TREE_AGG")) |raw| {
@@ -637,6 +639,7 @@ pub fn main(init: std.process.Init) !void {
                     );
                     grass.upload(scatter.blades.items);
                     props.uploadRocks(scatter.rocks.items);
+                    props.uploadBushes(scatter.bushes.items);
                     props.uploadSnow(scatter.snow.items);
                     props.uploadShore(scatter.shore.items);
                     try props.uploadTrees(
@@ -646,9 +649,10 @@ pub fn main(init: std.process.Init) !void {
                         @floatFromInt(patch_origin_z * @as(i32, @intCast(CHUNK))),
                         @floatFromInt(PATCH * @as(i32, @intCast(CHUNK))),
                     );
-                    std.debug.print("scatter: {d} blades, {d} trees, {d} rocks, {d} snow, {d} shore in {d:.1} ms\n", .{
+                    std.debug.print("scatter: {d} blades, {d} trees, {d} bushes, {d} rocks, {d} snow, {d} shore in {d:.1} ms\n", .{
                         scatter.blades.items.len,
                         scatter.trees.items.len,
+                        scatter.bushes.items.len,
                         scatter.rocks.items.len,
                         scatter.snow.items.len,
                         scatter.shore.items.len,
@@ -687,6 +691,7 @@ pub fn main(init: std.process.Init) !void {
                 renderer.drawDepth(shadow.vp[cascade], all_idx.items.len);
                 props.drawTreesDepth(shadow.vp[cascade], water_clock, scatter.trees.items, camera.position);
                 props.drawRocksDepth(shadow.vp[cascade], water_clock, camera.position);
+                props.drawBushesDepth(shadow.vp[cascade], water_clock, camera.position);
                 props.drawSnowDepth(shadow.vp[cascade], water_clock, camera.position);
                 props.drawShoreDepth(shadow.vp[cascade], water_clock, camera.position);
                 shadow.end();
@@ -739,6 +744,7 @@ pub fn main(init: std.process.Init) !void {
             tree_stats_logged = true;
         }
         props.drawRocks(vp, camera.position, lighting.sun_dir, lighting.sun_colour, lighting.ambient_sky, lighting.ambient_ground, fog_col, fog_sun, fog_density, fog_height, fog_base, water_clock, &shadow);
+        props.drawBushes(vp, camera.position, lighting.sun_dir, lighting.sun_colour, lighting.ambient_sky, lighting.ambient_ground, fog_col, fog_sun, fog_density, fog_height, fog_base, water_clock, &shadow);
         props.drawSnow(vp, camera.position, lighting.sun_dir, lighting.sun_colour, lighting.ambient_sky, lighting.ambient_ground, fog_col, fog_sun, fog_density, fog_height, fog_base, water_clock, &shadow);
         props.drawShore(vp, camera.position, lighting.sun_dir, lighting.sun_colour, lighting.ambient_sky, lighting.ambient_ground, fog_col, fog_sun, fog_density, fog_height, fog_base, water_clock, &shadow);
 

@@ -27,6 +27,7 @@ pub const Prop = extern struct {
 pub const Scatter = struct {
     blades: std.ArrayList(Blade) = .empty,
     trees: std.ArrayList(Prop) = .empty,
+    bushes: std.ArrayList(Prop) = .empty,
     rocks: std.ArrayList(Prop) = .empty,
     snow: std.ArrayList(Prop) = .empty,
     shore: std.ArrayList(Prop) = .empty,
@@ -34,6 +35,7 @@ pub const Scatter = struct {
     pub fn deinit(self: *Scatter, alloc: std.mem.Allocator) void {
         self.blades.deinit(alloc);
         self.trees.deinit(alloc);
+        self.bushes.deinit(alloc);
         self.rocks.deinit(alloc);
         self.snow.deinit(alloc);
         self.shore.deinit(alloc);
@@ -152,8 +154,9 @@ pub fn build(
                 const dz = z - center_z;
                 const r2 = dx * dx + dz * dz;
                 if (r2 > radius * radius) continue;
-                // Sparse base cover; the clump layer below supplies the dense patches.
-                if (rand01(ix, iz, 0x6A55) > 0.06) continue;
+                // Sparse base cover; the clump layer below supplies the dense patches. A little
+                // more base cover keeps the meadow from showing bald ground between tufts.
+                if (rand01(ix, iz, 0x6A55) > 0.12) continue;
 
                 const jx = (rand01(ix, iz, 0x51ED) - 0.5) * step * 0.9;
                 const jz = (rand01(ix, iz, 0x9E37) - 0.5) * step * 0.9;
@@ -188,7 +191,7 @@ pub fn build(
     // world cell, so the patches stay put when the streaming patch moves.
     {
         const radius: f32 = 95.0;
-        const clump_step: f32 = 2.6;
+        const clump_step: f32 = 1.3;
         const ix0: i32 = @intFromFloat(@floor((center_x - radius) / clump_step));
         const ix1: i32 = @intFromFloat(@ceil((center_x + radius) / clump_step));
         const iz0: i32 = @intFromFloat(@floor((center_z - radius) / clump_step));
@@ -207,7 +210,9 @@ pub fn build(
                 // patches do not look like stamped circles.
                 const broad = grid.density(xc, zc) * 0.65 + noise.fbm2(9301, xc * 0.22, zc * 0.22, 2, 2.0, 0.5) * 0.35;
                 const t = std.math.clamp((broad + 0.30) / 0.60, 0, 1);
-                const clump_prob = 0.22 + 0.34 * t;
+                // Cover most cells; the density field still makes soft patches, but the meadow
+                // should read as continuous grass rather than isolated tufts.
+                const clump_prob = 0.55 + 0.40 * t;
                 if (rand01(ix, iz, 0xC101) > clump_prob) continue;
 
                 const cx = xc + (rand01(ix, iz, 0xC102) - 0.5) * clump_step * 0.55;
@@ -220,7 +225,9 @@ pub fn build(
                 if (cny < 0.70) continue;
                 if (grid.density(cx, cz) < -0.45) continue;
                 const clump_radius = 1.00 + 1.10 * rand01(ix, iz, 0xC104);
-                const count: usize = 100 + @as(usize, @intFromFloat(rand01(ix, iz, 0xC105) * 160.0));
+                // More tufts, fewer blades per tuft: spreads the 10x budget across the meadow so
+                // there are no large bald patches between clumps.
+                const count: usize = 143 + @as(usize, @intFromFloat(rand01(ix, iz, 0xC105) * 230.0));
 
                 var k: usize = 0;
                 while (k < count) : (k += 1) {
@@ -232,7 +239,7 @@ pub fn build(
                     const h = dcw.heightAt(px, pz);
                     if (h < dcw.SEA_LEVEL + 0.35 or h > 66.0) continue;
 
-                    const flower = rand01(ix, iz, 0xC600 + @as(u32, @intCast(k))) < 0.008 and cny > 0.82;
+                    const flower = rand01(ix, iz, 0xC600 + @as(u32, @intCast(k))) < 0.04 and cny > 0.82;
                     const tint = rand01(ix, iz, 0xC800 + @as(u32, @intCast(k)));
                     try out.blades.append(alloc, .{
                         .pos = .{ px, h - 0.05, pz },
@@ -242,6 +249,141 @@ pub fn build(
                         .kind = if (flower) 1 else 0,
                     });
                 }
+            }
+        }
+    }
+
+    // Low woody plants: small bushes and ferns are represented as tight tufts of wider or
+    // narrower blades. They share the grass instance stream and world-cell hashing, so they stay
+    // put across streaming and need no extra draw call or asset.
+    {
+        const radius: f32 = 95.0;
+        const step: f32 = 7.0;
+        const ix0: i32 = @intFromFloat(@floor((center_x - radius) / step));
+        const ix1: i32 = @intFromFloat(@ceil((center_x + radius) / step));
+        const iz0: i32 = @intFromFloat(@floor((center_z - radius) / step));
+        const iz1: i32 = @intFromFloat(@ceil((center_z + radius) / step));
+        var iz = iz0;
+        while (iz <= iz1) : (iz += 1) {
+            const zc = (@as(f32, @floatFromInt(iz)) + 0.5) * step;
+            var ix = ix0;
+            while (ix <= ix1) : (ix += 1) {
+                const xc = (@as(f32, @floatFromInt(ix)) + 0.5) * step;
+                const dx = xc - center_x;
+                const dz = zc - center_z;
+                if (dx * dx + dz * dz > radius * radius) continue;
+                if (rand01(ix, iz, 0xB001) > 0.22) continue;
+                const cx = xc + (rand01(ix, iz, 0xB002) - 0.5) * step * 0.7;
+                const cz = zc + (rand01(ix, iz, 0xB003) - 0.5) * step * 0.7;
+                const ch = grid.at(cx, cz);
+                if (ch < dcw.SEA_LEVEL + 0.6 or ch > 64.0) continue;
+                if (grid.normalY(cx, cz) < 0.65) continue;
+                if (grid.density(cx, cz) < -0.4) continue;
+                const count: usize = 26 + @as(usize, @intFromFloat(rand01(ix, iz, 0xB004) * 14.0));
+                var k: usize = 0;
+                while (k < count) : (k += 1) {
+                    const a = rand01(ix, iz, 0xB100 + @as(u32, @intCast(k))) * std.math.tau;
+                    const rr = @sqrt(rand01(ix, iz, 0xB200 + @as(u32, @intCast(k)))) * 1.05;
+                    const px = cx + @cos(a) * rr;
+                    const pz = cz + @sin(a) * rr;
+                    if (blocked(edits, px, pz)) continue;
+                    const h = dcw.heightAt(px, pz);
+                    if (h < dcw.SEA_LEVEL + 0.35 or h > 66.0) continue;
+                    const tint = rand01(ix, iz, 0xB300 + @as(u32, @intCast(k)));
+                    try out.blades.append(alloc, .{
+                        .pos = .{ px, h - 0.05, pz },
+                        .yaw = rand01(ix, iz, 0xB400 + @as(u32, @intCast(k))) * std.math.tau,
+                        .scale = 0.85 + 0.65 * tint,
+                        .tint = tint,
+                        .kind = 2,
+                    });
+                }
+            }
+        }
+    }
+
+    // Ferns and taller weeds: a second, smaller tuft family with narrow blades and a different
+    // colour range. Same mechanism, different distribution and scale.
+    {
+        const radius: f32 = 95.0;
+        const step: f32 = 4.5;
+        const ix0: i32 = @intFromFloat(@floor((center_x - radius) / step));
+        const ix1: i32 = @intFromFloat(@ceil((center_x + radius) / step));
+        const iz0: i32 = @intFromFloat(@floor((center_z - radius) / step));
+        const iz1: i32 = @intFromFloat(@ceil((center_z + radius) / step));
+        var iz = iz0;
+        while (iz <= iz1) : (iz += 1) {
+            const zc = (@as(f32, @floatFromInt(iz)) + 0.5) * step;
+            var ix = ix0;
+            while (ix <= ix1) : (ix += 1) {
+                const xc = (@as(f32, @floatFromInt(ix)) + 0.5) * step;
+                const dx = xc - center_x;
+                const dz = zc - center_z;
+                if (dx * dx + dz * dz > radius * radius) continue;
+                if (rand01(ix, iz, 0xF001) > 0.24) continue;
+                const cx = xc + (rand01(ix, iz, 0xF002) - 0.5) * step * 0.7;
+                const cz = zc + (rand01(ix, iz, 0xF003) - 0.5) * step * 0.7;
+                const ch = grid.at(cx, cz);
+                if (ch < dcw.SEA_LEVEL + 0.5 or ch > 64.0) continue;
+                if (grid.normalY(cx, cz) < 0.68) continue;
+                if (grid.density(cx, cz) < -0.35) continue;
+                const count: usize = 8 + @as(usize, @intFromFloat(rand01(ix, iz, 0xF004) * 9.0));
+                var k: usize = 0;
+                while (k < count) : (k += 1) {
+                    const a = rand01(ix, iz, 0xF100 + @as(u32, @intCast(k))) * std.math.tau;
+                    const rr = @sqrt(rand01(ix, iz, 0xF200 + @as(u32, @intCast(k)))) * 0.85;
+                    const px = cx + @cos(a) * rr;
+                    const pz = cz + @sin(a) * rr;
+                    if (blocked(edits, px, pz)) continue;
+                    const h = dcw.heightAt(px, pz);
+                    if (h < dcw.SEA_LEVEL + 0.35 or h > 66.0) continue;
+                    const tint = rand01(ix, iz, 0xF300 + @as(u32, @intCast(k)));
+                    try out.blades.append(alloc, .{
+                        .pos = .{ px, h - 0.05, pz },
+                        .yaw = rand01(ix, iz, 0xF400 + @as(u32, @intCast(k))) * std.math.tau,
+                        .scale = 0.70 + 0.55 * tint,
+                        .tint = tint,
+                        .kind = 3,
+                    });
+                }
+            }
+        }
+    }
+
+    // Small bushes: a distinct rounded prop asset rather than another grass tuft. The cells are
+    // coarse and sparse so they read as occasional shrubs, not a second ground cover.
+    {
+        const radius: f32 = 95.0;
+        const step: f32 = 10.0;
+        const ix0: i32 = @intFromFloat(@floor((center_x - radius) / step));
+        const ix1: i32 = @intFromFloat(@ceil((center_x + radius) / step));
+        const iz0: i32 = @intFromFloat(@floor((center_z - radius) / step));
+        const iz1: i32 = @intFromFloat(@ceil((center_z + radius) / step));
+        var iz = iz0;
+        while (iz <= iz1) : (iz += 1) {
+            const z = (@as(f32, @floatFromInt(iz)) + 0.5) * step;
+            var ix = ix0;
+            while (ix <= ix1) : (ix += 1) {
+                const x = (@as(f32, @floatFromInt(ix)) + 0.5) * step;
+                const dx = x - center_x;
+                const dz = z - center_z;
+                if (dx * dx + dz * dz > radius * radius) continue;
+                if (rand01(ix, iz, 0x5B01) > 0.28) continue;
+                const px = x + (rand01(ix, iz, 0x5B02) - 0.5) * step * 0.7;
+                const pz = z + (rand01(ix, iz, 0x5B03) - 0.5) * step * 0.7;
+                if (blocked(edits, px, pz)) continue;
+                const h = dcw.heightAt(px, pz);
+                if (h < dcw.SEA_LEVEL + 0.8 or h > 64.0) continue;
+                const ny = grid.normalY(px, pz);
+                if (ny < 0.72) continue;
+                if (grid.density(px, pz) < -0.35) continue;
+                const tint = rand01(ix, iz, 0x5B04);
+                try out.bushes.append(alloc, .{
+                    .pos = .{ px, h - 0.10, pz },
+                    .yaw = rand01(ix, iz, 0x5B05) * std.math.tau,
+                    .scale = 0.55 + 0.75 * tint,
+                    .tint = tint,
+                });
             }
         }
     }
@@ -436,6 +578,23 @@ test "world-anchored scatter keeps overlapping foliage fixed" {
             }
             std.debug.print("scatter {s}: {d} overlapping instances exact\n", .{ label, matched });
         }
+        fn checkRange(list_a: []const Prop, list_b: []const Prop, label: []const u8, lo: f32, hi: f32) !void {
+            var seen = std.AutoHashMap(u64, void).init(std.testing.allocator);
+            defer seen.deinit();
+            for (list_a) |p| {
+                if (p.pos[0] >= lo and p.pos[0] < hi and p.pos[2] >= lo and p.pos[2] < hi) {
+                    try seen.put(key(p.pos), {});
+                }
+            }
+            var matched: usize = 0;
+            for (list_b) |p| {
+                if (p.pos[0] >= lo and p.pos[0] < hi and p.pos[2] >= lo and p.pos[2] < hi) {
+                    if (seen.contains(key(p.pos))) matched += 1 else return error.TestExpectedEqual;
+                }
+            }
+            if (matched == 0) return error.TestExpectedEqual;
+            std.debug.print("scatter {s}: {d} overlapping instances exact\n", .{ label, matched });
+        }
         fn checkBlades(list_a: []const Blade, list_b: []const Blade) !void {
             var seen = std.AutoHashMap(u64, void).init(std.testing.allocator);
             defer seen.deinit();
@@ -461,6 +620,7 @@ test "world-anchored scatter keeps overlapping foliage fixed" {
     };
 
     try Props.check(a.trees.items, b.trees.items, "trees");
+    try Props.checkRange(a.bushes.items, b.bushes.items, "bushes", 64.0, 192.0);
     try Props.check(a.rocks.items, b.rocks.items, "rocks");
     try Props.check(a.snow.items, b.snow.items, "snow");
     try Props.check(a.shore.items, b.shore.items, "shore");

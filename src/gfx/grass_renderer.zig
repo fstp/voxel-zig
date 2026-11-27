@@ -33,14 +33,25 @@ const vertex_src: [:0]const u8 =
     \\    float scale = a_misc.y;
     \\    float tint = a_misc.z;
     \\    float kind = a_misc.w;
-    \\    float h = (kind > 0.5 ? 0.08 : 0.14) + (kind > 0.5 ? 0.14 : 0.40) * scale;
-    \\    float w = kind > 0.5 ? 0.014 : 0.020;
+    \\    bool is_flower = kind > 0.5 && kind < 1.5;
+    \\    bool is_bush = kind >= 1.5 && kind < 2.5;
+    \\    bool is_fern = kind >= 2.5;
+    \\    float length_hash = hash11(a_pos.x * 0.917 + a_pos.z * 0.431 + yaw * 2.13);
+    \\    float patch_tone = hash11(floor(a_pos.x / 3.2) * 0.731 + floor(a_pos.z / 3.2) * 1.917);
+    \\    float strand_tone = hash11(a_pos.x * 0.371 + a_pos.z * 0.613 + yaw * 1.91);
+    \\    float tone = mix(patch_tone, strand_tone, 0.35);
+    \\    float base_h = 0.14 + 0.40 * scale;
+    \\    float w = 0.020;
+    \\    if (is_flower) { base_h = 0.35 + 0.35 * scale; w = 0.018; }
+    \\    else if (is_bush) { base_h = 0.45 + 0.55 * scale; w = 0.035; }
+    \\    else if (is_fern) { base_h = 0.50 + 0.60 * scale; w = 0.014; }
+    \\    float h = base_h * (0.70 + 0.60 * length_hash) * 0.85;
     \\    float near = smoothstep(0.15, 1.40, length(a_pos.xz - u_eye.xz));
     \\    h *= mix(0.30, 1.0, near);
     \\
     \\    // Hash thinning: full density near, gone by 95 m. Stable per instance, so no flicker.
     \\    float dist = length(a_pos.xz - u_eye.xz);
-    \\    float keep = 1.0 - smoothstep(35.0, 85.0, dist);
+    \\    float keep = 1.0 - smoothstep(55.0, 120.0, dist);
     \\    float r = hash11(float(gl_InstanceID) * 0.731 + tint * 17.0);
     \\    if (r > keep) {
     \\        gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
@@ -58,7 +69,7 @@ const vertex_src: [:0]const u8 =
     \\    else if (id == 5) { t = 1.0; side = 1.0; }
     \\    else { t = 1.02; side = 0.0; }
     \\
-    \\    float taper = 1.0 - t * 0.92;
+    \\    float taper = is_flower ? (1.0 - t * 0.35) : (1.0 - t * 0.92);
     \\    vec3 local = vec3(side * w * taper, t * h, 0.0);
     \\    float c = cos(yaw);
     \\    float s = sin(yaw);
@@ -66,7 +77,8 @@ const vertex_src: [:0]const u8 =
     \\
     \\    vec2 clump_cell = floor(a_pos.xz / 2.6);
     \\    float clump_phase = fract(dot(clump_cell, vec2(12.9898, 78.233))) * 6.2831;
-    \\    float phase = clump_phase + a_pos.x * 0.03 + a_pos.z * 0.02;
+    \\    float blade_phase = (hash11(a_pos.x * 0.173 + a_pos.z * 0.911 + yaw * 3.17) - 0.5) * 1.2;
+    \\    float phase = clump_phase + a_pos.x * 0.03 + a_pos.z * 0.02 + blade_phase;
     \\    float sway = sin(u_time * 1.7 + phase) * 0.5 + sin(u_time * 2.9 + phase * 1.7) * 0.2;
     \\    float anim = 1.0 - smoothstep(u_anim_cutoff - u_anim_fade, u_anim_cutoff, length(a_pos.xz - u_eye.xz));
     \\    float bend = sway * 0.16 * t * t * (kind > 0.5 ? 1.4 : 1.0) * anim;
@@ -77,13 +89,29 @@ const vertex_src: [:0]const u8 =
     \\    vec3 n_local = normalize(vec3(side * 0.25, 0.70, 0.66));
     \\    v_nrm = vec3(n_local.x * c - n_local.z * s, n_local.y, n_local.x * s + n_local.z * c);
     \\
-    \\    vec3 base = kind > 0.5
-    \\        ? mix(vec3(0.55, 0.50, 0.38), vec3(0.78, 0.45, 0.52), tint)
-    \\        : mix(vec3(0.05, 0.14, 0.03), vec3(0.22, 0.36, 0.09), tint);
-    \\    vec3 tipc = kind > 0.5
-    \\        ? vec3(0.92, 0.86, 0.74)
-    \\        : mix(vec3(0.18, 0.38, 0.08), vec3(0.42, 0.52, 0.16), tint);
-    \\    v_col = mix(base, tipc, t * (kind > 0.5 ? 1.0 : 0.85));
+    \\    vec3 base = is_flower
+    \\        ? mix(vec3(0.30, 0.22, 0.10), vec3(0.60, 0.30, 0.24), tint)
+    \\        : mix(vec3(0.04, 0.12, 0.025), vec3(0.16, 0.27, 0.06), tint);
+    \\    vec3 tipc = is_flower
+    \\        ? mix(vec3(0.96, 0.82, 0.35), vec3(0.96, 0.55, 0.70), tint)
+    \\        : mix(vec3(0.13, 0.30, 0.06), vec3(0.36, 0.48, 0.14), tint);
+    \\    if (is_bush) {
+    \\        base = mix(vec3(0.025, 0.070, 0.020), vec3(0.095, 0.16, 0.045), tint);
+    \\        base = mix(base, vec3(0.14, 0.18, 0.05), smoothstep(0.55, 1.0, tone) * 0.30);
+    \\        tipc = mix(vec3(0.08, 0.18, 0.04), vec3(0.22, 0.30, 0.08), tint);
+    \\    } else if (is_fern) {
+    \\        base = mix(vec3(0.045, 0.11, 0.025), vec3(0.15, 0.22, 0.05), tint);
+    \\        base = mix(base, vec3(0.16, 0.19, 0.055), smoothstep(0.55, 1.0, tone) * 0.35);
+    \\        tipc = mix(vec3(0.12, 0.26, 0.06), vec3(0.32, 0.38, 0.10), tint);
+    \\    } else if (!is_flower) {
+    \\        // Natural meadow: patch-scale colour plus a little per-strand variation. The
+    \\        // palettes are derived from the natural grass ranges #345C1B/#436F21/#597A2E and
+    \\        // keep the cool blue-green and dry yellow-green outliers sparse.
+    \\        base = mix(base, vec3(0.055, 0.14, 0.07), (1.0 - tint) * tone * 0.50);
+    \\        base = mix(base, vec3(0.20, 0.25, 0.08), smoothstep(0.60, 1.0, tone) * 0.45);
+    \\        tipc = mix(tipc, vec3(0.27, 0.40, 0.12), tone * 0.35);
+    \\    }
+    \\    v_col = mix(base, tipc, t * (is_flower ? 1.0 : 0.85));
     \\
     \\    gl_Position = u_view_proj * vec4(world, 1.0);
     \\}

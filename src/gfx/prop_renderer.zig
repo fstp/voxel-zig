@@ -160,6 +160,42 @@ fn buildRock(alloc: std.mem.Allocator) !MeshData {
     return md;
 }
 
+fn buildBush(alloc: std.mem.Allocator) !MeshData {
+    var md = MeshData{};
+    errdefer md.deinit(alloc);
+    const segs: usize = 9;
+    const rings: usize = 3;
+    var grid: [3][12]u32 = undefined;
+    for (0..rings) |ri| {
+        const v = @as(f32, @floatFromInt(ri)) / @as(f32, @floatFromInt(rings - 1));
+        const y = v * 0.85;
+        const rad = 0.30 + 0.30 * @sin(v * std.math.pi);
+        for (0..segs) |si| {
+            const a = @as(f32, @floatFromInt(si)) / @as(f32, @floatFromInt(segs)) * std.math.tau;
+            const cx = @cos(a);
+            const sz = @sin(a);
+            const wobble = 0.82 + 0.30 * @sin(@as(f32, @floatFromInt(si)) * 2.1 + v * 4.0);
+            const n = Vec3.init(cx, 0.35 + y, sz).normalized();
+            const shade = 0.72 + 0.28 * @sin(@as(f32, @floatFromInt(si)) * 1.7 + v * 3.0);
+            const col = [3]f32{ 0.035 * shade, 0.105 * shade, 0.025 * shade };
+            grid[ri][si] = try addVertex(&md, alloc, .{ cx * rad * wobble, y, sz * rad * wobble }, .{ n.x, n.y, n.z }, col, 0.0);
+        }
+    }
+    for (0..rings - 1) |ri| {
+        for (0..segs) |si| {
+            const sj = (si + 1) % segs;
+            try addTri(&md, alloc, grid[ri][si], grid[ri + 1][si], grid[ri][sj]);
+            try addTri(&md, alloc, grid[ri][sj], grid[ri + 1][si], grid[ri + 1][sj]);
+        }
+    }
+    // A darker, slightly open crown so the bush silhouette is not a smooth boulder.
+    const top = try addVertex(&md, alloc, .{ 0.03, 0.92, -0.02 }, .{ 0, 1, 0 }, .{ 0.075, 0.16, 0.04 }, 0.0);
+    for (0..segs) |si| {
+        try addTri(&md, alloc, grid[rings - 1][si], top, grid[rings - 1][(si + 1) % segs]);
+    }
+    return md;
+}
+
 /// A low, irregular snow clump / ice shard: a seven-sided mound with a jagged top ring.
 /// Deliberately small (0.6 m across at scale 1) so it reads as surface detail, not a rock.
 fn buildSnowClump(alloc: std.mem.Allocator) !MeshData {
@@ -505,6 +541,7 @@ pub const AssetId = enum(u8) {
     rock,
     snow,
     shore,
+    bush,
 };
 
 pub const AssetStats = struct {
@@ -515,7 +552,7 @@ pub const AssetStats = struct {
 };
 
 pub const AssetRegistry = struct {
-    meshes: [6]Mesh = .{ .{}, .{}, .{}, .{}, .{}, .{} },
+    meshes: [7]Mesh = .{ .{}, .{}, .{}, .{}, .{}, .{}, .{} },
 
     fn add(self: *AssetRegistry, id: AssetId, mesh: Mesh) void {
         self.meshes[@intFromEnum(id)] = mesh;
@@ -550,6 +587,8 @@ pub const PropRenderer = struct {
     tree_instances: [3]u32 = .{ 0, 0, 0 },
     rock_instances: u32 = 0,
     rock_count: usize = 0,
+    bush_instances: u32 = 0,
+    bush_count: usize = 0,
     snow_instances: u32 = 0,
     snow_count: usize = 0,
     shore_instances: u32 = 0,
@@ -612,6 +651,11 @@ pub const PropRenderer = struct {
         gl.GenBuffers(1, @ptrCast(&self.shore_instances));
         self.assets.add(.shore, try uploadMesh(alloc, &shore, self.shore_instances));
 
+        var bush = try buildBush(alloc);
+        defer bush.deinit(alloc);
+        gl.GenBuffers(1, @ptrCast(&self.bush_instances));
+        self.assets.add(.bush, try uploadMesh(alloc, &bush, self.bush_instances));
+
         self.impostor_shader = try Shader.init(impostor_vertex_src, impostor_fragment_src);
         gl.GenBuffers(1, @ptrCast(&self.impostor_vbo));
         gl.GenVertexArrays(1, @ptrCast(&self.impostor_vao));
@@ -636,6 +680,7 @@ pub const PropRenderer = struct {
             if (self.tree_instances[i] != 0) gl.DeleteBuffers(1, @ptrCast(&self.tree_instances[i]));
         }
         if (self.rock_instances != 0) gl.DeleteBuffers(1, @ptrCast(&self.rock_instances));
+        if (self.bush_instances != 0) gl.DeleteBuffers(1, @ptrCast(&self.bush_instances));
         if (self.snow_instances != 0) gl.DeleteBuffers(1, @ptrCast(&self.snow_instances));
         if (self.shore_instances != 0) gl.DeleteBuffers(1, @ptrCast(&self.shore_instances));
         if (self.impostor_shader) |*sh| sh.deinit();
@@ -667,6 +712,13 @@ pub const PropRenderer = struct {
         if (rocks.len == 0) return;
         gl.BindBuffer(gl.ARRAY_BUFFER, self.rock_instances);
         gl.BufferData(gl.ARRAY_BUFFER, @intCast(rocks.len * @sizeOf(Prop)), rocks.ptr, gl.STATIC_DRAW);
+    }
+
+    pub fn uploadBushes(self: *PropRenderer, bushes: []const Prop) void {
+        self.bush_count = bushes.len;
+        if (bushes.len == 0) return;
+        gl.BindBuffer(gl.ARRAY_BUFFER, self.bush_instances);
+        gl.BufferData(gl.ARRAY_BUFFER, @intCast(bushes.len * @sizeOf(Prop)), bushes.ptr, gl.STATIC_DRAW);
     }
 
     pub fn uploadSnow(self: *PropRenderer, clumps: []const Prop) void {
@@ -798,6 +850,10 @@ pub const PropRenderer = struct {
         self.drawDepthMesh(self.assets.get(.rock), self.rock_instances, self.rock_count, view_projection, time, eye);
     }
 
+    pub fn drawBushesDepth(self: *PropRenderer, view_projection: Mat4, time: f32, eye: Vec3) void {
+        self.drawDepthMesh(self.assets.get(.bush), self.bush_instances, self.bush_count, view_projection, time, eye);
+    }
+
     pub fn drawSnowDepth(self: *PropRenderer, view_projection: Mat4, time: f32, eye: Vec3) void {
         self.drawDepthMesh(self.assets.get(.snow), self.snow_instances, self.snow_count, view_projection, time, eye);
     }
@@ -919,6 +975,25 @@ pub const PropRenderer = struct {
         shadow: *ShadowRenderer,
     ) void {
         self.drawDetailMesh(self.assets.get(.rock), self.rock_instances, self.rock_count, view_projection, eye, sun_dir, sun_colour, ambient_sky, ambient_ground, fog_colour, fog_sun, fog_density, fog_height, fog_base, time, shadow);
+    }
+
+    pub fn drawBushes(
+        self: *PropRenderer,
+        view_projection: Mat4,
+        eye: Vec3,
+        sun_dir: Vec3,
+        sun_colour: Vec3,
+        ambient_sky: Vec3,
+        ambient_ground: Vec3,
+        fog_colour: Vec3,
+        fog_sun: Vec3,
+        fog_density: f32,
+        fog_height: f32,
+        fog_base: f32,
+        time: f32,
+        shadow: *ShadowRenderer,
+    ) void {
+        self.drawDetailMesh(self.assets.get(.bush), self.bush_instances, self.bush_count, view_projection, eye, sun_dir, sun_colour, ambient_sky, ambient_ground, fog_colour, fog_sun, fog_density, fog_height, fog_base, time, shadow);
     }
 
     pub fn drawSnow(
