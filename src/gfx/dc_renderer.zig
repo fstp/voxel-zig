@@ -18,6 +18,9 @@ const snow_patch_jpg = @embedFile("../assets/textures/snow_patch.jpg");
 const shore_dirt_jpg = @embedFile("../assets/textures/shore_dirt.jpg");
 const shore_sand_jpg = @embedFile("../assets/textures/shore_sand.jpg");
 const shore_mud_jpg = @embedFile("../assets/textures/shore_mud.jpg");
+const rock_rough_jpg = @embedFile("../assets/textures/rock_rough.jpg");
+const rock_granite_jpg = @embedFile("../assets/textures/rock_granite.jpg");
+const rock_stone_jpg = @embedFile("../assets/textures/rock_stone.jpg");
 
 const depth_vertex_src: [:0]const u8 =
     \\#version 330 core
@@ -88,6 +91,10 @@ const fragment_src: [:0]const u8 =
     \\uniform sampler2D u_shore_tex1; // rippled sand
     \\uniform sampler2D u_shore_tex2; // cracked wet mud
     \\uniform float u_shore_enabled;
+    \\uniform sampler2D u_rock_tex0; // rough lichen rock
+    \\uniform sampler2D u_rock_tex1; // grey granite
+    \\uniform sampler2D u_rock_tex2; // dark fractured stone
+    \\uniform float u_rock_enabled;
     \\uniform float u_surfaces;    // 0 = flat A/B path, 1 = snow/mud/wetness rules
     \\uniform float u_sea_level;   // world y of the sea surface (55 m in this world)
     \\uniform float u_snow_line;   // altitude where snow starts, before the noise warp
@@ -185,6 +192,20 @@ const fragment_src: [:0]const u8 =
     \\    vec3 mixed = mix(dirt, sand, 0.30 + 0.25 * wet);
     \\    mixed = mix(mixed, mud, wet * 0.55);
     \\    return mixed * (0.78 + 0.22 * mott);
+    \\}
+    \\vec3 rockTexture(vec2 p, float mott) {
+    \\    vec2 warp = vec2(noised(vec3(p * 0.047, 5.1)).x,
+    \\                     noised(vec3(p * 0.039, 2.9)).x) - 0.5;
+    \\    vec2 uv0 = rot2(0.87) * (p * 0.13 + warp * 0.05);
+    \\    vec2 uv1 = rot2(2.39) * (p * 0.23 - warp * 0.04);
+    \\    vec2 uv2 = rot2(4.77) * (p * 0.37 + warp * 0.03);
+    \\    vec3 rough = texture(u_rock_tex0, uv0).rgb;
+    \\    vec3 granite = texture(u_rock_tex1, uv1).rgb;
+    \\    vec3 stone = texture(u_rock_tex2, uv2).rgb;
+    \\    float lichen = smoothstep(0.48, 0.78, noised(vec3(p * 0.057 + vec2(3.7, 6.1), 3.0)).x);
+    \\    vec3 mixed = mix(granite, rough, 0.35 + 0.35 * lichen);
+    \\    mixed = mix(mixed, stone, 0.22 + 0.30 * (1.0 - lichen));
+    \\    return mixed * (0.78 + 0.30 * mott);
     \\}
     \\vec3 shIrradiance(vec3 n) {
     \\    float x = n.x, y = n.y, z = n.z;
@@ -310,6 +331,14 @@ const fragment_src: [:0]const u8 =
     \\        vec3 ground = groundTexture(v_pos.xz, mott) * 1.10;
     \\        albedo = mix(albedo, ground, ground_mask * 0.85);
     \\    }
+    \\    if (u_rock_enabled > 0.5) {
+    \\        vec3 an = abs(normalize(v_nrm));
+    \\        vec2 rock_uv = v_pos.xz;
+    \\        if (an.y <= max(an.x, an.z)) rock_uv = an.x > an.z ? v_pos.zy : v_pos.xy;
+    \\        float rock_mask = smoothstep(0.45, 0.55, v_mat) * (1.0 - snow) * (1.0 - mud);
+    \\        vec3 rock = rockTexture(rock_uv, mott);
+    \\        albedo = mix(albedo, rock, rock_mask * 0.82);
+    \\    }
     \\    // Lighting is deliberately shy of 1.0: albedo arrives already close to mid grey, and
     \\    // multiplying it by ~1.8 and then gamma-encoding clips the whole surface to white.
     \\    // Exposure + ACES (Narkowicz), the same curve the engine's post pass applies (ADR 0011).
@@ -376,6 +405,7 @@ pub const DcRenderer = struct {
     ground_tex: [3]u32 = .{ 0, 0, 0 },
     snow_tex: [3]u32 = .{ 0, 0, 0 },
     shore_tex: [3]u32 = .{ 0, 0, 0 },
+    rock_tex: [3]u32 = .{ 0, 0, 0 },
 
     pub fn init() !DcRenderer {
         var shader = try Shader.init(vertex_src, fragment_src);
@@ -455,7 +485,27 @@ pub const DcRenderer = struct {
         }
         gl.BindTexture(gl.TEXTURE_2D, 0);
 
-        return .{ .shader = shader, .depth_shader = depth_shader, .ao_tex = ao_tex, .ground_tex = ground_tex, .snow_tex = snow_tex, .shore_tex = shore_tex };
+        const rock_jpgs = [_][]const u8{ rock_rough_jpg, rock_granite_jpg, rock_stone_jpg };
+        var rock_tex: [3]u32 = .{ 0, 0, 0 };
+        for (rock_jpgs, 0..) |jpg, i| {
+            var rw: c_int = 0;
+            var rh: c_int = 0;
+            var rch: c_int = 0;
+            const pixels = stb.stbi_load_from_memory(jpg.ptr, @intCast(jpg.len), &rw, &rh, &rch, 4) orelse
+                return error.RockTextureLoad;
+            defer stb.stbi_image_free(pixels);
+            gl.GenTextures(1, @ptrCast(&rock_tex[i]));
+            gl.BindTexture(gl.TEXTURE_2D, rock_tex[i]);
+            gl.TexImage2D(gl.TEXTURE_2D, 0, gl.SRGB8_ALPHA8, rw, rh, 0, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+            gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+            gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+            gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+            gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+            gl.GenerateMipmap(gl.TEXTURE_2D);
+        }
+        gl.BindTexture(gl.TEXTURE_2D, 0);
+
+        return .{ .shader = shader, .depth_shader = depth_shader, .ao_tex = ao_tex, .ground_tex = ground_tex, .snow_tex = snow_tex, .shore_tex = shore_tex, .rock_tex = rock_tex };
     }
 
     pub fn deinit(self: *DcRenderer) void {
@@ -469,6 +519,7 @@ pub const DcRenderer = struct {
             if (self.ground_tex[i] != 0) gl.DeleteTextures(1, @ptrCast(&self.ground_tex[i]));
             if (self.snow_tex[i] != 0) gl.DeleteTextures(1, @ptrCast(&self.snow_tex[i]));
             if (self.shore_tex[i] != 0) gl.DeleteTextures(1, @ptrCast(&self.shore_tex[i]));
+            if (self.rock_tex[i] != 0) gl.DeleteTextures(1, @ptrCast(&self.rock_tex[i]));
         }
         self.depth_shader.deinit();
         self.shader.deinit();
@@ -571,21 +622,23 @@ pub const DcRenderer = struct {
         self.shader.setFloat("u_ao_enabled", if (self.ao_enabled) 1.0 else 0.0);
         gl.ActiveTexture(gl.TEXTURE3);
         gl.BindTexture(gl.TEXTURE_2D, self.ao_tex);
-        const tex_names: [9][:0]const u8 = .{
+        const tex_names: [12][:0]const u8 = .{
             "u_ground_tex0", "u_ground_tex1", "u_ground_tex2",
             "u_snow_tex0",   "u_snow_tex1",   "u_snow_tex2",
             "u_shore_tex0",  "u_shore_tex1",  "u_shore_tex2",
+            "u_rock_tex0",   "u_rock_tex1",   "u_rock_tex2",
         };
         for (tex_names, 0..) |name, i| {
             const slot: c_int = 4 + @as(c_int, @intCast(i));
             self.shader.setInt(name, slot);
             gl.ActiveTexture(gl.TEXTURE4 + @as(u32, @intCast(i)));
-            const tex = if (i < 3) self.ground_tex[i] else if (i < 6) self.snow_tex[i - 3] else self.shore_tex[i - 6];
+            const tex = if (i < 3) self.ground_tex[i] else if (i < 6) self.snow_tex[i - 3] else if (i < 9) self.shore_tex[i - 6] else self.rock_tex[i - 9];
             gl.BindTexture(gl.TEXTURE_2D, tex);
         }
         self.shader.setFloat("u_ground_enabled", 1.0);
         self.shader.setFloat("u_snow_enabled", 1.0);
         self.shader.setFloat("u_shore_enabled", 1.0);
+        self.shader.setFloat("u_rock_enabled", 1.0);
         gl.ActiveTexture(gl.TEXTURE0);
         self.shader.setVec3("u_fog_colour", .{ fog_colour.x, fog_colour.y, fog_colour.z });
         self.shader.setVec3("u_fog_sun", .{ fog_sun.x, fog_sun.y, fog_sun.z });

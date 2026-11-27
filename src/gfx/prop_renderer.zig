@@ -9,6 +9,10 @@ const Mat4 = @import("../math/mat4.zig").Mat4;
 const Vec3 = @import("../math/vec.zig").Vec3;
 const Prop = @import("../world/scatter.zig").Prop;
 const ShadowRenderer = @import("shadow_renderer.zig").ShadowRenderer;
+const stb = @import("stb.zig");
+const rock_rough_jpg = @embedFile("../assets/textures/rock_rough.jpg");
+const rock_granite_jpg = @embedFile("../assets/textures/rock_granite.jpg");
+const rock_stone_jpg = @embedFile("../assets/textures/rock_stone.jpg");
 const animation = @import("../world/foliage_animation.zig");
 
 pub const Vertex = extern struct {
@@ -336,7 +340,27 @@ const fragment_src: [:0]const u8 =
     \\uniform float u_fog_density;
     \\uniform float u_fog_height;
     \\uniform float u_fog_base;
+    \\uniform sampler2D u_rock_tex0;
+    \\uniform sampler2D u_rock_tex1;
+    \\uniform sampler2D u_rock_tex2;
+    \\uniform float u_rock_tex_enabled;
     \\out vec4 frag;
+    \\mat2 rockRot(float a) { return mat2(cos(a), -sin(a), sin(a), cos(a)); }
+    \\vec3 rockTexture(vec3 world, vec3 n) {
+    \\    vec3 an = abs(n);
+    \\    vec2 p = an.y > max(an.x, an.z) ? world.xz : (an.x > an.z ? world.zy : world.xy);
+    \\    vec2 w = vec2(0.0);
+    \\    vec2 uv0 = rockRot(0.71) * (p * 1.10 + w);
+    \\    vec2 uv1 = rockRot(2.41) * (p * 1.83 - w);
+    \\    vec2 uv2 = rockRot(4.19) * (p * 3.07 + w);
+    \\    vec3 a = texture(u_rock_tex0, uv0).rgb;
+    \\    vec3 b = texture(u_rock_tex1, uv1).rgb;
+    \\    vec3 c = texture(u_rock_tex2, uv2).rgb;
+    \\    float lichen = smoothstep(0.45, 0.80, fract(sin(dot(floor(world.xz * 0.8), vec2(12.9898, 78.233))) * 43758.5453));
+    \\    vec3 mixed = mix(b, a, 0.35 + 0.35 * lichen);
+    \\    mixed = mix(mixed, c, 0.25 + 0.25 * (1.0 - lichen));
+    \\    return mixed * (0.80 + 0.25 * fract(sin(dot(world.xz, vec2(4.1, 7.7))) * 43758.5453));
+    \\}
     \\float shadowCascade(mat4 lvp, sampler2D map, vec3 world, vec3 n) {
     \\    vec4 lp = lvp * vec4(world + n * 0.10, 1.0);
     \\    vec3 p = lp.xyz / max(lp.w, 1e-5) * 0.5 + 0.5;
@@ -379,7 +403,11 @@ const fragment_src: [:0]const u8 =
     \\    vec3 amb = mix(u_ambient_ground, u_ambient_sky, n.y * 0.5 + 0.5);
     \\    float shadow = sunShadow(v_world, n);
     \\    amb *= mix(0.58, 1.0, shadow);
-    \\    vec3 c = v_col * (amb * 2.0 + u_sun_colour * ndl * 0.85 * shadow) * 0.20;
+    \\    vec3 albedo = v_col;
+    \\    if (u_rock_tex_enabled > 0.5) {
+    \\        albedo = mix(albedo, rockTexture(v_world, n), 0.80);
+    \\    }
+    \\    vec3 c = albedo * (amb * 2.0 + u_sun_colour * ndl * 0.85 * shadow) * 0.20;
     \\    c = clamp((c * (2.51 * c + 0.03)) / (c * (2.43 * c + 0.59) + 0.14), 0.0, 1.0);
     \\    vec3 outc = pow(max(c, 0.0), vec3(0.4545));
     \\    vec3 ray = v_world - u_eye;
@@ -593,6 +621,7 @@ pub const PropRenderer = struct {
     snow_count: usize = 0,
     shore_instances: u32 = 0,
     shore_count: usize = 0,
+    rock_tex: [3]u32 = .{ 0, 0, 0 },
     impostor_shader: ?Shader = null,
     impostor_vao: u32 = 0,
     impostor_vbo: u32 = 0,
@@ -656,6 +685,26 @@ pub const PropRenderer = struct {
         gl.GenBuffers(1, @ptrCast(&self.bush_instances));
         self.assets.add(.bush, try uploadMesh(alloc, &bush, self.bush_instances));
 
+        stb.stbi_set_flip_vertically_on_load(0);
+        const rock_jpgs = [_][]const u8{ rock_rough_jpg, rock_granite_jpg, rock_stone_jpg };
+        for (rock_jpgs, 0..) |jpg, i| {
+            var rw: c_int = 0;
+            var rh: c_int = 0;
+            var rch: c_int = 0;
+            const pixels = stb.stbi_load_from_memory(jpg.ptr, @intCast(jpg.len), &rw, &rh, &rch, 4) orelse
+                return error.RockTextureLoad;
+            defer stb.stbi_image_free(pixels);
+            gl.GenTextures(1, @ptrCast(&self.rock_tex[i]));
+            gl.BindTexture(gl.TEXTURE_2D, self.rock_tex[i]);
+            gl.TexImage2D(gl.TEXTURE_2D, 0, gl.SRGB8_ALPHA8, rw, rh, 0, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+            gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+            gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+            gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+            gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+            gl.GenerateMipmap(gl.TEXTURE_2D);
+        }
+        gl.BindTexture(gl.TEXTURE_2D, 0);
+
         self.impostor_shader = try Shader.init(impostor_vertex_src, impostor_fragment_src);
         gl.GenBuffers(1, @ptrCast(&self.impostor_vbo));
         gl.GenVertexArrays(1, @ptrCast(&self.impostor_vao));
@@ -683,6 +732,9 @@ pub const PropRenderer = struct {
         if (self.bush_instances != 0) gl.DeleteBuffers(1, @ptrCast(&self.bush_instances));
         if (self.snow_instances != 0) gl.DeleteBuffers(1, @ptrCast(&self.snow_instances));
         if (self.shore_instances != 0) gl.DeleteBuffers(1, @ptrCast(&self.shore_instances));
+        for (0..3) |i| {
+            if (self.rock_tex[i] != 0) gl.DeleteTextures(1, @ptrCast(&self.rock_tex[i]));
+        }
         if (self.impostor_shader) |*sh| sh.deinit();
         if (self.impostor_vao != 0) gl.DeleteVertexArrays(1, @ptrCast(&self.impostor_vao));
         if (self.impostor_vbo != 0) gl.DeleteBuffers(1, @ptrCast(&self.impostor_vbo));
@@ -974,7 +1026,7 @@ pub const PropRenderer = struct {
         time: f32,
         shadow: *ShadowRenderer,
     ) void {
-        self.drawDetailMesh(self.assets.get(.rock), self.rock_instances, self.rock_count, view_projection, eye, sun_dir, sun_colour, ambient_sky, ambient_ground, fog_colour, fog_sun, fog_density, fog_height, fog_base, time, shadow);
+        self.drawDetailMesh(self.assets.get(.rock), self.rock_instances, self.rock_count, view_projection, eye, sun_dir, sun_colour, ambient_sky, ambient_ground, fog_colour, fog_sun, fog_density, fog_height, fog_base, time, shadow, true);
     }
 
     pub fn drawBushes(
@@ -993,7 +1045,7 @@ pub const PropRenderer = struct {
         time: f32,
         shadow: *ShadowRenderer,
     ) void {
-        self.drawDetailMesh(self.assets.get(.bush), self.bush_instances, self.bush_count, view_projection, eye, sun_dir, sun_colour, ambient_sky, ambient_ground, fog_colour, fog_sun, fog_density, fog_height, fog_base, time, shadow);
+        self.drawDetailMesh(self.assets.get(.bush), self.bush_instances, self.bush_count, view_projection, eye, sun_dir, sun_colour, ambient_sky, ambient_ground, fog_colour, fog_sun, fog_density, fog_height, fog_base, time, shadow, false);
     }
 
     pub fn drawSnow(
@@ -1012,7 +1064,7 @@ pub const PropRenderer = struct {
         time: f32,
         shadow: *ShadowRenderer,
     ) void {
-        self.drawDetailMesh(self.assets.get(.snow), self.snow_instances, self.snow_count, view_projection, eye, sun_dir, sun_colour, ambient_sky, ambient_ground, fog_colour, fog_sun, fog_density, fog_height, fog_base, time, shadow);
+        self.drawDetailMesh(self.assets.get(.snow), self.snow_instances, self.snow_count, view_projection, eye, sun_dir, sun_colour, ambient_sky, ambient_ground, fog_colour, fog_sun, fog_density, fog_height, fog_base, time, shadow, false);
     }
 
     pub fn drawShore(
@@ -1031,7 +1083,7 @@ pub const PropRenderer = struct {
         time: f32,
         shadow: *ShadowRenderer,
     ) void {
-        self.drawDetailMesh(self.assets.get(.shore), self.shore_instances, self.shore_count, view_projection, eye, sun_dir, sun_colour, ambient_sky, ambient_ground, fog_colour, fog_sun, fog_density, fog_height, fog_base, time, shadow);
+        self.drawDetailMesh(self.assets.get(.shore), self.shore_instances, self.shore_count, view_projection, eye, sun_dir, sun_colour, ambient_sky, ambient_ground, fog_colour, fog_sun, fog_density, fog_height, fog_base, time, shadow, false);
     }
 
     fn drawDetailMesh(
@@ -1052,9 +1104,21 @@ pub const PropRenderer = struct {
         fog_base: f32,
         time: f32,
         shadow: *ShadowRenderer,
+        use_rock_texture: bool,
     ) void {
         if (count == 0) return;
         self.begin(view_projection, eye, sun_dir, sun_colour, ambient_sky, ambient_ground, fog_colour, fog_sun, fog_density, fog_height, fog_base, time, shadow);
+        if (use_rock_texture) {
+            const names: [3][:0]const u8 = .{ "u_rock_tex0", "u_rock_tex1", "u_rock_tex2" };
+            for (names, 0..) |name, i| {
+                self.shader.setInt(name, 4 + @as(c_int, @intCast(i)));
+                gl.ActiveTexture(gl.TEXTURE4 + @as(u32, @intCast(i)));
+                gl.BindTexture(gl.TEXTURE_2D, self.rock_tex[i]);
+            }
+            self.shader.setFloat("u_rock_tex_enabled", 1.0);
+        } else {
+            self.shader.setFloat("u_rock_tex_enabled", 0.0);
+        }
         gl.BindVertexArray(mesh.vao);
         gl.BindBuffer(gl.ARRAY_BUFFER, instance_vbo);
         gl.DrawElementsInstanced(gl.TRIANGLES, @intCast(mesh.index_count), gl.UNSIGNED_INT, 0, @intCast(count));
