@@ -17,6 +17,8 @@ const vertex_src: [:0]const u8 =
     \\uniform mat4 u_view_proj;
     \\uniform vec3 u_eye;
     \\uniform float u_time;
+    \\uniform float u_anim_cutoff;
+    \\uniform float u_anim_fade;
     \\out vec3 v_col;
     \\out vec3 v_nrm;
     \\out vec3 v_world;
@@ -62,9 +64,12 @@ const vertex_src: [:0]const u8 =
     \\    float s = sin(yaw);
     \\    vec3 world = a_pos + vec3(local.x * c - local.z * s, local.y, local.x * s + local.z * c);
     \\
-    \\    float phase = a_pos.x * 0.35 + a_pos.z * 0.27 + tint * 6.2831;
+    \\    vec2 clump_cell = floor(a_pos.xz / 2.6);
+    \\    float clump_phase = fract(dot(clump_cell, vec2(12.9898, 78.233))) * 6.2831;
+    \\    float phase = clump_phase + a_pos.x * 0.03 + a_pos.z * 0.02;
     \\    float sway = sin(u_time * 1.7 + phase) * 0.5 + sin(u_time * 2.9 + phase * 1.7) * 0.2;
-    \\    float bend = sway * 0.16 * t * t * (kind > 0.5 ? 1.4 : 1.0);
+    \\    float anim = 1.0 - smoothstep(u_anim_cutoff - u_anim_fade, u_anim_cutoff, length(a_pos.xz - u_eye.xz));
+    \\    float bend = sway * 0.16 * t * t * (kind > 0.5 ? 1.4 : 1.0) * anim;
     \\    world.x += bend;
     \\    world.z += bend * 0.35;
     \\
@@ -177,6 +182,8 @@ pub const GrassRenderer = struct {
     vao: u32 = 0,
     vbo: u32 = 0,
     count: usize = 0,
+    animation_cutoff: f32 = 95.0,
+    animation_fade: f32 = 15.0,
 
     pub fn init() !GrassRenderer {
         var shader = try Shader.init(vertex_src, fragment_src);
@@ -202,6 +209,8 @@ pub const GrassRenderer = struct {
         self.depth_shader.setMat4("u_view_proj", view_projection.m);
         self.depth_shader.setVec3("u_eye", .{ eye.x, eye.y, eye.z });
         self.depth_shader.setFloat("u_time", time);
+        self.depth_shader.setFloat("u_anim_cutoff", self.animation_cutoff);
+        self.depth_shader.setFloat("u_anim_fade", self.animation_fade);
         gl.Enable(gl.DEPTH_TEST);
         gl.DepthMask(gl.TRUE);
         gl.Disable(gl.BLEND);
@@ -265,6 +274,8 @@ pub const GrassRenderer = struct {
         self.shader.setFloat("u_fog_height", fog_height);
         self.shader.setFloat("u_fog_base", fog_base);
         self.shader.setFloat("u_time", time);
+        self.shader.setFloat("u_anim_cutoff", self.animation_cutoff);
+        self.shader.setFloat("u_anim_fade", self.animation_fade);
         gl.BindVertexArray(self.vao);
         gl.DrawArraysInstanced(gl.TRIANGLE_STRIP, 0, 7, @intCast(self.count));
     }

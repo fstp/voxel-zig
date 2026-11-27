@@ -15,6 +15,8 @@ pub const Vertex = extern struct {
     nrm: [3]f32,
     col: [3]f32,
     rigid: f32,
+    /// Local Y pivot for a rigid foliage part, in unscaled plant space. 0 for the trunk and props.
+    pivot: f32,
 };
 
 const MeshData = struct {
@@ -35,8 +37,12 @@ const Mesh = struct {
 };
 
 fn addVertex(md: *MeshData, alloc: std.mem.Allocator, p: [3]f32, n: [3]f32, c: [3]f32, rigid: f32) !u32 {
+    return addVertexPart(md, alloc, p, n, c, rigid, 0.0);
+}
+
+fn addVertexPart(md: *MeshData, alloc: std.mem.Allocator, p: [3]f32, n: [3]f32, c: [3]f32, rigid: f32, pivot: f32) !u32 {
     const i: u32 = @intCast(md.verts.items.len);
-    try md.verts.append(alloc, .{ .pos = p, .nrm = n, .col = c, .rigid = rigid });
+    try md.verts.append(alloc, .{ .pos = p, .nrm = n, .col = c, .rigid = rigid, .pivot = pivot });
     return i;
 }
 
@@ -87,9 +93,9 @@ fn buildTree(alloc: std.mem.Allocator, sides: usize, cones: usize) !MeshData {
             const cx = @cos(a);
             const sz = @sin(a);
             const n = Vec3.init(cx * height, radius, sz * height).normalized();
-            ring[i] = try addVertex(&md, alloc, .{ cx * radius, base_y, sz * radius }, .{ n.x, n.y, n.z }, col, rigid);
+            ring[i] = try addVertexPart(&md, alloc, .{ cx * radius, base_y, sz * radius }, .{ n.x, n.y, n.z }, col, rigid, base_y);
         }
-        const tip = try addVertex(&md, alloc, .{ 0, base_y + height, 0 }, .{ 0, 1, 0 }, col, rigid + 0.2);
+        const tip = try addVertexPart(&md, alloc, .{ 0, base_y + height, 0 }, .{ 0, 1, 0 }, col, rigid + 0.2, base_y);
         for (0..sides) |i| {
             const j = (i + 1) % sides;
             try addTri(&md, alloc, ring[i], tip, ring[j]);
@@ -218,8 +224,12 @@ const vertex_src: [:0]const u8 =
     \\layout(location = 3) in float a_rigid;
     \\layout(location = 4) in vec3 a_ipos;
     \\layout(location = 5) in vec3 a_imisc; // yaw, scale, tint
+    \\layout(location = 6) in float a_pivot;
     \\uniform mat4 u_view_proj;
+    \\uniform vec3 u_eye;
     \\uniform float u_time;
+    \\uniform float u_anim_cutoff;
+    \\uniform float u_anim_fade;
     \\out vec3 v_col;
     \\out vec3 v_nrm;
     \\out vec3 v_world;
@@ -230,11 +240,14 @@ const vertex_src: [:0]const u8 =
     \\    float c = cos(yaw);
     \\    float s = sin(yaw);
     \\    vec3 lp = a_pos * scale;
-    \\    vec3 rp = vec3(lp.x * c - lp.z * s, lp.y, lp.x * s + lp.z * c);
-    \\    float height = max(a_pos.y, 0.0) * scale;
-    \\    float sway = sin(u_time * 0.9 + a_ipos.x * 0.13 + a_ipos.z * 0.11 + tint * 6.2831);
-    \\    float bend = a_rigid * sway * 0.10 * (height / 6.5) * (height / 6.5) * 6.5;
-    \\    vec3 world = a_ipos + rp + vec3(bend, 0.0, bend * 0.4);
+    \\    float phase = u_time * 1.1 + a_ipos.x * 0.13 + a_ipos.z * 0.11 + tint * 6.2831 + a_pivot * 0.90;
+    \\    float sway = sin(phase) * 0.60 + sin(phase * 1.7 + 0.7) * 0.25;
+    \\    float anim = 1.0 - smoothstep(u_anim_cutoff - u_anim_fade, u_anim_cutoff, length(a_ipos.xz - u_eye.xz));
+    \\    float angle = a_rigid * sway * anim * 0.075;
+    \\    float py = lp.y - a_pivot * scale;
+    \\    vec3 dp = vec3(lp.x + angle * py, lp.y, lp.z + angle * 0.35 * py);
+    \\    vec3 rp = vec3(dp.x * c - dp.z * s, dp.y, dp.x * s + dp.z * c);
+    \\    vec3 world = a_ipos + rp;
     \\    v_world = world;
     \\    v_nrm = vec3(a_nrm.x * c - a_nrm.z * s, a_nrm.y, a_nrm.x * s + a_nrm.z * c);
     \\    v_col = a_col * (0.80 + 0.45 * tint);
@@ -511,6 +524,9 @@ pub const PropRenderer = struct {
     impostor_vbo: u32 = 0,
     impostor_tex: u32 = 0,
     last_impostor_count: usize = 0,
+    /// World-unit distance at which per-part wind fades out; set by the app from its screen error.
+    animation_cutoff: f32 = 95.0,
+    animation_fade: f32 = 15.0,
 
     pub fn init(alloc: std.mem.Allocator) !PropRenderer {
         var shader = try Shader.init(vertex_src, fragment_src);
@@ -623,30 +639,33 @@ pub const PropRenderer = struct {
     /// draws LOD0 made every near tree shadow itself against a different canopy silhouette, which
     /// showed up as hard dark wedges on the lower cones. The extra triangles are trivial next to
     /// a wrong self-shadow.
-    pub fn drawTreesDepth(self: *PropRenderer, view_projection: Mat4, time: f32, trees: []const Prop) void {
+    pub fn drawTreesDepth(self: *PropRenderer, view_projection: Mat4, time: f32, trees: []const Prop, eye: Vec3) void {
         if (trees.len == 0) return;
         gl.BindBuffer(gl.ARRAY_BUFFER, self.tree_instances[0]);
         gl.BufferData(gl.ARRAY_BUFFER, @intCast(trees.len * @sizeOf(Prop)), trees.ptr, gl.STATIC_DRAW);
-        self.drawDepthMesh(self.assets.get(.tree_lod0), self.tree_instances[0], trees.len, view_projection, time);
+        self.drawDepthMesh(self.assets.get(.tree_lod0), self.tree_instances[0], trees.len, view_projection, time, eye);
     }
 
-    pub fn drawRocksDepth(self: *PropRenderer, view_projection: Mat4, time: f32) void {
-        self.drawDepthMesh(self.assets.get(.rock), self.rock_instances, self.rock_count, view_projection, time);
+    pub fn drawRocksDepth(self: *PropRenderer, view_projection: Mat4, time: f32, eye: Vec3) void {
+        self.drawDepthMesh(self.assets.get(.rock), self.rock_instances, self.rock_count, view_projection, time, eye);
     }
 
-    pub fn drawSnowDepth(self: *PropRenderer, view_projection: Mat4, time: f32) void {
-        self.drawDepthMesh(self.assets.get(.snow), self.snow_instances, self.snow_count, view_projection, time);
+    pub fn drawSnowDepth(self: *PropRenderer, view_projection: Mat4, time: f32, eye: Vec3) void {
+        self.drawDepthMesh(self.assets.get(.snow), self.snow_instances, self.snow_count, view_projection, time, eye);
     }
 
-    pub fn drawShoreDepth(self: *PropRenderer, view_projection: Mat4, time: f32) void {
-        self.drawDepthMesh(self.assets.get(.shore), self.shore_instances, self.shore_count, view_projection, time);
+    pub fn drawShoreDepth(self: *PropRenderer, view_projection: Mat4, time: f32, eye: Vec3) void {
+        self.drawDepthMesh(self.assets.get(.shore), self.shore_instances, self.shore_count, view_projection, time, eye);
     }
 
-    fn drawDepthMesh(self: *PropRenderer, mesh: *const Mesh, instance_vbo: u32, count: usize, view_projection: Mat4, time: f32) void {
+    fn drawDepthMesh(self: *PropRenderer, mesh: *const Mesh, instance_vbo: u32, count: usize, view_projection: Mat4, time: f32, eye: Vec3) void {
         if (count == 0) return;
         self.depth_shader.use();
         self.depth_shader.setMat4("u_view_proj", view_projection.m);
         self.depth_shader.setFloat("u_time", time);
+        self.depth_shader.setVec3("u_eye", .{ eye.x, eye.y, eye.z });
+        self.depth_shader.setFloat("u_anim_cutoff", self.animation_cutoff);
+        self.depth_shader.setFloat("u_anim_fade", self.animation_fade);
         gl.Enable(gl.DEPTH_TEST);
         gl.DepthMask(gl.TRUE);
         gl.Disable(gl.BLEND);
@@ -829,6 +848,8 @@ pub const PropRenderer = struct {
         self.shader.setFloat("u_fog_height", fog_height);
         self.shader.setFloat("u_fog_base", fog_base);
         self.shader.setFloat("u_time", time);
+        self.shader.setFloat("u_anim_cutoff", self.animation_cutoff);
+        self.shader.setFloat("u_anim_fade", self.animation_fade);
     }
 
     fn drawLod(self: *PropRenderer, lod: usize, props: []const Prop, time: f32) void {
@@ -976,6 +997,8 @@ fn uploadMesh(alloc: std.mem.Allocator, md: *MeshData, instance_vbo: u32) !Mesh 
     gl.VertexAttribPointer(2, 3, gl.FLOAT, gl.FALSE, @sizeOf(Vertex), @sizeOf([3]f32) * 2);
     gl.EnableVertexAttribArray(3);
     gl.VertexAttribPointer(3, 1, gl.FLOAT, gl.FALSE, @sizeOf(Vertex), @sizeOf([3]f32) * 3);
+    gl.EnableVertexAttribArray(6);
+    gl.VertexAttribPointer(6, 1, gl.FLOAT, gl.FALSE, @sizeOf(Vertex), @sizeOf([3]f32) * 3 + @sizeOf(f32));
 
     gl.BindBuffer(gl.ARRAY_BUFFER, instance_vbo);
     gl.EnableVertexAttribArray(4);

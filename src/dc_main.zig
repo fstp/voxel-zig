@@ -4,6 +4,7 @@
 const std = @import("std");
 const vz = @import("voxel_zig");
 const sun_mod = vz.world.sun;
+const foliage_anim = vz.world.foliage_animation;
 const Vec3 = vz.math.Vec3;
 const gfx = vz.gfx;
 const sdl = @import("sdl3");
@@ -358,6 +359,43 @@ pub fn main(init: std.process.Init) !void {
     props.uploadShore(scatter.shore.items);
     props.logAssetStats();
 
+    // Wind is only worth paying for while its projected displacement can be seen. Use a
+    // conservative 0.125 m foliage displacement and a 2 px target at the 4K window; the fade
+    // band makes the cutoff invisible rather than a snap.
+    var animation_enabled = true;
+    if (init.environ_map.get("VOXEL_ANIM")) |raw| {
+        if (raw.len > 0 and raw[0] == '0') animation_enabled = false;
+    }
+    const animation_cutoff: f32 = if (animation_enabled)
+        @min(foliage_anim.cutoffDistance(0.125, 2.0, @floatFromInt(window.height), camera.fov_y_deg), 110.0)
+    else
+        0.0;
+    const animation_fade: f32 = 15.0;
+    grass.animation_cutoff = animation_cutoff;
+    grass.animation_fade = animation_fade;
+    props.animation_cutoff = animation_cutoff;
+    props.animation_fade = animation_fade;
+    {
+        const eye = player.eyePosition();
+        const c2 = animation_cutoff * animation_cutoff;
+        var animated_trees: usize = 0;
+        for (scatter.trees.items) |t| {
+            const dx = t.pos[0] - eye.x;
+            const dz = t.pos[2] - eye.z;
+            if (dx * dx + dz * dz <= c2) animated_trees += 1;
+        }
+        var animated_blades: usize = 0;
+        for (scatter.blades.items) |b| {
+            const dx = b.pos[0] - eye.x;
+            const dz = b.pos[2] - eye.z;
+            if (dx * dx + dz * dz <= c2) animated_blades += 1;
+        }
+        std.debug.print(
+            "animation: cutoff {d:.1} m, {d} trees, {d} blades animated, fade {d:.1} m, enabled={s}\n",
+            .{ animation_cutoff, animated_trees, animated_blades, animation_fade, if (animation_enabled) "true" else "false" },
+        );
+    }
+
     var water = try WaterRenderer.init();
     defer water.deinit();
     var shadow = try vz.gfx.ShadowRenderer.init();
@@ -613,10 +651,10 @@ pub fn main(init: std.process.Init) !void {
                 shadow.begin(cascade);
                 renderer.drawDepth(shadow.vp[cascade], all_idx.items.len);
                 grass.drawDepth(shadow.vp[cascade], camera.position, water_clock);
-                props.drawTreesDepth(shadow.vp[cascade], water_clock, scatter.trees.items);
-                props.drawRocksDepth(shadow.vp[cascade], water_clock);
-                props.drawSnowDepth(shadow.vp[cascade], water_clock);
-                props.drawShoreDepth(shadow.vp[cascade], water_clock);
+                props.drawTreesDepth(shadow.vp[cascade], water_clock, scatter.trees.items, camera.position);
+                props.drawRocksDepth(shadow.vp[cascade], water_clock, camera.position);
+                props.drawSnowDepth(shadow.vp[cascade], water_clock, camera.position);
+                props.drawShoreDepth(shadow.vp[cascade], water_clock, camera.position);
                 shadow.end();
             }
             gl.Viewport(0, 0, window.width, window.height);
