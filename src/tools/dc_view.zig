@@ -29,7 +29,7 @@ const SEED: u32 = 1337;
 
 /// Bumped whenever the field or the mesher changes. Printed at startup so a stale binary cannot be
 /// mistaken for a change that "made no difference" - which is what the last commit could not rule out.
-const BUILD_TAG = "clouds-3";
+const BUILD_TAG = "atmosphere-2";
 // 8x8 chunks (64 chunks, 256 m^2), re-meshed as the camera crosses a chunk border:: at PATCH=4 the boundary was visible in frame and accounted for
 // 99.6% of the background pixels counted as "holes". A bigger patch pushes the world edge out of
 // shot, which is the honest way to separate a mesher defect from the edge of the world.
@@ -201,6 +201,7 @@ const HudStats = struct {
     fps: f64,
     frame_ms: f64,
     worst_ms: f64,
+    sky_ms: f32,
     verts: usize,
     quads: usize,
     patch_x: i32,
@@ -226,7 +227,7 @@ fn drawHud(hud: *vz.gfx.Hud, width: i32, height: i32, s: HudStats) void {
     var y: f32 = 8;
 
     hud.setColour(1.0, 1.0, 0.6);
-    if (std.fmt.bufPrint(&buffer, "FPS {d:.1}  FRAME {d:.2} MS  WORST {d:.2} MS", .{ s.fps, s.frame_ms, s.worst_ms })) |text| {
+    if (std.fmt.bufPrint(&buffer, "FPS {d:.1}  FRAME {d:.2} MS  WORST {d:.2} MS  SKY {d:.2} MS", .{ s.fps, s.frame_ms, s.worst_ms, s.sky_ms })) |text| {
         hud.text(10, y, text);
     } else |_| {}
     y += hud.lineHeight();
@@ -287,6 +288,14 @@ const fragment_src: [:0]const u8 =
     \\in vec3 v_pos;
     \\in vec3 v_col;
     \\in float v_mat;
+    \\uniform vec3 u_eye;
+    \\uniform vec3 u_sun_dir;
+    \\uniform vec3 u_fog_colour;   // display-space horizon scattering colour
+    \\uniform vec3 u_fog_sun;      // display-space sun tint for the forward-scatter term
+    \\uniform float u_fog_density; // density at u_fog_base, per block
+    \\uniform float u_fog_height;  // exponential scale height
+    \\uniform float u_fog_base;    // world y where the density equals u_fog_density
+    \\uniform float u_atmosphere;  // 0 off, 1 on
 
     \\float hash13(vec3 p) {
     \\    p = fract(p * 0.3183099 + vec3(0.1, 0.2, 0.3));
@@ -352,7 +361,26 @@ const fragment_src: [:0]const u8 =
     \\    // which is what turned the surface into a pale sheet the moment FRAMEBUFFER_SRGB went on.
     \\    vec3 c = albedo * (amb + ndl * 1.15) * 0.16;
     \\    c = clamp((c * (2.51 * c + 0.03)) / (c * (2.43 * c + 0.59) + 0.14), 0.0, 1.0);
-    \\    frag = vec4(pow(c, vec3(0.4545)), 1.0);
+    \\    vec3 outc = pow(c, vec3(0.4545));
+    \\    if (u_atmosphere > 0.5) {
+    \\        // Aerial perspective: integrate an exponential height density along the view ray.
+    \\        // tau = d0 * exp(-(eye.y - base)/H) * dist * (1 - exp(-dy/H)) / (dy/H), the closed form
+    \\        // of a single-scale-height medium (Decima's analytic height fog; ADR 0021). The colour
+    \\        // is the horizon scattering colour plus a forward-scatter tint toward the sun. Blended
+    \\        // in the terrain shader's display space, the same space the rest of this surface uses.
+    \\        vec3 ray = v_pos - u_eye;
+    \\        float dist = length(ray);
+    \\        float H = max(u_fog_height, 1.0);
+    \\        float k = ray.y / H;
+    \\        float d0 = u_fog_density * exp(-(u_eye.y - u_fog_base) / H);
+    \\        float tau = abs(k) > 1e-4 ? d0 * dist * (1.0 - exp(-k)) / k : d0 * dist;
+    \\        tau = max(tau, 0.0);
+    \\        float fog = 1.0 - exp(-tau);
+    \\        float sun_amt = pow(max(dot(normalize(ray), u_sun_dir), 0.0), 6.0);
+    \\        vec3 fogc = mix(u_fog_colour, u_fog_sun, 0.15 + 0.55 * sun_amt);
+    \\        outc = mix(outc, fogc, fog);
+    \\    }
+    \\    frag = vec4(outc, 1.0);
     \\}
 ;
 
@@ -878,13 +906,28 @@ pub fn main(init: std.process.Init) !void {
     // block world uses so the two are comparable by eye.
     var sky = try vz.gfx.SkyRenderer.init();
     defer sky.deinit();
-    // Two cloud decks: the engine's cumulus slab plus its optional high cirrus veil, which has
-    // its own wind. The engine leaves cirrus off; here the second deck is the point.
-    sky.cirrus = true;
+    // The high cirrus deck is gone (ADR 0021). The replacement is a horizon haze band in the sky
+    // plus analytic height fog / aerial perspective on the terrain. VOXEL_ATMOSPHERE=0 turns both
+    // off for A/B screenshots.
+    var atmosphere = true;
+    if (init.environ_map.get("VOXEL_ATMOSPHERE")) |raw| {
+        if (raw.len > 0 and raw[0] == '0') atmosphere = false;
+    }
+    sky.atmosphere = atmosphere;
     var sun = sun_mod.Sun.init();
-    sun.setTime(0.30); // ADR 0009: noon sits at t = 0.30 of the 300 s cycle
+    // ADR 0009: noon sits at t = 0.30 of the 300 s cycle. VOXEL_DC_SUN pins another time for the
+    // dawn/noon/dusk acceptance shots.
+    var sun_time: f32 = 0.30;
+    if (init.environ_map.get("VOXEL_DC_SUN")) |raw| sun_time = std.fmt.parseFloat(f32, raw) catch sun_time;
+    sun.setTime(sun_time);
+    std.debug.print("sun time {d:.3} elevation {d:.1} deg\n", .{ sun_time, sun.elevation() });
     var cloud_shift = Vec3.init(0, 0, 0);
-    var cirrus_shift = Vec3.init(0, 0, 0);
+    // Height-fog coefficients: a thin layer hugging the low ground, scale height 25 m, reaching
+    // ~40 % at 200 m from the eye at terrain height. Density is a tuning constant, not a physical
+    // atmosphere constant (ADR 0021).
+    const fog_density: f32 = 0.0045;
+    const fog_height: f32 = 20.0;
+    const fog_base: f32 = 30.0;
 
     var all_verts: std.ArrayList(Coloured) = .empty;
     defer all_verts.deinit(alloc);
@@ -1071,15 +1114,13 @@ pub fn main(init: std.process.Init) !void {
         camera.pitch = player.pitch;
         const vp = camera.viewProjection(aspect);
 
-        // Two decks, frame-delta drift. The engine advances its cloud wind at 0.06 units/s
-        // (`6.0 * dt * 0.01` in app.zig); the viewer's old fixed 0.016*2.0 per frame ran at
-        // 3.84 units/s on a 120 Hz display, 64x the engine. The low cumulus now sits on that
-        // engine speed, and the high cirrus runs 3x faster so two decks visibly move at
-        // different rates instead of the whole sky sliding as one sheet.
+        // The cumulus deck drifts on the frame delta at the engine's own wind speed (0.06 units/s,
+        // `6.0 * dt * 0.01` in app.zig). The old fixed 0.016*2.0 per frame ran at 3.84 units/s on
+        // a 120 Hz display, 64x the engine.
         const dt_f: f32 = @floatCast(frame_dt);
         cloud_shift = Vec3.init(cloud_shift.x + dt_f * 0.06, 0, cloud_shift.z + dt_f * 0.015);
-        cirrus_shift = Vec3.init(cirrus_shift.x + dt_f * 0.18, 0, cirrus_shift.z + dt_f * 0.045);
-        sky.cirrus_shift = cirrus_shift;
+        const ramp = sun.ramp();
+        const lighting = sun.lighting();
         // The sky pass fills the whole screen, so with it running the magenta clear colour is never
         // visible and a hole shows sky instead. In the diagnostic mode the background is left empty
         // so every hole is the one colour the render cannot produce.
@@ -1092,6 +1133,22 @@ pub fn main(init: std.process.Init) !void {
         gl.Disable(gl.CULL_FACE);
         shader.use();
         shader.setMat4("u_view_proj", vp.m);
+        // Fog colours are passed display-encoded because this spike's terrain shader applies its
+        // own gamma encode on top of the sRGB framebuffer; matching that space keeps the existing
+        // look and makes the haze read the same as the sky's horizon.
+        const encode = struct {
+            fn f(x: f32) f32 {
+                return std.math.pow(f32, @max(x, 0.0), 0.4545);
+            }
+        }.f;
+        shader.setVec3("u_eye", .{ camera.position.x, camera.position.y, camera.position.z });
+        shader.setVec3("u_sun_dir", .{ lighting.sun_dir.x, lighting.sun_dir.y, lighting.sun_dir.z });
+        shader.setVec3("u_fog_colour", .{ encode(ramp.horizon.x), encode(ramp.horizon.y), encode(ramp.horizon.z) });
+        shader.setVec3("u_fog_sun", .{ encode(ramp.sun.x), encode(ramp.sun.y), encode(ramp.sun.z) });
+        shader.setFloat("u_fog_density", fog_density);
+        shader.setFloat("u_fog_height", fog_height);
+        shader.setFloat("u_fog_base", fog_base);
+        shader.setFloat("u_atmosphere", if (atmosphere) 1.0 else 0.0);
         gl.BindVertexArray(vao);
         // Read the live index count: after a streaming swap the startup slice is stale.
         gl.DrawElements(gl.TRIANGLES, @intCast(all_idx.items.len), gl.UNSIGNED_INT, 0);
@@ -1101,6 +1158,7 @@ pub fn main(init: std.process.Init) !void {
                 .fps = if (fps_now > 0) fps_now else 1000.0 / @max(frame_ms, 0.001),
                 .frame_ms = frame_ms,
                 .worst_ms = @as(f64, @floatFromInt(worst_ns)) / 1e6,
+                .sky_ms = sky.last_ms,
                 .verts = all_verts.items.len,
                 .quads = all_idx.items.len / 6,
                 .patch_x = patch_origin,

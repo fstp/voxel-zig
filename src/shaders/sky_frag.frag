@@ -12,8 +12,7 @@ uniform vec3 u_cloud_shift;    // wind offset in cloud space
 uniform float u_cloud_bottom;
 uniform float u_cloud_top;
 uniform vec3 u_cloud_light;    // sun colour at cloud height
-uniform float u_cirrus;        // 0 off, 1 on: thin high deck with its own wind
-uniform vec3 u_cirrus_shift;   // cirrus wind offset, in the same cloud-space units
+uniform float u_atmosphere;    // 0 off, 1 on: horizon haze + Mie glow (ADR 0021)
 in vec2 v_ndc;
 out vec4 f_colour;
 
@@ -111,39 +110,6 @@ vec4 clouds(vec3 dir) {
     return vec4(scattered, transmittance);
 }
 
-// A thin high cirrus deck: a veil stretched along the wind on a plane at 1800 blocks. It is
-// optically thin, so two noise octaves and an alpha composite replace a raymarch - a fraction
-// of the cumulus cost, and a second wind for the eye to read against the lower deck.
-vec4 cirrus(vec3 dir) {
-    if (u_cirrus < 0.5 || dir.y < 0.015) return vec4(0.0, 0.0, 0.0, 1.0);
-    float t = (1800.0 - u_eye.y) / dir.y;
-    vec3 p = u_eye + dir * t;
-    // Same world scale as the cumulus base, so one shift unit is the same distance per second.
-    vec2 q = p.xz * 0.0038 + u_cirrus_shift.xz;
-    // Bend the fibre field with a slow warp so the filaments curve and cross instead of
-    // running as parallel bands across the whole sky.
-    vec2 warp = vec2(vnoise(vec3(q * 0.31, 3.0)), vnoise(vec3(q * 0.31, 9.0))) - 0.5;
-    vec2 r = q + warp * 1.1;
-    // Two fibre layers at a slight angle to each other: the first sets the long filaments,
-    // the second breaks them into wisps. Moderate stretch (about 2.5x), not the 5x that read
-    // as regular stripes.
-    const float ca = 0.94;
-    const float sa = 0.34;
-    vec2 r2 = vec2(r.x * ca - r.y * sa, r.x * sa + r.y * ca);
-    float n = vnoise(vec3(r.x * 0.55, r.y * 1.4, 21.0)) * 0.58
-            + vnoise(vec3(r2.x * 1.3, r2.y * 3.2, 37.0)) * 0.42;
-    // Patchy coverage: a slow weather field leaves clear gaps, so the veil reads as separate
-    // sheets of cirrus rather than one continuous brushed texture.
-    float weather = vnoise(vec3(q * 0.16, 51.0));
-    float cover = 0.58 + (weather - 0.5) * 0.18;
-    float d = smoothstep(cover - 0.05, cover + 0.13, n);
-    float fade = smoothstep(0.015, 0.14, dir.y);
-    // Thin ice cloud is mostly skylight; a little direct sun warms the wisps.
-    vec3 lit = u_zenith * 0.95 + u_cloud_light * 0.30;
-    float alpha = d * fade * 0.32;
-    return vec4(lit * alpha, 1.0 - alpha);
-}
-
 void main() {
     // Unproject the far plane at this corner and take the direction from the eye.
     vec4 far_point = u_inv_vp * vec4(v_ndc, 1.0, 1.0);
@@ -158,9 +124,15 @@ void main() {
     float glow = pow(max(c, 0.0), 220.0) * 0.55;
     col += u_sun_colour * (disc * 3.0 + glow);
 
-    // Far deck first, then the near one: the cumulus correctly occludes the cirrus.
-    vec4 high = cirrus(dir);
-    col = col * high.a + high.rgb;
+    if (u_atmosphere > 0.5) {
+        // Atmospheric depth without a second deck: a denser scattering layer toward the horizon,
+        // tinted by the horizon colour, plus a Mie-like glow around the sun. Decima/Frostbite
+        // shape; see ADR 0021.
+        float haze = exp(-max(dir.y, 0.0) * 7.0);
+        float mie = pow(max(c, 0.0), 8.0);
+        vec3 haze_col = u_horizon * 1.06 + u_sun_colour * mie * 0.35;
+        col = mix(col, haze_col, haze * 0.30);
+    }
 
     // Clouds composite over the gradient and the disc: a cloud in front of the
     // sun dims it, which is the whole point of drawing them here.

@@ -24,11 +24,9 @@ pub const SkyRenderer = struct {
     query: gl.uint = 0,
     /// Milliseconds the sky pass took on the GPU last frame, for the HUD.
     last_ms: f32 = 0,
-    /// Optional thin high cirrus deck, with its own wind. Off by default so the engine's
-    /// accepted sky look is unchanged; the DC viewer turns it on for a second, faster deck.
-    cirrus: bool = false,
-    /// Cirrus wind offset, in the same cloud-space units as `cloud_shift`.
-    cirrus_shift: Vec3 = .{ .x = 0, .y = 0, .z = 0 },
+    /// Optional atmospheric horizon haze + Mie glow (ADR 0021). Off by default so the engine's
+    /// accepted sky look is unchanged; the DC viewer turns it on for the atmosphere pass.
+    atmosphere: bool = false,
 
     pub fn init() !SkyRenderer {
         var shader = try Shader.init(VERT_SRC, FRAG_SRC);
@@ -95,8 +93,7 @@ pub const SkyRenderer = struct {
             cloud_ramp.sun.y + 0.14,
             cloud_ramp.sun.z + 0.12,
         });
-        self.shader.setFloat("u_cirrus", if (self.cirrus) 1.0 else 0.0);
-        self.shader.setVec3("u_cirrus_shift", .{ self.cirrus_shift.x, self.cirrus_shift.y, self.cirrus_shift.z });
+        self.shader.setFloat("u_atmosphere", if (self.atmosphere) 1.0 else 0.0);
 
         gl.BindVertexArray(self.vao);
         if (self.query != 0) gl.BeginQuery(gl.TIME_ELAPSED, self.query);
