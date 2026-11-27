@@ -356,6 +356,7 @@ pub fn main(init: std.process.Init) !void {
     props.uploadRocks(scatter.rocks.items);
     props.uploadSnow(scatter.snow.items);
     props.uploadShore(scatter.shore.items);
+    props.logAssetStats();
 
     var water = try WaterRenderer.init();
     defer water.deinit();

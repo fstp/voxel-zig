@@ -31,6 +31,7 @@ const Mesh = struct {
     vbo: u32 = 0,
     ebo: u32 = 0,
     index_count: usize = 0,
+    vertex_count: usize = 0,
 };
 
 fn addVertex(md: *MeshData, alloc: std.mem.Allocator, p: [3]f32, n: [3]f32, c: [3]f32, rigid: f32) !u32 {
@@ -447,18 +448,62 @@ const ATLAS_CELL: usize = ATLAS_SIZE / ATLAS_GRID;
 
 const MAX_PER_LOD: usize = 256;
 
+/// Shared foliage geometry handles. This is the GL equivalent of the paper's reusable clusters:
+/// each mesh is uploaded once and all instances/LODs that use it reference the same VBO/EBO.
+pub const AssetId = enum(u8) {
+    tree_lod0,
+    tree_lod1,
+    tree_lod2,
+    rock,
+    snow,
+    shore,
+};
+
+pub const AssetStats = struct {
+    assets: usize,
+    vertices: usize,
+    indices: usize,
+    bytes: usize,
+};
+
+pub const AssetRegistry = struct {
+    meshes: [6]Mesh = .{ .{}, .{}, .{}, .{}, .{}, .{} },
+
+    fn add(self: *AssetRegistry, id: AssetId, mesh: Mesh) void {
+        self.meshes[@intFromEnum(id)] = mesh;
+    }
+
+    fn get(self: *const AssetRegistry, id: AssetId) *const Mesh {
+        return &self.meshes[@intFromEnum(id)];
+    }
+
+    fn stats(self: *const AssetRegistry) AssetStats {
+        var vertices: usize = 0;
+        var indices: usize = 0;
+        var bytes: usize = 0;
+        for (self.meshes) |m| {
+            if (m.vao == 0) continue;
+            vertices += m.vertex_count;
+            indices += m.index_count;
+            bytes += m.vertex_count * @sizeOf(Vertex) + m.index_count * @sizeOf(u32);
+        }
+        return .{ .assets = self.meshes.len, .vertices = vertices, .indices = indices, .bytes = bytes };
+    }
+
+    fn deinit(self: *AssetRegistry) void {
+        for (&self.meshes) |*m| destroyMesh(m);
+    }
+};
+
 pub const PropRenderer = struct {
     shader: Shader,
     depth_shader: Shader,
-    tree_meshes: [3]Mesh = .{ .{}, .{}, .{} },
+    assets: AssetRegistry = .{},
     tree_instances: [3]u32 = .{ 0, 0, 0 },
-    rock_mesh: Mesh = .{},
     rock_instances: u32 = 0,
     rock_count: usize = 0,
-    snow_mesh: Mesh = .{},
     snow_instances: u32 = 0,
     snow_count: usize = 0,
-    shore_mesh: Mesh = .{},
     shore_instances: u32 = 0,
     shore_count: usize = 0,
     impostor_shader: ?Shader = null,
@@ -480,27 +525,29 @@ pub const PropRenderer = struct {
             .{ .sides = 8, .cones = 3 },
             .{ .sides = 5, .cones = 2 },
         };
+        const tree_assets = [_]AssetId{ .tree_lod0, .tree_lod1, .tree_lod2 };
         for (0..3) |i| {
             var md = try buildTree(alloc, lods[i].sides, lods[i].cones);
             defer md.deinit(alloc);
             gl.GenBuffers(1, @ptrCast(&self.tree_instances[i]));
-            self.tree_meshes[i] = try uploadMesh(alloc, &md, self.tree_instances[i]);
+            const mesh = try uploadMesh(alloc, &md, self.tree_instances[i]);
+            self.assets.add(tree_assets[i], mesh);
         }
 
         var rock = try buildRock(alloc);
         defer rock.deinit(alloc);
         gl.GenBuffers(1, @ptrCast(&self.rock_instances));
-        self.rock_mesh = try uploadMesh(alloc, &rock, self.rock_instances);
+        self.assets.add(.rock, try uploadMesh(alloc, &rock, self.rock_instances));
 
         var snow = try buildSnowClump(alloc);
         defer snow.deinit(alloc);
         gl.GenBuffers(1, @ptrCast(&self.snow_instances));
-        self.snow_mesh = try uploadMesh(alloc, &snow, self.snow_instances);
+        self.assets.add(.snow, try uploadMesh(alloc, &snow, self.snow_instances));
 
         var shore = try buildShoreClump(alloc);
         defer shore.deinit(alloc);
         gl.GenBuffers(1, @ptrCast(&self.shore_instances));
-        self.shore_mesh = try uploadMesh(alloc, &shore, self.shore_instances);
+        self.assets.add(.shore, try uploadMesh(alloc, &shore, self.shore_instances));
 
         self.impostor_shader = try Shader.init(impostor_vertex_src, impostor_fragment_src);
         gl.GenBuffers(1, @ptrCast(&self.impostor_vbo));
@@ -520,15 +567,12 @@ pub const PropRenderer = struct {
 
     pub fn deinit(self: *PropRenderer, alloc: std.mem.Allocator) void {
         _ = alloc;
+        self.assets.deinit();
         for (0..3) |i| {
-            destroyMesh(&self.tree_meshes[i]);
             if (self.tree_instances[i] != 0) gl.DeleteBuffers(1, @ptrCast(&self.tree_instances[i]));
         }
-        destroyMesh(&self.rock_mesh);
         if (self.rock_instances != 0) gl.DeleteBuffers(1, @ptrCast(&self.rock_instances));
-        destroyMesh(&self.snow_mesh);
         if (self.snow_instances != 0) gl.DeleteBuffers(1, @ptrCast(&self.snow_instances));
-        destroyMesh(&self.shore_mesh);
         if (self.shore_instances != 0) gl.DeleteBuffers(1, @ptrCast(&self.shore_instances));
         if (self.impostor_shader) |*sh| sh.deinit();
         if (self.impostor_vao != 0) gl.DeleteVertexArrays(1, @ptrCast(&self.impostor_vao));
@@ -536,6 +580,21 @@ pub const PropRenderer = struct {
         if (self.impostor_tex != 0) gl.DeleteTextures(1, @ptrCast(&self.impostor_tex));
         self.depth_shader.deinit();
         self.shader.deinit();
+    }
+
+    /// Logs the shared-geometry budget. Vertex/index bytes are one copy per asset, not per instance.
+    pub fn logAssetStats(self: *const PropRenderer) void {
+        const s = self.assets.stats();
+        std.debug.print(
+            "assets: {d} shared meshes, {d} vertices, {d} indices, {d} geometry bytes\n",
+            .{ s.assets, s.vertices, s.indices, s.bytes },
+        );
+    }
+
+    /// The mesh/instance handles are one per asset and reused by every instance of that asset.
+    pub fn assetIdForLod(lod: usize) AssetId {
+        const ids = [_]AssetId{ .tree_lod0, .tree_lod1, .tree_lod2 };
+        return ids[lod];
     }
 
     /// Uploads the rock list once per scatter build.
@@ -568,19 +627,19 @@ pub const PropRenderer = struct {
         if (trees.len == 0) return;
         gl.BindBuffer(gl.ARRAY_BUFFER, self.tree_instances[0]);
         gl.BufferData(gl.ARRAY_BUFFER, @intCast(trees.len * @sizeOf(Prop)), trees.ptr, gl.STATIC_DRAW);
-        self.drawDepthMesh(&self.tree_meshes[0], self.tree_instances[0], trees.len, view_projection, time);
+        self.drawDepthMesh(self.assets.get(.tree_lod0), self.tree_instances[0], trees.len, view_projection, time);
     }
 
     pub fn drawRocksDepth(self: *PropRenderer, view_projection: Mat4, time: f32) void {
-        self.drawDepthMesh(&self.rock_mesh, self.rock_instances, self.rock_count, view_projection, time);
+        self.drawDepthMesh(self.assets.get(.rock), self.rock_instances, self.rock_count, view_projection, time);
     }
 
     pub fn drawSnowDepth(self: *PropRenderer, view_projection: Mat4, time: f32) void {
-        self.drawDepthMesh(&self.snow_mesh, self.snow_instances, self.snow_count, view_projection, time);
+        self.drawDepthMesh(self.assets.get(.snow), self.snow_instances, self.snow_count, view_projection, time);
     }
 
     pub fn drawShoreDepth(self: *PropRenderer, view_projection: Mat4, time: f32) void {
-        self.drawDepthMesh(&self.shore_mesh, self.shore_instances, self.shore_count, view_projection, time);
+        self.drawDepthMesh(self.assets.get(.shore), self.shore_instances, self.shore_count, view_projection, time);
     }
 
     fn drawDepthMesh(self: *PropRenderer, mesh: *const Mesh, instance_vbo: u32, count: usize, view_projection: Mat4, time: f32) void {
@@ -669,7 +728,7 @@ pub const PropRenderer = struct {
         time: f32,
         shadow: *ShadowRenderer,
     ) void {
-        self.drawDetailMesh(&self.rock_mesh, self.rock_instances, self.rock_count, view_projection, eye, sun_dir, sun_colour, ambient_sky, ambient_ground, fog_colour, fog_sun, fog_density, fog_height, fog_base, time, shadow);
+        self.drawDetailMesh(self.assets.get(.rock), self.rock_instances, self.rock_count, view_projection, eye, sun_dir, sun_colour, ambient_sky, ambient_ground, fog_colour, fog_sun, fog_density, fog_height, fog_base, time, shadow);
     }
 
     pub fn drawSnow(
@@ -688,7 +747,7 @@ pub const PropRenderer = struct {
         time: f32,
         shadow: *ShadowRenderer,
     ) void {
-        self.drawDetailMesh(&self.snow_mesh, self.snow_instances, self.snow_count, view_projection, eye, sun_dir, sun_colour, ambient_sky, ambient_ground, fog_colour, fog_sun, fog_density, fog_height, fog_base, time, shadow);
+        self.drawDetailMesh(self.assets.get(.snow), self.snow_instances, self.snow_count, view_projection, eye, sun_dir, sun_colour, ambient_sky, ambient_ground, fog_colour, fog_sun, fog_density, fog_height, fog_base, time, shadow);
     }
 
     pub fn drawShore(
@@ -707,7 +766,7 @@ pub const PropRenderer = struct {
         time: f32,
         shadow: *ShadowRenderer,
     ) void {
-        self.drawDetailMesh(&self.shore_mesh, self.shore_instances, self.shore_count, view_projection, eye, sun_dir, sun_colour, ambient_sky, ambient_ground, fog_colour, fog_sun, fog_density, fog_height, fog_base, time, shadow);
+        self.drawDetailMesh(self.assets.get(.shore), self.shore_instances, self.shore_count, view_projection, eye, sun_dir, sun_colour, ambient_sky, ambient_ground, fog_colour, fog_sun, fog_density, fog_height, fog_base, time, shadow);
     }
 
     fn drawDetailMesh(
@@ -777,8 +836,9 @@ pub const PropRenderer = struct {
         if (props.len == 0) return;
         gl.BindBuffer(gl.ARRAY_BUFFER, self.tree_instances[lod]);
         gl.BufferData(gl.ARRAY_BUFFER, @intCast(props.len * @sizeOf(Prop)), props.ptr, gl.STATIC_DRAW);
-        gl.BindVertexArray(self.tree_meshes[lod].vao);
-        gl.DrawElementsInstanced(gl.TRIANGLES, @intCast(self.tree_meshes[lod].index_count), gl.UNSIGNED_INT, 0, @intCast(props.len));
+        const mesh = self.assets.get(PropRenderer.assetIdForLod(lod));
+        gl.BindVertexArray(mesh.vao);
+        gl.DrawElementsInstanced(gl.TRIANGLES, @intCast(mesh.index_count), gl.UNSIGNED_INT, 0, @intCast(props.len));
     }
 };
 
@@ -835,8 +895,9 @@ pub const PropRenderer = struct {
                 const mvp = proj.mul(view);
                 gl.Viewport(@intCast(i * ATLAS_CELL), @intCast(j * ATLAS_CELL), @intCast(ATLAS_CELL), @intCast(ATLAS_CELL));
                 bake_shader.setMat4("u_mvp", mvp.m);
-                gl.BindVertexArray(self.tree_meshes[0].vao);
-                gl.DrawElements(gl.TRIANGLES, @intCast(self.tree_meshes[0].index_count), gl.UNSIGNED_INT, 0);
+                const mesh = self.assets.get(.tree_lod0);
+                gl.BindVertexArray(mesh.vao);
+                gl.DrawElements(gl.TRIANGLES, @intCast(mesh.index_count), gl.UNSIGNED_INT, 0);
             }
         }
         gl.BindVertexArray(0);
@@ -898,6 +959,7 @@ pub const PropRenderer = struct {
 fn uploadMesh(alloc: std.mem.Allocator, md: *MeshData, instance_vbo: u32) !Mesh {
     var m = Mesh{};
     m.index_count = md.idx.items.len;
+    m.vertex_count = md.verts.items.len;
     gl.GenVertexArrays(1, @ptrCast(&m.vao));
     gl.GenBuffers(1, @ptrCast(&m.vbo));
     gl.GenBuffers(1, @ptrCast(&m.ebo));
