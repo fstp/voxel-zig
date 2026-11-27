@@ -207,6 +207,25 @@ const fragment_src: [:0]const u8 =
     \\    mixed = mix(mixed, stone, 0.22 + 0.30 * (1.0 - lichen));
     \\    return mixed * (0.78 + 0.30 * mott);
     \\}
+    \\float microHash(vec2 p) {
+    \\    return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
+    \\}
+    \\float microPebble(vec2 p) {
+    \\    const float step = 0.62;
+    \\    vec2 c = floor(p / step);
+    \\    float jx = microHash(c + vec2(1.7, 3.1));
+    \\    float jz = microHash(c + vec2(8.3, 5.7));
+    \\    float r = 0.10 + 0.14 * microHash(c + vec2(4.9, 9.2));
+    \\    vec2 pc = (c + 0.5) * step + (vec2(jx, jz) - 0.5) * step * 0.48;
+    \\    float d = length(p - pc);
+    \\    return 1.0 - clamp(d / r, 0.0, 1.0);
+    \\}
+    \\float microHeight(vec2 p) {
+    \\    float h = 0.016 * sin(p.x * 2.7 + p.y * 0.7) * cos(p.y * 2.1 - p.x * 0.3);
+    \\    h += 0.009 * sin(p.x * 7.3 + 1.7) * cos(p.y * 6.1 + 0.4);
+    \\    h += 0.032 * microPebble(p);
+    \\    return h;
+    \\}
     \\vec3 shIrradiance(vec3 n) {
     \\    float x = n.x, y = n.y, z = n.z;
     \\    return u_sh[0] * 0.282095
@@ -308,6 +327,21 @@ const fragment_src: [:0]const u8 =
     \\    }
     \\    // Snow fills crevices, so flatten the normal toward up where it lies.
     \\    n = normalize(mix(n, vec3(0.0, 1.0, 0.0), snow * 0.10));
+    \\    // Implicit micro-height projection for the flat grass ground. The same field is sampled
+    \\    // by the grass scatter on the CPU; the normal and the UV offset both come from it.
+    \\    float micro_amt = (1.0 - smoothstep(10.0, 32.0, view_dist))
+    \\                    * (1.0 - snow) * (1.0 - mud)
+    \\                    * (1.0 - smoothstep(0.45, 0.55, v_mat));
+    \\    vec2 micro_p = v_pos.xz;
+    \\    if (micro_amt > 0.001) {
+    \\        float mh = microHeight(v_pos.xz);
+    \\        const float me = 0.025;
+    \\        vec2 mg = vec2(microHeight(v_pos.xz + vec2(me, 0.0)) - microHeight(v_pos.xz - vec2(me, 0.0)),
+    \\                       microHeight(v_pos.xz + vec2(0.0, me)) - microHeight(v_pos.xz - vec2(0.0, me))) / (2.0 * me);
+    \\        vec2 view_xz = normalize(v_pos.xz - u_eye.xz);
+    \\        micro_p += view_xz * (mh * 3.2) * micro_amt;
+    \\        n = normalize(n + vec3(-mg.x, 0.0, -mg.y) * 0.34 * micro_amt);
+    \\    }
     \\    float ndl = max(dot(n, l), 0.0);
     \\    float shadow = sunShadow(v_pos, n);
     \\    // Sky irradiance from SH9 replaces the old constant hemisphere (ADR 0027). The ground
@@ -328,7 +362,7 @@ const fragment_src: [:0]const u8 =
     \\        float flatness = smoothstep(0.55, 0.85, normalize(v_nrm).y);
     \\        float ground_mask = (1.0 - smoothstep(0.45, 0.55, v_mat)) * flatness
     \\                          * (1.0 - snow) * (1.0 - mud);
-    \\        vec3 ground = groundTexture(v_pos.xz, mott) * 1.10;
+    \\        vec3 ground = groundTexture(micro_p, mott) * 1.10;
     \\        albedo = mix(albedo, ground, ground_mask * 0.85);
     \\    }
     \\    if (u_rock_enabled > 0.5) {

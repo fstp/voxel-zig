@@ -6,6 +6,7 @@
 const std = @import("std");
 const dcw = @import("dc_world.zig");
 const noise = @import("noise.zig");
+const microdetail = @import("microdetail.zig");
 
 /// Grass and flower blades: one instance per blade.
 pub const Blade = extern struct {
@@ -163,6 +164,9 @@ pub fn build(
                 const px = x + jx;
                 const pz = z + jz;
                 if (blocked(edits, px, pz)) continue;
+                const micro = microdetail.height(px, pz);
+                const mg = microdetail.gradient(px, pz);
+                if (@abs(mg[0]) + @abs(mg[1]) > 1.35) continue;
                 const h_grid = grid.at(px, pz);
                 if (h_grid < dcw.SEA_LEVEL + 0.35) continue;
                 if (h_grid > 66.0) continue; // below the 10.8 snow line, so blades do not poke through snow
@@ -173,9 +177,9 @@ pub fn build(
 
                 const flower = rand01(ix, iz, 0xF10A) < 0.02 and ny > 0.82;
                 const tint = rand01(ix, iz, 0x1234);
-                const h = dcw.heightAt(px, pz);
+                const h = dcw.heightAt(px, pz) + micro;
                 try out.blades.append(alloc, .{
-                    .pos = .{ px, h - 0.05, pz },
+                    .pos = .{ px, h - 0.02, pz },
                     .yaw = rand01(ix, iz, 0xA5A5) * std.math.tau,
                     .scale = 0.55 + 0.85 * tint,
                     .tint = tint,
@@ -225,6 +229,10 @@ pub fn build(
                 if (cny < 0.70) continue;
                 if (grid.density(cx, cz) < -0.45) continue;
                 const clump_radius = 1.00 + 1.10 * rand01(ix, iz, 0xC104);
+                // Micro-height is sampled once per tuft: the 2.7M blade budget cannot afford four
+                // trig evaluations per blade, and blades within a 1-2 m tuft share the same bump.
+                const clump_micro = microdetail.height(cx, cz);
+                if (microdetail.pebbleMask(cx, cz) > 0.90) continue;
                 // More tufts, fewer blades per tuft: spreads the 10x budget across the meadow so
                 // there are no large bald patches between clumps.
                 const count: usize = 143 + @as(usize, @intFromFloat(rand01(ix, iz, 0xC105) * 230.0));
@@ -236,13 +244,13 @@ pub fn build(
                     const px = cx + @cos(a) * rr;
                     const pz = cz + @sin(a) * rr;
                     if (blocked(edits, px, pz)) continue;
-                    const h = dcw.heightAt(px, pz);
+                    const h = dcw.heightAt(px, pz) + clump_micro;
                     if (h < dcw.SEA_LEVEL + 0.35 or h > 66.0) continue;
 
                     const flower = rand01(ix, iz, 0xC600 + @as(u32, @intCast(k))) < 0.04 and cny > 0.82;
                     const tint = rand01(ix, iz, 0xC800 + @as(u32, @intCast(k)));
                     try out.blades.append(alloc, .{
-                        .pos = .{ px, h - 0.05, pz },
+                        .pos = .{ px, h - 0.02, pz },
                         .yaw = rand01(ix, iz, 0xCA00 + @as(u32, @intCast(k))) * std.math.tau,
                         .scale = 0.55 + 0.85 * tint,
                         .tint = tint,
