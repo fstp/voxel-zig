@@ -53,33 +53,36 @@ fn addTri(md: *MeshData, alloc: std.mem.Allocator, a: u32, b: u32, c: u32) !void
     try md.idx.append(alloc, c);
 }
 
-/// A stylised conifer: a trunk cylinder plus overlapping foliage cones. `cones` and `sides`
-/// control the LOD. World height is about 6.5 m at scale 1.
-fn buildTree(alloc: std.mem.Allocator, sides: usize, cones: usize) !MeshData {
+/// A stylised conifer: a trunk cylinder plus overlapping foliage cones. The trunk and foliage
+/// side counts are separate because only the trunk can be coarsened inside the 1 px budget.
+/// World height is about 6.5 m at scale 1.
+fn buildTree(alloc: std.mem.Allocator, trunk_sides: usize, cone_sides: usize, cones: usize) !MeshData {
     var md = MeshData{};
     errdefer md.deinit(alloc);
     const two_pi = std.math.tau;
 
-    // Trunk: two rings, open ends.
+    // Trunk: two rings, open ends. Its silhouette is small, so coarsening the trunk is the only
+    // safe way to make a cheaper LOD without moving the canopy silhouette at a useful distance.
     const trunk_h: f32 = 2.2;
     const r0: f32 = 0.19;
     const r1: f32 = 0.13;
     var ring0: [24]u32 = undefined;
     var ring1: [24]u32 = undefined;
-    for (0..sides) |i| {
-        const a = @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(sides)) * two_pi;
+    for (0..trunk_sides) |i| {
+        const a = @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(trunk_sides)) * two_pi;
         const cx = @cos(a);
         const sz = @sin(a);
         ring0[i] = try addVertex(&md, alloc, .{ cx * r0, 0, sz * r0 }, .{ cx, 0, sz }, .{ 0.20, 0.14, 0.09 }, 0.0);
         ring1[i] = try addVertex(&md, alloc, .{ cx * r1, trunk_h, sz * r1 }, .{ cx, 0, sz }, .{ 0.22, 0.16, 0.11 }, 0.02);
     }
-    for (0..sides) |i| {
-        const j = (i + 1) % sides;
+    for (0..trunk_sides) |i| {
+        const j = (i + 1) % trunk_sides;
         try addTri(&md, alloc, ring0[i], ring1[i], ring0[j]);
         try addTri(&md, alloc, ring0[j], ring1[i], ring1[j]);
     }
 
-    // Foliage cones.
+    // Foliage cones. Keep the cone count and sides identical across LODs: dropping tiers or
+    // sides changes the silhouette by far more than 1 px at the near threshold.
     for (0..cones) |ci| {
         const f = @as(f32, @floatFromInt(ci));
         const base_y: f32 = 1.35 + f * 0.85;
@@ -89,16 +92,16 @@ fn buildTree(alloc: std.mem.Allocator, sides: usize, cones: usize) !MeshData {
         const col = [3]f32{ 0.075 * shade, 0.20 * shade, 0.065 * shade };
         const rigid = 0.30 + 0.16 * f;
         var ring: [24]u32 = undefined;
-        for (0..sides) |i| {
-            const a = @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(sides)) * two_pi;
+        for (0..cone_sides) |i| {
+            const a = @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(cone_sides)) * two_pi;
             const cx = @cos(a);
             const sz = @sin(a);
             const n = Vec3.init(cx * height, radius, sz * height).normalized();
             ring[i] = try addVertexPart(&md, alloc, .{ cx * radius, base_y, sz * radius }, .{ n.x, n.y, n.z }, col, rigid, base_y);
         }
         const tip = try addVertexPart(&md, alloc, .{ 0, base_y + height, 0 }, .{ 0, 1, 0 }, col, rigid + 0.2, base_y);
-        for (0..sides) |i| {
-            const j = (i + 1) % sides;
+        for (0..cone_sides) |i| {
+            const j = (i + 1) % cone_sides;
             try addTri(&md, alloc, ring[i], tip, ring[j]);
         }
     }
@@ -580,14 +583,14 @@ pub const PropRenderer = struct {
         var self = PropRenderer{ .shader = shader, .depth_shader = depth_shader };
         errdefer self.deinit(alloc);
 
-        const lods = [_]struct { sides: usize, cones: usize }{
-            .{ .sides = 12, .cones = 5 },
-            .{ .sides = 8, .cones = 3 },
-            .{ .sides = 5, .cones = 2 },
+        const lods = [_]struct { trunk_sides: usize, cone_sides: usize, cones: usize }{
+            .{ .trunk_sides = 12, .cone_sides = 12, .cones = 5 },
+            .{ .trunk_sides = 8, .cone_sides = 12, .cones = 5 },
+            .{ .trunk_sides = 5, .cone_sides = 12, .cones = 5 },
         };
         const tree_assets = [_]AssetId{ .tree_lod0, .tree_lod1, .tree_lod2 };
         for (0..3) |i| {
-            var md = try buildTree(alloc, lods[i].sides, lods[i].cones);
+            var md = try buildTree(alloc, lods[i].trunk_sides, lods[i].cone_sides, lods[i].cones);
             defer md.deinit(alloc);
             gl.GenBuffers(1, @ptrCast(&self.tree_instances[i]));
             const mesh = try uploadMesh(alloc, &md, self.tree_instances[i]);
@@ -729,7 +732,7 @@ pub const PropRenderer = struct {
         }
         if (cell_count == 0) return;
 
-        var src = try buildTree(alloc, 8, 3);
+        var src = try buildTree(alloc, 12, 12, 5);
         defer src.deinit(alloc);
         for (cells[0..cell_count]) |cell| {
             if (cell.count == 0) continue;

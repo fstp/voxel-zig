@@ -544,7 +544,7 @@ pub fn main(init: std.process.Init) !void {
         var steps: u32 = 0;
         while (accumulator >= fixed_dt and steps < 5) : (steps += 1) {
             if (!freeze_player) player.update(@floatCast(fixed_dt), wish, up, sprint);
-            sun.update(@floatCast(fixed_dt));
+            if (!freeze_player) sun.update(@floatCast(fixed_dt));
             accumulator -= fixed_dt;
         }
         if (steps == 5) accumulator = @mod(accumulator, fixed_dt);
@@ -673,8 +673,10 @@ pub fn main(init: std.process.Init) !void {
         // `6.0 * dt * 0.01` in app.zig). The old fixed 0.016*2.0 per frame ran at 3.84 units/s on
         // a 120 Hz display, 64x the engine.
         const dt_f: f32 = @floatCast(frame_dt);
-        water_clock += dt_f;
-        cloud_shift = Vec3.init(cloud_shift.x + dt_f * 0.06, 0, cloud_shift.z + dt_f * 0.015);
+        if (!freeze_player) {
+            water_clock += dt_f;
+            cloud_shift = Vec3.init(cloud_shift.x + dt_f * 0.06, 0, cloud_shift.z + dt_f * 0.015);
+        }
         const ramp = sun.ramp();
         const lighting = sun.lighting();
         const sky_sh = sun.skySh();

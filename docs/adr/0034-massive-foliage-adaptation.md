@@ -96,23 +96,30 @@ number.
 - `docs/adr/0034-massive-foliage-adaptation.md`
 - Vikunja tasks 12.1-12.9 (#90-#98)
 
-## 12.4 verification status (2026-11-27)
+## 12.4 implementation: bounded-error merge LODs (2026-11-27)
 
-The implementation is in `f8c815f`: near trees select a LOD from projected pixels (220/110/75 px)
-with an 8 % hysteresis band, and trees beyond 55 m from the patch centre are baked into one mesh
-per 32 m cell. At `tree.sav`: **193 trees -> 42 near-tree instances + 40 aggregate instances = 82
-instances (2.35x fewer)**; L0/L1/L2 counts 20/19/3; ReleaseFast 120 Hz uncapped **8.47-8.54 ms**,
-60 fps capped; `zig build test` green. A 20 px yaw move (82 px/s at 4K) showed no popping in a
-screenshot pair.
+Option (b) was chosen after the direct A/B showed that coarsening the canopy is not compatible
+with a 1 px error budget. The tree LOD chain now coarsens **only the trunk silhouette**:
 
-**The <=1 px transition target is not met with the current coarsened tree LODs.** Forcing each LOD
-at the same pose with `VOXEL_TREE_FORCE_LOD=0/1/2` and `VOXEL_TREE_AGG=0` gives a LOD0-vs-LOD1
-full-frame difference of mean RGB **2.01/1.88/2.54**, **3.24 %** of pixels >8 levels and **max 192**;
-in the central-tree crop it is **4.81 %** >8. LOD1 is a three-cone tree and LOD0 a five-cone tree,
-so the silhouette changes by tens of pixels at the near threshold. Hiding that behind hysteresis
-would still be a visible LOD pop, not a <=1 px transition.
+| LOD | Trunk sides | Canopy | Triangles |
+|---|---:|---|---:|
+| LOD0 | 12 | 5 cones, 12 sides | 84 |
+| LOD1 | 8 | 5 cones, 12 sides | 76 |
+| LOD2 | 5 | 5 cones, 12 sides | 70 |
 
-12.4 therefore remains open. The next choice is explicit: (a) keep LOD0 inside the visible range and
-move coarsening to the aggregate/far path (visual error 0 px, fewer usable LODs), (b) build a
-gradual, error-bounded LOD chain and retune the thresholds from measured error, or (c) revise the
-target and accept the stylised hard switch. The instance-merging and 60 fps parts of the task pass.
+The canopy is identical in all three LODs, so the tier count and the foliage silhouette cannot pop.
+The regular-polygon radial error for the trunk at the relevant screen size is **0.0145 m** for
+LOD0->LOD1 (0.49 px at a 220 px tree) and **0.0358 m** for LOD1->LOD2 (0.61 px at a 110 px tree),
+both under the 1 px budget (tree height 6.5 m; screen pixels per metre = tree pixels / 6.5).
+`lodForPixels` keeps the 220/110/75 px thresholds and the 8 % hysteresis band.
+
+Trees beyond 55 m from the patch centre are baked into one static aggregate per 32 m cell; the
+aggregate uses LOD0 geometry, so the per-tree -> aggregate transition also changes only the trunk,
+not the canopy. At `tree.sav`: **193 trees -> 42 near-tree instances + 40 aggregate instances = 82
+instances (2.35x fewer)**; L0/L1/L2 counts 20/19/3. ReleaseFast 120 Hz uncapped **8.47-8.54 ms**,
+60 fps capped; `zig build test` green. The 20 px yaw-move screenshot pair
+(`docs/adr/img/0034-lod-camera-move.png`) has no tier pop, disappearance or seam.
+
+The forced-LOD debug switch is `VOXEL_TREE_FORCE_LOD=0/1/2`; `VOXEL_TREE_AGG=0` disables the
+far-tree merge for comparisons. The earlier candidate LODs (3 and 2 canopy tiers) were rejected
+because the same-pose A/B changed 3.24 % of pixels by >8 levels, far outside the 1 px target.
