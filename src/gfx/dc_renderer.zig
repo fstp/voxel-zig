@@ -41,6 +41,7 @@ const fragment_src: [:0]const u8 =
     \\uniform float u_fog_height;  // exponential scale height
     \\uniform float u_fog_base;    // world y where the density equals u_fog_density
     \\uniform float u_atmosphere;  // 0 off, 1 on
+    \\uniform float u_detail;      // 0 = flat A/B path, 1 = procedural detail + bump
 
     \\float hash13(vec3 p) {
     \\    p = fract(p * 0.3183099 + vec3(0.1, 0.2, 0.3));
@@ -83,22 +84,33 @@ const fragment_src: [:0]const u8 =
     \\void main() {
     \\    // Two octaves of value noise in WORLD space: world-space means the pattern is continuous
     \\    // across every chunk border and stable through LOD, which blocky textures never were.
-    \\    vec3 wp = v_pos * 0.35;
-    \\    vec4 o1 = noised(wp);
-    \\    vec4 o2 = noised(wp * 2.7 + 11.0);
-    \\    float detail = o1.x * 0.65 + o2.x * 0.35;
-    \\    vec3 grad = o1.yzw * 0.65 + o2.yzw * 2.7 * 0.35;
+    \\    // u_detail = 0 skips the noise entirely (a coherent uniform branch) so the A/B measures
+    \\    // the real cost and shows the surface before procedural materials.
+    \\    float detail = 0.5;
+    \\    vec3 grad = vec3(0.0);
+    \\    // Fine grain aliases once it is smaller than a pixel; fade it out with distance and keep
+    \\    // the broad patch term, the same rule the engine's water normal detail uses.
+    \\    float view_dist = length(v_pos - u_eye);
+    \\    float fine_fade = 1.0 - smoothstep(20.0, 70.0, view_dist);
+    \\    if (u_detail > 0.5) {
+    \\        vec4 o1 = noised(v_pos * 2.20);              // ~0.45 m grain
+    \\        vec4 o2 = noised(v_pos * 0.35 + 11.0);       // ~2.9 m patches
+    \\        float w1 = 0.55 * fine_fade;
+    \\        float w2 = 0.45;
+    \\        detail = (o1.x * w1 + o2.x * w2) / (w1 + w2);
+    \\        grad = o1.yzw * (w1 * 2.20) + o2.yzw * (w2 * 0.35);
+    \\    }
     \\
     \\    // Bump without a normal map: surface normal plus a scaled noise gradient, IQ's form.
     \\    // bump is per material - rock is rougher than ground, scree roughest.
-    \\    float bump = v_mat < 0.5 ? 0.10 : (v_mat < 1.5 ? 0.22 : 0.34);
+    \\    float bump = v_mat < 0.5 ? 0.18 : (v_mat < 1.5 ? 0.35 : 0.55);
     \\    vec3 n = normalize(v_nrm + grad * bump);
     \\    vec3 l = normalize(vec3(0.45, 0.75, 0.40));
     \\    float ndl = max(dot(n, l), 0.0);
     \\    vec3 sky = vec3(0.36, 0.48, 0.62);
     \\    vec3 ground = vec3(0.16, 0.18, 0.14);
     \\    vec3 amb = mix(ground, sky, n.y * 0.5 + 0.5);
-    \\    vec3 albedo = v_col * (0.86 + 0.30 * detail);
+    \\    vec3 albedo = v_col * (0.72 + 0.56 * detail);
     \\    // Lighting is deliberately shy of 1.0: albedo arrives already close to mid grey, and
     \\    // multiplying it by ~1.8 and then gamma-encoding clips the whole surface to white.
     \\    // Exposure + ACES (Narkowicz), the same curve the engine's post pass applies (ADR 0011).
@@ -186,6 +198,7 @@ pub const DcRenderer = struct {
         fog_height: f32,
         fog_base: f32,
         atmosphere: bool,
+        detail: f32,
         index_count: usize,
     ) void {
         gl.Enable(gl.DEPTH_TEST);
@@ -202,6 +215,7 @@ pub const DcRenderer = struct {
         self.shader.setFloat("u_fog_height", fog_height);
         self.shader.setFloat("u_fog_base", fog_base);
         self.shader.setFloat("u_atmosphere", if (atmosphere) 1.0 else 0.0);
+        self.shader.setFloat("u_detail", detail);
         gl.BindVertexArray(self.vao);
         gl.DrawElements(gl.TRIANGLES, @intCast(index_count), gl.UNSIGNED_INT, 0);
     }

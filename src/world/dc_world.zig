@@ -52,7 +52,11 @@ fn palette(t: f32, a: [3]f32, b: [3]f32, c: [3]f32, d: [3]f32) [3]f32 {
 /// A pure function of world position and normal, which is what keeps it stable across chunk
 /// borders and future LOD levels.
 fn materialColour(pos: [3]f32, nrm: [3]f32, out_material: *u8) [3]f32 {
-    const slope: f32 = 1.0 - @abs(nrm[1]);
+    // IQ's noise-perturbed blend factor: the rock/ground boundary is displaced by a low-frequency
+    // fBm so the material edge is ragged instead of a clean slope contour. A pure function of
+    // world position, so it is identical across chunk borders and stable through future LODs.
+    const perturb = noise.fbm2(SEED + 31, pos[0] * 0.06, pos[2] * 0.06, 3, 2.0, 0.5) * 0.14;
+    const slope: f32 = std.math.clamp(1.0 - @abs(nrm[1]) + perturb, 0.0, 1.0);
     const h: f32 = (pos[1] - 45.0) / 30.0;
     const rock = @min(@max((slope - 0.35) / 0.25, 0.0), 1.0);
     // 0 = ground, 1 = rock, 2 = scree on the steepest faces. Discrete ids, because that is what a

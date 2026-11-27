@@ -184,6 +184,13 @@ pub fn main(init: std.process.Init) !void {
     // dawn/noon/dusk acceptance shots.
     var sun_time: f32 = loaded.sun_time orelse 0.30;
     if (init.environ_map.get("VOXEL_DC_SUN")) |raw| sun_time = std.fmt.parseFloat(f32, raw) catch sun_time;
+
+    // VOXEL_DETAIL=0 is the A/B for 7.3: it skips the procedural noise and bump in the terrain
+    // fragment shader, leaving the per-vertex material colours flat.
+    var detail: f32 = 1.0;
+    if (init.environ_map.get("VOXEL_DETAIL")) |raw| {
+        if (raw.len > 0 and raw[0] == '0') detail = 0.0;
+    }
     sun.setTime(sun_time);
     std.debug.print("sun time {d:.3} elevation {d:.1} deg\n", .{ sun_time, sun.elevation() });
     var cloud_shift = Vec3.init(0, 0, 0);
@@ -474,6 +481,7 @@ pub fn main(init: std.process.Init) !void {
             fog_height,
             fog_base,
             atmosphere,
+            detail,
             all_idx.items.len,
         );
 
