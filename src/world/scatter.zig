@@ -131,29 +131,33 @@ pub fn build(
     const center_x = min_x + size * 0.5;
     const center_z = min_z + size * 0.5;
 
-    // Grass and flowers: two bands. The inner band is dense because that is what the camera
-    // actually resolves; the outer band fills the midground and is hash-thinned by the shader.
-    const bands = [_]struct { radius: f32, step: f32, accept: f32 }{
-        .{ .radius = 25.0, .step = 0.22, .accept = 0.92 },
-        .{ .radius = 55.0, .step = 0.45, .accept = 0.80 },
-        .{ .radius = 95.0, .step = 1.00, .accept = 0.70 },
-    };
-    for (bands, 1..) |band, band_i| {
-        var z = center_z - band.radius;
-        while (z <= center_z + band.radius) : (z += band.step) {
-            if (out.blades.items.len >= 70000) break;
-            var x = center_x - band.radius;
-            while (x <= center_x + band.radius) : (x += band.step) {
+    // Grass and flowers: one world-anchored lattice. The step never changes with the patch
+    // centre, so a given world cell always produces the same jitter; only the acceptance
+    // probability fades with distance from the patch centre. This is what keeps blades static
+    // while the streaming patch moves underneath them.
+    {
+        const radius: f32 = 95.0;
+        const step: f32 = 0.25;
+        const ix0: i32 = @intFromFloat(@floor((center_x - radius) / step));
+        const ix1: i32 = @intFromFloat(@ceil((center_x + radius) / step));
+        const iz0: i32 = @intFromFloat(@floor((center_z - radius) / step));
+        const iz1: i32 = @intFromFloat(@ceil((center_z + radius) / step));
+        var iz = iz0;
+        while (iz <= iz1) : (iz += 1) {
+            const z = (@as(f32, @floatFromInt(iz)) + 0.5) * step;
+            var ix = ix0;
+            while (ix <= ix1) : (ix += 1) {
+                const x = (@as(f32, @floatFromInt(ix)) + 0.5) * step;
                 const dx = x - center_x;
                 const dz = z - center_z;
                 const r2 = dx * dx + dz * dz;
-                if (band_i == 2 and r2 < 25.0 * 25.0) continue;
-                if (band_i == 3 and r2 < 55.0 * 55.0) continue; // outer band only in the ring
+                if (r2 > radius * radius) continue;
+                // World-constant thinning: the same cell is accepted or rejected in every patch.
+                // Distance only affects the radius cutoff, never the cell's hash.
+                if (rand01(ix, iz, 0x6A55) > 0.26) continue;
 
-                const ix: i32 = @intFromFloat(@divFloor(x - min_x, band.step));
-                const iz: i32 = @intFromFloat(@divFloor(z - min_z, band.step));
-                const jx = (rand01(ix, iz, 0x51ED) - 0.5) * band.step * 0.9;
-                const jz = (rand01(ix, iz, 0x9E37) - 0.5) * band.step * 0.9;
+                const jx = (rand01(ix, iz, 0x51ED) - 0.5) * step * 0.9;
+                const jz = (rand01(ix, iz, 0x9E37) - 0.5) * step * 0.9;
                 const px = x + jx;
                 const pz = z + jz;
                 if (blocked(edits, px, pz)) continue;
@@ -166,7 +170,6 @@ pub fn build(
                 if (density < -0.45) continue;
 
                 const flower = rand01(ix, iz, 0xF10A) < 0.02 and ny > 0.82;
-                if (!flower and rand01(ix, iz, 0x6A55) > band.accept) continue;
                 const tint = rand01(ix, iz, 0x1234);
                 const h = dcw.heightAt(px, pz);
                 try out.blades.append(alloc, .{
@@ -183,12 +186,16 @@ pub fn build(
     // Trees: gentle slopes below the treeline, clustered, with a 4 m footprint.
     {
         const step: f32 = 8.0;
-        var z = min_z + 4.0;
-        while (z < min_z + size) : (z += step) {
-            var x = min_x + 4.0;
-            while (x < min_x + size) : (x += step) {
-                const ix: i32 = @intFromFloat(@divFloor(x - min_x, step));
-                const iz: i32 = @intFromFloat(@divFloor(z - min_z, step));
+        const ix0: i32 = @intFromFloat(@floor(min_x / step));
+        const ix1: i32 = @intFromFloat(@floor((min_x + size - 0.001) / step));
+        const iz0: i32 = @intFromFloat(@floor(min_z / step));
+        const iz1: i32 = @intFromFloat(@floor((min_z + size - 0.001) / step));
+        var iz = iz0;
+        while (iz <= iz1) : (iz += 1) {
+            const z = (@as(f32, @floatFromInt(iz)) + 0.5) * step;
+            var ix = ix0;
+            while (ix <= ix1) : (ix += 1) {
+                const x = (@as(f32, @floatFromInt(ix)) + 0.5) * step;
                 const px = x + (rand01(ix, iz, 0x7EE1) - 0.5) * step * 0.8;
                 const pz = z + (rand01(ix, iz, 0x7EE2) - 0.5) * step * 0.8;
                 if (blocked(edits, px, pz)) continue;
@@ -224,12 +231,16 @@ pub fn build(
     // Rocks: scree on steeper ground, a few boulders elsewhere.
     {
         const step: f32 = 6.0;
-        var z = min_z + 3.0;
-        while (z < min_z + size) : (z += step) {
-            var x = min_x + 3.0;
-            while (x < min_x + size) : (x += step) {
-                const ix: i32 = @intFromFloat(@divFloor(x - min_x, step));
-                const iz: i32 = @intFromFloat(@divFloor(z - min_z, step));
+        const ix0: i32 = @intFromFloat(@floor(min_x / step));
+        const ix1: i32 = @intFromFloat(@floor((min_x + size - 0.001) / step));
+        const iz0: i32 = @intFromFloat(@floor(min_z / step));
+        const iz1: i32 = @intFromFloat(@floor((min_z + size - 0.001) / step));
+        var iz = iz0;
+        while (iz <= iz1) : (iz += 1) {
+            const z = (@as(f32, @floatFromInt(iz)) + 0.5) * step;
+            var ix = ix0;
+            while (ix <= ix1) : (ix += 1) {
+                const x = (@as(f32, @floatFromInt(ix)) + 0.5) * step;
                 const px = x + (rand01(ix, iz, 0x0CC1) - 0.5) * step * 0.9;
                 const pz = z + (rand01(ix, iz, 0x0CC2) - 0.5) * step * 0.9;
                 if (blocked(edits, px, pz)) continue;
@@ -256,13 +267,17 @@ pub fn build(
     // white surface starts rather than on a hard altitude contour.
     {
         const step: f32 = 3.0;
-        var z = min_z + 1.5;
-        while (z < min_z + size) : (z += step) {
+        const ix0: i32 = @intFromFloat(@floor(min_x / step));
+        const ix1: i32 = @intFromFloat(@floor((min_x + size - 0.001) / step));
+        const iz0: i32 = @intFromFloat(@floor(min_z / step));
+        const iz1: i32 = @intFromFloat(@floor((min_z + size - 0.001) / step));
+        var iz = iz0;
+        while (iz <= iz1) : (iz += 1) {
             if (out.snow.items.len >= 1100) break;
-            var x = min_x + 1.5;
-            while (x < min_x + size) : (x += step) {
-                const ix: i32 = @intFromFloat(@divFloor(x - min_x, step));
-                const iz: i32 = @intFromFloat(@divFloor(z - min_z, step));
+            const z = (@as(f32, @floatFromInt(iz)) + 0.5) * step;
+            var ix = ix0;
+            while (ix <= ix1) : (ix += 1) {
+                const x = (@as(f32, @floatFromInt(ix)) + 0.5) * step;
                 const px = x + (rand01(ix, iz, 0x5A01) - 0.5) * step * 0.9;
                 const pz = z + (rand01(ix, iz, 0x5A02) - 0.5) * step * 0.9;
                 if (blocked(edits, px, pz)) continue;
@@ -289,13 +304,17 @@ pub fn build(
     // keeps the band stable across rebuilds.
     {
         const step: f32 = 2.6;
-        var z = min_z + 1.3;
-        while (z < min_z + size) : (z += step) {
+        const ix0: i32 = @intFromFloat(@floor(min_x / step));
+        const ix1: i32 = @intFromFloat(@floor((min_x + size - 0.001) / step));
+        const iz0: i32 = @intFromFloat(@floor(min_z / step));
+        const iz1: i32 = @intFromFloat(@floor((min_z + size - 0.001) / step));
+        var iz = iz0;
+        while (iz <= iz1) : (iz += 1) {
             if (out.shore.items.len >= 700) break;
-            var x = min_x + 1.3;
-            while (x < min_x + size) : (x += step) {
-                const ix: i32 = @intFromFloat(@divFloor(x - min_x, step));
-                const iz: i32 = @intFromFloat(@divFloor(z - min_z, step));
+            const z = (@as(f32, @floatFromInt(iz)) + 0.5) * step;
+            var ix = ix0;
+            while (ix <= ix1) : (ix += 1) {
+                const x = (@as(f32, @floatFromInt(ix)) + 0.5) * step;
                 const px = x + (rand01(ix, iz, 0x5B01) - 0.5) * step * 0.9;
                 const pz = z + (rand01(ix, iz, 0x5B02) - 0.5) * step * 0.9;
                 if (blocked(edits, px, pz)) continue;
@@ -320,3 +339,68 @@ pub fn build(
 
     return out;
 }
+
+test "world-anchored scatter keeps overlapping foliage fixed" {
+    const alloc = std.testing.allocator;
+    var a = try build(alloc, &.{}, 0.0, 0.0, 256.0);
+    defer a.deinit(alloc);
+    var b = try build(alloc, &.{}, 32.0, 0.0, 256.0);
+    defer b.deinit(alloc);
+
+    const Props = struct {
+        fn key(p: [3]f32) u64 {
+            const x: u32 = @bitCast(p[0]);
+            const z: u32 = @bitCast(p[2]);
+            return (@as(u64, x) << 32) | @as(u64, z);
+        }
+        fn check(list_a: []const Prop, list_b: []const Prop, label: []const u8) !void {
+            var seen = std.AutoHashMap(u64, void).init(std.testing.allocator);
+            defer seen.deinit();
+            for (list_a) |p| {
+                if (p.pos[0] >= 32.0 and p.pos[0] < 256.0 and p.pos[2] >= 0.0 and p.pos[2] < 256.0) {
+                    try seen.put(key(p.pos), {});
+                }
+            }
+            var matched: usize = 0;
+            for (list_b) |p| {
+                if (p.pos[0] >= 32.0 and p.pos[0] < 256.0 and p.pos[2] >= 0.0 and p.pos[2] < 256.0) {
+                    if (seen.contains(key(p.pos))) matched += 1 else return error.TestExpectedEqual;
+                }
+            }
+            if (matched == 0) {
+                std.debug.print("scatter {s}: no overlapping instances\n", .{label});
+                return error.TestExpectedEqual;
+            }
+            std.debug.print("scatter {s}: {d} overlapping instances exact\n", .{ label, matched });
+        }
+        fn checkBlades(list_a: []const Blade, list_b: []const Blade) !void {
+            var seen = std.AutoHashMap(u64, void).init(std.testing.allocator);
+            defer seen.deinit();
+            for (list_a) |p| {
+                if (p.pos[0] >= 96.0 and p.pos[0] < 192.0 and p.pos[2] >= 96.0 and p.pos[2] < 192.0) {
+                    try seen.put(key(p.pos), {});
+                }
+            }
+            var matched: usize = 0;
+            for (list_b) |p| {
+                if (p.pos[0] >= 96.0 and p.pos[0] < 192.0 and p.pos[2] >= 96.0 and p.pos[2] < 192.0) {
+                    if (seen.contains(key(p.pos))) {
+                        matched += 1;
+                    } else {
+                        std.debug.print("blade B not in A at ({d:.3},{d:.3})\n", .{ p.pos[0], p.pos[2] });
+                        return error.TestExpectedEqual;
+                    }
+                }
+            }
+            if (matched == 0) return error.TestExpectedEqual;
+            std.debug.print("scatter blades: {d} overlapping instances exact\n", .{matched});
+        }
+    };
+
+    try Props.check(a.trees.items, b.trees.items, "trees");
+    try Props.check(a.rocks.items, b.rocks.items, "rocks");
+    try Props.check(a.snow.items, b.snow.items, "snow");
+    try Props.check(a.shore.items, b.shore.items, "shore");
+    try Props.checkBlades(a.blades.items, b.blades.items);
+}
+
