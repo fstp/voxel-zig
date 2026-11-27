@@ -30,6 +30,7 @@ pub const world = struct {
     pub const scatter = @import("world/scatter.zig");
     pub const noise = @import("world/noise.zig");
     pub const sun = @import("world/sun.zig");
+    pub const heightfield_ao = @import("world/heightfield_ao.zig");
 };
 
 pub const player = struct {
@@ -49,6 +50,7 @@ pub const gfx = struct {
     pub const WaterRenderer = @import("gfx/water_renderer.zig").WaterRenderer;
     pub const GrassRenderer = @import("gfx/grass_renderer.zig").GrassRenderer;
     pub const PropRenderer = @import("gfx/prop_renderer.zig").PropRenderer;
+    pub const ShadowRenderer = @import("gfx/shadow_renderer.zig").ShadowRenderer;
 };
 
 test {

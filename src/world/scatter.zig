@@ -28,11 +28,15 @@ pub const Scatter = struct {
     blades: std.ArrayList(Blade) = .empty,
     trees: std.ArrayList(Prop) = .empty,
     rocks: std.ArrayList(Prop) = .empty,
+    snow: std.ArrayList(Prop) = .empty,
+    shore: std.ArrayList(Prop) = .empty,
 
     pub fn deinit(self: *Scatter, alloc: std.mem.Allocator) void {
         self.blades.deinit(alloc);
         self.trees.deinit(alloc);
         self.rocks.deinit(alloc);
+        self.snow.deinit(alloc);
+        self.shore.deinit(alloc);
     }
 };
 
@@ -241,6 +245,73 @@ pub fn build(
                     .pos = .{ px, h - 0.15, pz },
                     .yaw = rand01(ix, iz, 0x0CC6) * std.math.tau,
                     .scale = 0.35 + 1.1 * tint,
+                    .tint = tint,
+                });
+            }
+        }
+    }
+
+    // Snow clumps and ice shards: only on the high, up-facing part of the snow cap. The local
+    // snow line carries the same low-frequency warp as the shader, so the props start where the
+    // white surface starts rather than on a hard altitude contour.
+    {
+        const step: f32 = 3.0;
+        var z = min_z + 1.5;
+        while (z < min_z + size) : (z += step) {
+            if (out.snow.items.len >= 1100) break;
+            var x = min_x + 1.5;
+            while (x < min_x + size) : (x += step) {
+                const ix: i32 = @intFromFloat(@divFloor(x - min_x, step));
+                const iz: i32 = @intFromFloat(@divFloor(z - min_z, step));
+                const px = x + (rand01(ix, iz, 0x5A01) - 0.5) * step * 0.9;
+                const pz = z + (rand01(ix, iz, 0x5A02) - 0.5) * step * 0.9;
+                if (blocked(edits, px, pz)) continue;
+                if (rand01(ix, iz, 0x5A03) > 0.55) continue;
+                const h = dcw.heightAt(px, pz);
+                const warp = noise.fbm2(9109, px * 0.055, pz * 0.055, 2, 2.0, 0.5);
+                const snow_h = 68.0 + (warp - 0.5) * 2.0;
+                if (h < snow_h + 0.4) continue;
+                const ny = grid.normalY(px, pz);
+                if (ny < 0.80) continue;
+                const tint = rand01(ix, iz, 0x5A04);
+                try out.snow.append(alloc, .{
+                    .pos = .{ px, h - 0.05, pz },
+                    .yaw = rand01(ix, iz, 0x5A05) * std.math.tau,
+                    .scale = 0.35 + 0.65 * tint,
+                    .tint = tint,
+                });
+            }
+        }
+    }
+
+    // Shore detail: pebbles, reeds and driftwood in the mud band. The waterline itself gets the
+    // densest reeds; the band tapers into the bare mud. Reusing the same deterministic cell hashes
+    // keeps the band stable across rebuilds.
+    {
+        const step: f32 = 2.6;
+        var z = min_z + 1.3;
+        while (z < min_z + size) : (z += step) {
+            if (out.shore.items.len >= 700) break;
+            var x = min_x + 1.3;
+            while (x < min_x + size) : (x += step) {
+                const ix: i32 = @intFromFloat(@divFloor(x - min_x, step));
+                const iz: i32 = @intFromFloat(@divFloor(z - min_z, step));
+                const px = x + (rand01(ix, iz, 0x5B01) - 0.5) * step * 0.9;
+                const pz = z + (rand01(ix, iz, 0x5B02) - 0.5) * step * 0.9;
+                if (blocked(edits, px, pz)) continue;
+                if (rand01(ix, iz, 0x5B03) > 0.42) continue;
+                const h = dcw.heightAt(px, pz);
+                const shore_dist = @abs(h - dcw.SEA_LEVEL);
+                if (shore_dist > 1.4) continue;
+                const ny = grid.normalY(px, pz);
+                if (ny < 0.60) continue;
+                // Bias the taller reeds to the waterline; the outer mud keeps pebbles/sparse reeds.
+                if (shore_dist > 0.9 and rand01(ix, iz, 0x5B04) > 0.30) continue;
+                const tint = rand01(ix, iz, 0x5B05);
+                try out.shore.append(alloc, .{
+                    .pos = .{ px, h - 0.08, pz },
+                    .yaw = rand01(ix, iz, 0x5B06) * std.math.tau,
+                    .scale = 0.55 + 0.85 * tint,
                     .tint = tint,
                 });
             }

@@ -6,6 +6,18 @@ const Shader = @import("shader.zig").Shader;
 const Mat4 = @import("../math/mat4.zig").Mat4;
 const Vec3 = @import("../math/vec.zig").Vec3;
 const Vertex = @import("../world/dc_world.zig").Vertex;
+const ShadowRenderer = @import("shadow_renderer.zig").ShadowRenderer;
+
+const depth_vertex_src: [:0]const u8 =
+    \\#version 330 core
+    \\layout(location = 0) in vec3 a_pos;
+    \\uniform mat4 u_mvp;
+    \\void main() { gl_Position = u_mvp * vec4(a_pos, 1.0); }
+;
+const depth_fragment_src: [:0]const u8 =
+    \\#version 330 core
+    \\void main() {}
+;
 
 const vertex_src: [:0]const u8 =
     \\#version 330 core
@@ -35,6 +47,17 @@ const fragment_src: [:0]const u8 =
     \\in float v_mat;
     \\uniform vec3 u_eye;
     \\uniform vec3 u_sun_dir;
+    \\uniform vec3 u_sun_colour;
+    \\uniform vec3 u_ambient_ground;
+    \\uniform vec3 u_sh[9];        // sky irradiance SH9 (ADR 0027), convolution folded in
+    \\uniform mat4 u_light_vp[2];
+    \\uniform sampler2D u_shadow0;
+    \\uniform sampler2D u_shadow1;
+    \\uniform float u_shadow_enabled;
+    \\uniform sampler2D u_ao_tex;
+    \\uniform vec2 u_ao_origin;
+    \\uniform float u_ao_size;
+    \\uniform float u_ao_enabled;
     \\uniform vec3 u_fog_colour;   // display-space horizon scattering colour
     \\uniform vec3 u_fog_sun;      // display-space sun tint for the forward-scatter term
     \\uniform float u_fog_density; // density at u_fog_base, per block
@@ -84,6 +107,53 @@ const fragment_src: [:0]const u8 =
     \\                        k3 + k6*u.x + k5*u.y + k7*u.x*u.y);
     \\    return vec4(v, gr);
     \\}
+    \\vec3 shIrradiance(vec3 n) {
+    \\    float x = n.x, y = n.y, z = n.z;
+    \\    return u_sh[0] * 0.282095
+    \\         + u_sh[1] * (0.488603 * y)
+    \\         + u_sh[2] * (0.488603 * z)
+    \\         + u_sh[3] * (0.488603 * x)
+    \\         + u_sh[4] * (1.092548 * x * y)
+    \\         + u_sh[5] * (1.092548 * y * z)
+    \\         + u_sh[6] * (0.315392 * (3.0 * z * z - 1.0))
+    \\         + u_sh[7] * (1.092548 * x * z)
+    \\         + u_sh[8] * (0.546274 * (x * x - y * y));
+    \\}
+    \\float shadowCascade(mat4 lvp, sampler2D map, vec3 world, vec3 n) {
+    \\    vec4 lp = lvp * vec4(world + n * 0.10, 1.0);
+    \\    vec3 p = lp.xyz / max(lp.w, 1e-5) * 0.5 + 0.5;
+    \\    if (p.x < 0.0 || p.x > 1.0 || p.y < 0.0 || p.y > 1.0 || p.z > 1.0) return 1.0;
+    \\    float bias = 0.0015;
+    \\    float texel = 1.0 / 2048.0;
+    \\    float blocker = 0.0;
+    \\    int blocker_count = 0;
+    \\    for (int i = 0; i < 8; ++i) {
+    \\        float a = float(i) * 0.785398;
+    \\        float d = texture(map, p.xy + vec2(cos(a), sin(a)) * texel * 4.0).r;
+    \\        if (d < p.z - bias) {
+    \\            blocker += d;
+    \\            blocker_count += 1;
+    \\        }
+    \\    }
+    \\    if (blocker_count == 0) return 1.0;
+    \\    float avg = blocker / float(blocker_count);
+    \\    float radius = clamp((p.z - avg) * 120.0, 0.75, 6.0);
+    \\    float sum = 0.0;
+    \\    for (int y = -2; y <= 2; ++y) {
+    \\        for (int x = -2; x <= 2; ++x) {
+    \\            float d = texture(map, p.xy + vec2(x, y) * texel * radius * 0.5).r;
+    \\            sum += (p.z - bias <= d) ? 1.0 : 0.0;
+    \\        }
+    \\    }
+    \\    return sum / 25.0;
+    \\}
+    \\float sunShadow(vec3 world, vec3 n) {
+    \\    if (u_shadow_enabled < 0.5) return 1.0;
+    \\    float d = length(world - u_eye);
+    \\    float s0 = shadowCascade(u_light_vp[0], u_shadow0, world, n);
+    \\    float s1 = shadowCascade(u_light_vp[1], u_shadow1, world, n);
+    \\    return mix(s0, s1, smoothstep(55.0, 75.0, d));
+    \\}
     \\out vec4 frag;
     \\void main() {
     \\    // Two octaves of value noise in WORLD space: world-space means the pattern is continuous
@@ -109,7 +179,7 @@ const fragment_src: [:0]const u8 =
     \\    // bump is per material - rock is rougher than ground, scree roughest.
     \\    float bump = v_mat < 0.5 ? 0.18 : (v_mat < 1.5 ? 0.35 : 0.55);
     \\    vec3 n = normalize(v_nrm + grad * bump);
-    \\    vec3 l = normalize(vec3(0.45, 0.75, 0.40));
+    \\    vec3 l = normalize(u_sun_dir);
     \\    // Surface rules (10.8): altitude gives snow, proximity to the sea gives mud and a wet rim.
     \\    // The masks are noise-warped so their edges do not follow a height contour, and both are
     \\    // gated on the geometric normal so cliffs stay bare. mott doubles as colour variation.
@@ -139,9 +209,19 @@ const fragment_src: [:0]const u8 =
     \\    // Snow fills crevices, so flatten the normal toward up where it lies.
     \\    n = normalize(mix(n, vec3(0.0, 1.0, 0.0), snow * 0.10));
     \\    float ndl = max(dot(n, l), 0.0);
-    \\    vec3 sky = vec3(0.36, 0.48, 0.62);
-    \\    vec3 ground = vec3(0.16, 0.18, 0.14);
-    \\    vec3 amb = mix(ground, sky, n.y * 0.5 + 0.5);
+    \\    float shadow = sunShadow(v_pos, n);
+    \\    // Sky irradiance from SH9 replaces the old constant hemisphere (ADR 0027). The ground
+    \\    // bounce is a small downward term; the sun stays a separate directional light.
+    \\    vec3 amb = max(shIrradiance(n), vec3(0.0)) + u_ambient_ground * max(-n.y, 0.0) * 0.35;
+    \\    float ao = 1.0;
+    \\    if (u_ao_enabled > 0.5) {
+    \\        vec2 auv = (v_pos.xz - u_ao_origin) / max(u_ao_size, 1.0);
+    \\        if (auv.x >= 0.0 && auv.x <= 1.0 && auv.y >= 0.0 && auv.y <= 1.0) {
+    \\            ao = texture(u_ao_tex, auv).r;
+    \\        }
+    \\    }
+    \\    amb *= ao;
+    \\    amb *= mix(0.58, 1.0, shadow);
     \\    vec3 albedo = v_col * (0.72 + 0.56 * detail);
     \\    // Lighting is deliberately shy of 1.0: albedo arrives already close to mid grey, and
     \\    // multiplying it by ~1.8 and then gamma-encoding clips the whole surface to white.
@@ -155,11 +235,11 @@ const fragment_src: [:0]const u8 =
     \\    // Snow is a bright diffuse surface; wet mud needs a specular rim to read as wet.
     \\    float exposure = mix(0.16, 0.34, snow);
     \\    exposure *= mix(1.0, 0.92, mud * (1.0 - snow));
-    \\    vec3 c = surf * (amb + ndl * 1.15) * exposure;
+    \\    vec3 c = surf * (amb + u_sun_colour * ndl * 1.15 * shadow * mix(0.72, 1.0, ao)) * exposure;
     \\    vec3 view = normalize(u_eye - v_pos);
     \\    vec3 hv = normalize(l + view);
     \\    float spec = pow(max(dot(n, hv), 0.0), 42.0);
-    \\    c += vec3(spec * (mud * wet * 0.30 + snow * 0.05));
+    \\    c += u_sun_colour * vec3(spec * shadow * (mud * wet * 0.30 + snow * 0.05));
     \\    c = clamp((c * (2.51 * c + 0.03)) / (c * (2.43 * c + 0.59) + 0.14), 0.0, 1.0);
     \\    vec3 outc = pow(c, vec3(0.4545));
     \\    if (u_atmosphere > 0.5) {
@@ -187,14 +267,31 @@ const fragment_src: [:0]const u8 =
 /// Owns the terrain program and its VAO/VBO/EBO. One instance per window.
 pub const DcRenderer = struct {
     shader: Shader,
+    depth_shader: Shader,
     vao: u32 = 0,
     vbo: u32 = 0,
     ebo: u32 = 0,
+    ao_tex: u32 = 0,
+    ao_min_x: f32 = 0,
+    ao_min_z: f32 = 0,
+    ao_size: f32 = 256,
+    ao_enabled: bool = true,
 
     pub fn init() !DcRenderer {
         var shader = try Shader.init(vertex_src, fragment_src);
         errdefer shader.deinit();
-        return .{ .shader = shader };
+        var depth_shader = try Shader.init(depth_vertex_src, depth_fragment_src);
+        errdefer depth_shader.deinit();
+        var ao_tex: u32 = 0;
+        gl.GenTextures(1, @ptrCast(&ao_tex));
+        gl.BindTexture(gl.TEXTURE_2D, ao_tex);
+        gl.TexImage2D(gl.TEXTURE_2D, 0, gl.R8, 64, 64, 0, gl.RED, gl.UNSIGNED_BYTE, null);
+        gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        gl.BindTexture(gl.TEXTURE_2D, 0);
+        return .{ .shader = shader, .depth_shader = depth_shader, .ao_tex = ao_tex };
     }
 
     pub fn deinit(self: *DcRenderer) void {
@@ -203,7 +300,37 @@ pub const DcRenderer = struct {
             gl.DeleteBuffers(1, @ptrCast(&self.vbo));
             gl.DeleteBuffers(1, @ptrCast(&self.ebo));
         }
+        if (self.ao_tex != 0) gl.DeleteTextures(1, @ptrCast(&self.ao_tex));
+        self.depth_shader.deinit();
         self.shader.deinit();
+    }
+
+    /// Uploads the 64x64 heightfield AO map and the patch origin it covers.
+    pub fn uploadAo(self: *DcRenderer, data: []const u8, min_x: f32, min_z: f32, size: f32) void {
+        if (data.len != 64 * 64) return;
+        self.ao_min_x = min_x;
+        self.ao_min_z = min_z;
+        self.ao_size = size;
+        gl.BindTexture(gl.TEXTURE_2D, self.ao_tex);
+        gl.TexSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 64, 64, gl.RED, gl.UNSIGNED_BYTE, data.ptr);
+        gl.BindTexture(gl.TEXTURE_2D, 0);
+    }
+
+    pub fn setAoEnabled(self: *DcRenderer, enabled: bool) void {
+        self.ao_enabled = enabled;
+    }
+
+    /// Depth-only pass into a sun shadow cascade. The caller has already bound the FBO and set
+    /// the light matrix on `depth_shader`.
+    pub fn drawDepth(self: *DcRenderer, view_projection: Mat4, index_count: usize) void {
+        self.depth_shader.use();
+        self.depth_shader.setMat4("u_mvp", view_projection.m);
+        gl.Enable(gl.DEPTH_TEST);
+        gl.DepthMask(gl.TRUE);
+        gl.Disable(gl.BLEND);
+        gl.Disable(gl.CULL_FACE);
+        gl.BindVertexArray(self.vao);
+        gl.DrawElements(gl.TRIANGLES, @intCast(index_count), gl.UNSIGNED_INT, 0);
     }
 
     pub fn upload(self: *DcRenderer, verts: []const Vertex, idx: []const u32) void {
@@ -235,6 +362,9 @@ pub const DcRenderer = struct {
         view_projection: Mat4,
         eye: Vec3,
         sun_dir: Vec3,
+        sun_colour: Vec3,
+        ambient_ground: Vec3,
+        sh: [9]Vec3,
         fog_colour: Vec3,
         fog_sun: Vec3,
         fog_density: f32,
@@ -246,6 +376,7 @@ pub const DcRenderer = struct {
         sea_level: f32,
         snow_line: f32,
         mud_band: f32,
+        shadow: *ShadowRenderer,
         index_count: usize,
     ) void {
         gl.Enable(gl.DEPTH_TEST);
@@ -256,6 +387,22 @@ pub const DcRenderer = struct {
         self.shader.setMat4("u_view_proj", view_projection.m);
         self.shader.setVec3("u_eye", .{ eye.x, eye.y, eye.z });
         self.shader.setVec3("u_sun_dir", .{ sun_dir.x, sun_dir.y, sun_dir.z });
+        self.shader.setVec3("u_sun_colour", .{ sun_colour.x, sun_colour.y, sun_colour.z });
+        self.shader.setVec3("u_ambient_ground", .{ ambient_ground.x, ambient_ground.y, ambient_ground.z });
+        const sh_names: [9][:0]const u8 = .{
+            "u_sh[0]", "u_sh[1]", "u_sh[2]", "u_sh[3]", "u_sh[4]", "u_sh[5]", "u_sh[6]", "u_sh[7]", "u_sh[8]",
+        };
+        for (sh_names, 0..) |name, i| {
+            self.shader.setVec3(name, .{ sh[i].x, sh[i].y, sh[i].z });
+        }
+        shadow.setUniforms(&self.shader);
+        self.shader.setInt("u_ao_tex", 3);
+        self.shader.setFloat2("u_ao_origin", .{ self.ao_min_x, self.ao_min_z });
+        self.shader.setFloat("u_ao_size", self.ao_size);
+        self.shader.setFloat("u_ao_enabled", if (self.ao_enabled) 1.0 else 0.0);
+        gl.ActiveTexture(gl.TEXTURE3);
+        gl.BindTexture(gl.TEXTURE_2D, self.ao_tex);
+        gl.ActiveTexture(gl.TEXTURE0);
         self.shader.setVec3("u_fog_colour", .{ fog_colour.x, fog_colour.y, fog_colour.z });
         self.shader.setVec3("u_fog_sun", .{ fog_sun.x, fog_sun.y, fog_sun.z });
         self.shader.setFloat("u_fog_density", fog_density);

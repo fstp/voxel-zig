@@ -8,6 +8,7 @@ const Shader = @import("shader.zig").Shader;
 const Mat4 = @import("../math/mat4.zig").Mat4;
 const Vec3 = @import("../math/vec.zig").Vec3;
 const Prop = @import("../world/scatter.zig").Prop;
+const ShadowRenderer = @import("shadow_renderer.zig").ShadowRenderer;
 
 pub const Vertex = extern struct {
     pos: [3]f32,
@@ -126,6 +127,88 @@ fn buildRock(alloc: std.mem.Allocator) !MeshData {
     return md;
 }
 
+/// A low, irregular snow clump / ice shard: a seven-sided mound with a jagged top ring.
+/// Deliberately small (0.6 m across at scale 1) so it reads as surface detail, not a rock.
+fn buildSnowClump(alloc: std.mem.Allocator) !MeshData {
+    var md = MeshData{};
+    errdefer md.deinit(alloc);
+    const segs: usize = 7;
+    var bottom: [segs]u32 = undefined;
+    var top: [segs]u32 = undefined;
+    for (0..segs) |i| {
+        const a = @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(segs)) * std.math.tau;
+        const cx = @cos(a);
+        const sz = @sin(a);
+        const r = 0.26 + 0.05 * @sin(@as(f32, @floatFromInt(i)) * 2.3);
+        bottom[i] = try addVertex(&md, alloc, .{ cx * r, 0.0, sz * r }, .{ cx, 0.2, sz }, .{ 0.80, 0.86, 0.92 }, 0.0);
+        const rt = r * (0.45 + 0.18 * @sin(@as(f32, @floatFromInt(i)) * 1.7 + 1.0));
+        top[i] = try addVertex(&md, alloc, .{ cx * rt, 0.22 + 0.13 * @sin(@as(f32, @floatFromInt(i)) * 2.9 + 0.4), sz * rt }, .{ cx * 0.4, 0.9, sz * 0.4 }, .{ 0.90, 0.94, 0.98 }, 0.0);
+    }
+    for (0..segs) |i| {
+        const j = (i + 1) % segs;
+        try addTri(&md, alloc, bottom[i], top[i], bottom[j]);
+        try addTri(&md, alloc, bottom[j], top[i], top[j]);
+    }
+    // A bright, slightly raised centre cap so the clump is not a hole when seen from above.
+    const c = try addVertex(&md, alloc, .{ 0.02, 0.36, -0.01 }, .{ 0, 1, 0 }, .{ 0.94, 0.97, 1.0 }, 0.0);
+    for (0..segs) |i| {
+        try addTri(&md, alloc, top[i], c, top[(i + 1) % segs]);
+    }
+    return md;
+}
+
+/// A small shore clump: five tapered reed blades plus a short driftwood twig.
+fn buildShoreClump(alloc: std.mem.Allocator) !MeshData {
+    var md = MeshData{};
+    errdefer md.deinit(alloc);
+    const blades = 5;
+    for (0..blades) |i| {
+        const a = @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(blades)) * std.math.tau;
+        const cx = @cos(a);
+        const sz = @sin(a);
+        const lean = 0.10 + 0.06 * @sin(@as(f32, @floatFromInt(i)) * 1.9);
+        const h = 0.70 + 0.28 * @sin(@as(f32, @floatFromInt(i)) * 2.1 + 0.3);
+        const w = 0.025;
+        const col = [3]f32{ 0.14 + 0.05 * @sin(@as(f32, @floatFromInt(i))), 0.24 + 0.06 * @cos(a), 0.08 };
+        const n = [3]f32{ -sz, 0.4, cx };
+        const b0 = try addVertex(&md, alloc, .{ cx * 0.05 - sz * w, 0.0, sz * 0.05 + cx * w }, n, col, 0.12);
+        const b1 = try addVertex(&md, alloc, .{ cx * 0.05 + sz * w, 0.0, sz * 0.05 - cx * w }, n, col, 0.12);
+        const t0 = try addVertex(&md, alloc, .{ cx * (0.05 + lean), h, sz * (0.05 + lean) - sz * w * 0.2 }, n, col, 0.20);
+        const t1 = try addVertex(&md, alloc, .{ cx * (0.05 + lean), h, sz * (0.05 + lean) + sz * w * 0.2 }, n, col, 0.20);
+        try addTri(&md, alloc, b0, t0, b1);
+        try addTri(&md, alloc, b1, t0, t1);
+    }
+    // A small dark pebble at the base, so the clump carries the mud/pebble cue as well as reeds.
+    {
+        const pseg: usize = 5;
+        var pb: [pseg]u32 = undefined;
+        var pt: [pseg]u32 = undefined;
+        for (0..pseg) |i| {
+            const a = @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(pseg)) * std.math.tau;
+            const cx = @cos(a);
+            const sz = @sin(a);
+            pb[i] = try addVertex(&md, alloc, .{ cx * 0.11, 0.0, sz * 0.09 }, .{ cx, 0.15, sz }, .{ 0.22, 0.21, 0.19 }, 0.0);
+            pt[i] = try addVertex(&md, alloc, .{ cx * 0.07, 0.09, sz * 0.06 }, .{ cx * 0.5, 0.8, sz * 0.5 }, .{ 0.27, 0.26, 0.23 }, 0.0);
+        }
+        const top = try addVertex(&md, alloc, .{ 0.01, 0.12, 0.0 }, .{ 0, 1, 0 }, .{ 0.30, 0.29, 0.26 }, 0.0);
+        for (0..pseg) |i| {
+            const j = (i + 1) % pseg;
+            try addTri(&md, alloc, pb[i], pt[i], pb[j]);
+            try addTri(&md, alloc, pb[j], pt[i], pt[j]);
+            try addTri(&md, alloc, pt[i], top, pt[j]);
+        }
+    }
+    // Driftwood: a low triangular prism lying across the clump.
+    const wood = [3]f32{ 0.24, 0.17, 0.10 };
+    const w0 = try addVertex(&md, alloc, .{ -0.28, 0.04, -0.05 }, .{ 0, 1, 0 }, wood, 0.0);
+    const w1 = try addVertex(&md, alloc, .{ 0.30, 0.04, 0.06 }, .{ 0, 1, 0 }, wood, 0.0);
+    const w2 = try addVertex(&md, alloc, .{ -0.26, 0.12, -0.03 }, .{ 0, 1, 0 }, wood, 0.0);
+    const w3 = try addVertex(&md, alloc, .{ 0.28, 0.10, 0.08 }, .{ 0, 1, 0 }, wood, 0.0);
+    try addTri(&md, alloc, w0, w1, w2);
+    try addTri(&md, alloc, w1, w3, w2);
+    return md;
+}
+
 const vertex_src: [:0]const u8 =
     \\#version 330 core
     \\layout(location = 0) in vec3 a_pos;
@@ -165,17 +248,62 @@ const fragment_src: [:0]const u8 =
     \\in vec3 v_world;
     \\uniform vec3 u_eye;
     \\uniform vec3 u_sun_dir;
+    \\uniform vec3 u_sun_colour;
+    \\uniform vec3 u_ambient_sky;
+    \\uniform vec3 u_ambient_ground;
+    \\uniform mat4 u_light_vp[2];
+    \\uniform sampler2D u_shadow0;
+    \\uniform sampler2D u_shadow1;
+    \\uniform float u_shadow_enabled;
     \\uniform vec3 u_fog_colour;
     \\uniform vec3 u_fog_sun;
     \\uniform float u_fog_density;
     \\uniform float u_fog_height;
     \\uniform float u_fog_base;
     \\out vec4 frag;
+    \\float shadowCascade(mat4 lvp, sampler2D map, vec3 world, vec3 n) {
+    \\    vec4 lp = lvp * vec4(world + n * 0.10, 1.0);
+    \\    vec3 p = lp.xyz / max(lp.w, 1e-5) * 0.5 + 0.5;
+    \\    if (p.x < 0.0 || p.x > 1.0 || p.y < 0.0 || p.y > 1.0 || p.z > 1.0) return 1.0;
+    \\    float bias = 0.0015;
+    \\    float texel = 1.0 / 2048.0;
+    \\    float blocker = 0.0;
+    \\    int blocker_count = 0;
+    \\    for (int i = 0; i < 8; ++i) {
+    \\        float a = float(i) * 0.785398;
+    \\        float d = texture(map, p.xy + vec2(cos(a), sin(a)) * texel * 4.0).r;
+    \\        if (d < p.z - bias) {
+    \\            blocker += d;
+    \\            blocker_count += 1;
+    \\        }
+    \\    }
+    \\    if (blocker_count == 0) return 1.0;
+    \\    float avg = blocker / float(blocker_count);
+    \\    float radius = clamp((p.z - avg) * 120.0, 0.75, 6.0);
+    \\    float sum = 0.0;
+    \\    for (int y = -2; y <= 2; ++y) {
+    \\        for (int x = -2; x <= 2; ++x) {
+    \\            float d = texture(map, p.xy + vec2(x, y) * texel * radius * 0.5).r;
+    \\            sum += (p.z - bias <= d) ? 1.0 : 0.0;
+    \\        }
+    \\    }
+    \\    return sum / 25.0;
+    \\}
+    \\float sunShadow(vec3 world, vec3 n) {
+    \\    if (u_shadow_enabled < 0.5) return 1.0;
+    \\    float d = length(world - u_eye);
+    \\    float s0 = shadowCascade(u_light_vp[0], u_shadow0, world, n);
+    \\    float s1 = shadowCascade(u_light_vp[1], u_shadow1, world, n);
+    \\    return mix(s0, s1, smoothstep(55.0, 75.0, d));
+    \\}
     \\void main() {
     \\    vec3 n = normalize(v_nrm);
     \\    if (!gl_FrontFacing) n = -n;
     \\    float ndl = max(dot(n, u_sun_dir), 0.0);
-    \\    vec3 c = v_col * (0.50 + ndl * 0.85) * 0.20;
+    \\    vec3 amb = mix(u_ambient_ground, u_ambient_sky, n.y * 0.5 + 0.5);
+    \\    float shadow = sunShadow(v_world, n);
+    \\    amb *= mix(0.58, 1.0, shadow);
+    \\    vec3 c = v_col * (amb * 2.0 + u_sun_colour * ndl * 0.85 * shadow) * 0.20;
     \\    c = clamp((c * (2.51 * c + 0.03)) / (c * (2.43 * c + 0.59) + 0.14), 0.0, 1.0);
     \\    vec3 outc = pow(max(c, 0.0), vec3(0.4545));
     \\    vec3 ray = v_world - u_eye;
@@ -190,6 +318,11 @@ const fragment_src: [:0]const u8 =
     \\    outc = mix(outc, fogc, fog);
     \\    frag = vec4(outc, 1.0);
     \\}
+;
+
+const depth_fragment_src: [:0]const u8 =
+    \\#version 330 core
+    \\void main() {}
 ;
 
 const bake_vertex_src: [:0]const u8 =
@@ -316,11 +449,18 @@ const MAX_PER_LOD: usize = 256;
 
 pub const PropRenderer = struct {
     shader: Shader,
+    depth_shader: Shader,
     tree_meshes: [3]Mesh = .{ .{}, .{}, .{} },
     tree_instances: [3]u32 = .{ 0, 0, 0 },
     rock_mesh: Mesh = .{},
     rock_instances: u32 = 0,
     rock_count: usize = 0,
+    snow_mesh: Mesh = .{},
+    snow_instances: u32 = 0,
+    snow_count: usize = 0,
+    shore_mesh: Mesh = .{},
+    shore_instances: u32 = 0,
+    shore_count: usize = 0,
     impostor_shader: ?Shader = null,
     impostor_vao: u32 = 0,
     impostor_vbo: u32 = 0,
@@ -330,7 +470,9 @@ pub const PropRenderer = struct {
     pub fn init(alloc: std.mem.Allocator) !PropRenderer {
         var shader = try Shader.init(vertex_src, fragment_src);
         errdefer shader.deinit();
-        var self = PropRenderer{ .shader = shader };
+        var depth_shader = try Shader.init(vertex_src, depth_fragment_src);
+        errdefer depth_shader.deinit();
+        var self = PropRenderer{ .shader = shader, .depth_shader = depth_shader };
         errdefer self.deinit(alloc);
 
         const lods = [_]struct { sides: usize, cones: usize }{
@@ -349,6 +491,16 @@ pub const PropRenderer = struct {
         defer rock.deinit(alloc);
         gl.GenBuffers(1, @ptrCast(&self.rock_instances));
         self.rock_mesh = try uploadMesh(alloc, &rock, self.rock_instances);
+
+        var snow = try buildSnowClump(alloc);
+        defer snow.deinit(alloc);
+        gl.GenBuffers(1, @ptrCast(&self.snow_instances));
+        self.snow_mesh = try uploadMesh(alloc, &snow, self.snow_instances);
+
+        var shore = try buildShoreClump(alloc);
+        defer shore.deinit(alloc);
+        gl.GenBuffers(1, @ptrCast(&self.shore_instances));
+        self.shore_mesh = try uploadMesh(alloc, &shore, self.shore_instances);
 
         self.impostor_shader = try Shader.init(impostor_vertex_src, impostor_fragment_src);
         gl.GenBuffers(1, @ptrCast(&self.impostor_vbo));
@@ -374,10 +526,15 @@ pub const PropRenderer = struct {
         }
         destroyMesh(&self.rock_mesh);
         if (self.rock_instances != 0) gl.DeleteBuffers(1, @ptrCast(&self.rock_instances));
+        destroyMesh(&self.snow_mesh);
+        if (self.snow_instances != 0) gl.DeleteBuffers(1, @ptrCast(&self.snow_instances));
+        destroyMesh(&self.shore_mesh);
+        if (self.shore_instances != 0) gl.DeleteBuffers(1, @ptrCast(&self.shore_instances));
         if (self.impostor_shader) |*sh| sh.deinit();
         if (self.impostor_vao != 0) gl.DeleteVertexArrays(1, @ptrCast(&self.impostor_vao));
         if (self.impostor_vbo != 0) gl.DeleteBuffers(1, @ptrCast(&self.impostor_vbo));
         if (self.impostor_tex != 0) gl.DeleteTextures(1, @ptrCast(&self.impostor_tex));
+        self.depth_shader.deinit();
         self.shader.deinit();
     }
 
@@ -389,6 +546,54 @@ pub const PropRenderer = struct {
         gl.BufferData(gl.ARRAY_BUFFER, @intCast(rocks.len * @sizeOf(Prop)), rocks.ptr, gl.STATIC_DRAW);
     }
 
+    pub fn uploadSnow(self: *PropRenderer, clumps: []const Prop) void {
+        self.snow_count = clumps.len;
+        if (clumps.len == 0) return;
+        gl.BindBuffer(gl.ARRAY_BUFFER, self.snow_instances);
+        gl.BufferData(gl.ARRAY_BUFFER, @intCast(clumps.len * @sizeOf(Prop)), clumps.ptr, gl.STATIC_DRAW);
+    }
+
+    pub fn uploadShore(self: *PropRenderer, props: []const Prop) void {
+        self.shore_count = props.len;
+        if (props.len == 0) return;
+        gl.BindBuffer(gl.ARRAY_BUFFER, self.shore_instances);
+        gl.BufferData(gl.ARRAY_BUFFER, @intCast(props.len * @sizeOf(Prop)), props.ptr, gl.STATIC_DRAW);
+    }
+
+    /// Shadow pass: every tree casts through the mid LOD (a proxy for the far impostors too).
+    pub fn drawTreesDepth(self: *PropRenderer, view_projection: Mat4, time: f32, trees: []const Prop) void {
+        if (trees.len == 0) return;
+        gl.BindBuffer(gl.ARRAY_BUFFER, self.tree_instances[1]);
+        gl.BufferData(gl.ARRAY_BUFFER, @intCast(trees.len * @sizeOf(Prop)), trees.ptr, gl.STATIC_DRAW);
+        self.drawDepthMesh(&self.tree_meshes[1], self.tree_instances[1], trees.len, view_projection, time);
+    }
+
+    pub fn drawRocksDepth(self: *PropRenderer, view_projection: Mat4, time: f32) void {
+        self.drawDepthMesh(&self.rock_mesh, self.rock_instances, self.rock_count, view_projection, time);
+    }
+
+    pub fn drawSnowDepth(self: *PropRenderer, view_projection: Mat4, time: f32) void {
+        self.drawDepthMesh(&self.snow_mesh, self.snow_instances, self.snow_count, view_projection, time);
+    }
+
+    pub fn drawShoreDepth(self: *PropRenderer, view_projection: Mat4, time: f32) void {
+        self.drawDepthMesh(&self.shore_mesh, self.shore_instances, self.shore_count, view_projection, time);
+    }
+
+    fn drawDepthMesh(self: *PropRenderer, mesh: *const Mesh, instance_vbo: u32, count: usize, view_projection: Mat4, time: f32) void {
+        if (count == 0) return;
+        self.depth_shader.use();
+        self.depth_shader.setMat4("u_view_proj", view_projection.m);
+        self.depth_shader.setFloat("u_time", time);
+        gl.Enable(gl.DEPTH_TEST);
+        gl.DepthMask(gl.TRUE);
+        gl.Disable(gl.BLEND);
+        gl.Disable(gl.CULL_FACE);
+        gl.BindVertexArray(mesh.vao);
+        gl.BindBuffer(gl.ARRAY_BUFFER, instance_vbo);
+        gl.DrawElementsInstanced(gl.TRIANGLES, @intCast(mesh.index_count), gl.UNSIGNED_INT, 0, @intCast(count));
+    }
+
     /// Partitions trees by distance and draws each LOD with one instanced call.
     pub fn drawTrees(
         self: *PropRenderer,
@@ -397,12 +602,16 @@ pub const PropRenderer = struct {
         right: Vec3,
         up: Vec3,
         sun_dir: Vec3,
+        sun_colour: Vec3,
+        ambient_sky: Vec3,
+        ambient_ground: Vec3,
         fog_colour: Vec3,
         fog_sun: Vec3,
         fog_density: f32,
         fog_height: f32,
         fog_base: f32,
         time: f32,
+        shadow: *ShadowRenderer,
         trees: []const Prop,
     ) void {
         if (trees.len == 0) return;
@@ -433,12 +642,12 @@ pub const PropRenderer = struct {
             }
         }
 
-        self.begin(view_projection, eye, sun_dir, fog_colour, fog_sun, fog_density, fog_height, fog_base, time);
+        self.begin(view_projection, eye, sun_dir, sun_colour, ambient_sky, ambient_ground, fog_colour, fog_sun, fog_density, fog_height, fog_base, time, shadow);
         self.drawLod(0, l0[0..n0], time);
         self.drawLod(1, l1[0..n1], time);
         self.drawLod(2, l2[0..n2], time);
         self.last_impostor_count = n3;
-        drawImpostors(self, l3[0..n3], view_projection, eye, right, up, sun_dir, fog_colour, fog_sun, fog_density, fog_height, fog_base);
+        drawImpostors(self, l3[0..n3], view_projection, eye, right, up, sun_dir, sun_colour, fog_colour, fog_sun, fog_density, fog_height, fog_base);
     }
 
     pub fn drawRocks(
@@ -446,17 +655,82 @@ pub const PropRenderer = struct {
         view_projection: Mat4,
         eye: Vec3,
         sun_dir: Vec3,
+        sun_colour: Vec3,
+        ambient_sky: Vec3,
+        ambient_ground: Vec3,
         fog_colour: Vec3,
         fog_sun: Vec3,
         fog_density: f32,
         fog_height: f32,
         fog_base: f32,
         time: f32,
+        shadow: *ShadowRenderer,
     ) void {
-        if (self.rock_count == 0) return;
-        self.begin(view_projection, eye, sun_dir, fog_colour, fog_sun, fog_density, fog_height, fog_base, time);
-        gl.BindVertexArray(self.rock_mesh.vao);
-        gl.DrawElementsInstanced(gl.TRIANGLES, @intCast(self.rock_mesh.index_count), gl.UNSIGNED_INT, 0, @intCast(self.rock_count));
+        self.drawDetailMesh(&self.rock_mesh, self.rock_instances, self.rock_count, view_projection, eye, sun_dir, sun_colour, ambient_sky, ambient_ground, fog_colour, fog_sun, fog_density, fog_height, fog_base, time, shadow);
+    }
+
+    pub fn drawSnow(
+        self: *PropRenderer,
+        view_projection: Mat4,
+        eye: Vec3,
+        sun_dir: Vec3,
+        sun_colour: Vec3,
+        ambient_sky: Vec3,
+        ambient_ground: Vec3,
+        fog_colour: Vec3,
+        fog_sun: Vec3,
+        fog_density: f32,
+        fog_height: f32,
+        fog_base: f32,
+        time: f32,
+        shadow: *ShadowRenderer,
+    ) void {
+        self.drawDetailMesh(&self.snow_mesh, self.snow_instances, self.snow_count, view_projection, eye, sun_dir, sun_colour, ambient_sky, ambient_ground, fog_colour, fog_sun, fog_density, fog_height, fog_base, time, shadow);
+    }
+
+    pub fn drawShore(
+        self: *PropRenderer,
+        view_projection: Mat4,
+        eye: Vec3,
+        sun_dir: Vec3,
+        sun_colour: Vec3,
+        ambient_sky: Vec3,
+        ambient_ground: Vec3,
+        fog_colour: Vec3,
+        fog_sun: Vec3,
+        fog_density: f32,
+        fog_height: f32,
+        fog_base: f32,
+        time: f32,
+        shadow: *ShadowRenderer,
+    ) void {
+        self.drawDetailMesh(&self.shore_mesh, self.shore_instances, self.shore_count, view_projection, eye, sun_dir, sun_colour, ambient_sky, ambient_ground, fog_colour, fog_sun, fog_density, fog_height, fog_base, time, shadow);
+    }
+
+    fn drawDetailMesh(
+        self: *PropRenderer,
+        mesh: *const Mesh,
+        instance_vbo: u32,
+        count: usize,
+        view_projection: Mat4,
+        eye: Vec3,
+        sun_dir: Vec3,
+        sun_colour: Vec3,
+        ambient_sky: Vec3,
+        ambient_ground: Vec3,
+        fog_colour: Vec3,
+        fog_sun: Vec3,
+        fog_density: f32,
+        fog_height: f32,
+        fog_base: f32,
+        time: f32,
+        shadow: *ShadowRenderer,
+    ) void {
+        if (count == 0) return;
+        self.begin(view_projection, eye, sun_dir, sun_colour, ambient_sky, ambient_ground, fog_colour, fog_sun, fog_density, fog_height, fog_base, time, shadow);
+        gl.BindVertexArray(mesh.vao);
+        gl.BindBuffer(gl.ARRAY_BUFFER, instance_vbo);
+        gl.DrawElementsInstanced(gl.TRIANGLES, @intCast(mesh.index_count), gl.UNSIGNED_INT, 0, @intCast(count));
     }
 
     fn begin(
@@ -464,12 +738,16 @@ pub const PropRenderer = struct {
         view_projection: Mat4,
         eye: Vec3,
         sun_dir: Vec3,
+        sun_colour: Vec3,
+        ambient_sky: Vec3,
+        ambient_ground: Vec3,
         fog_colour: Vec3,
         fog_sun: Vec3,
         fog_density: f32,
         fog_height: f32,
         fog_base: f32,
         time: f32,
+        shadow: *ShadowRenderer,
     ) void {
         gl.Enable(gl.DEPTH_TEST);
         gl.DepthMask(gl.TRUE);
@@ -479,6 +757,10 @@ pub const PropRenderer = struct {
         self.shader.setMat4("u_view_proj", view_projection.m);
         self.shader.setVec3("u_eye", .{ eye.x, eye.y, eye.z });
         self.shader.setVec3("u_sun_dir", .{ sun_dir.x, sun_dir.y, sun_dir.z });
+        self.shader.setVec3("u_sun_colour", .{ sun_colour.x, sun_colour.y, sun_colour.z });
+        self.shader.setVec3("u_ambient_sky", .{ ambient_sky.x, ambient_sky.y, ambient_sky.z });
+        self.shader.setVec3("u_ambient_ground", .{ ambient_ground.x, ambient_ground.y, ambient_ground.z });
+        shadow.setUniforms(&self.shader);
         self.shader.setVec3("u_fog_colour", .{ fog_colour.x, fog_colour.y, fog_colour.z });
         self.shader.setVec3("u_fog_sun", .{ fog_sun.x, fog_sun.y, fog_sun.z });
         self.shader.setFloat("u_fog_density", fog_density);
@@ -566,6 +848,7 @@ pub const PropRenderer = struct {
         right: Vec3,
         up: Vec3,
         sun_dir: Vec3,
+        sun_colour: Vec3,
         fog_colour: Vec3,
         fog_sun: Vec3,
         fog_density: f32,
@@ -574,6 +857,7 @@ pub const PropRenderer = struct {
     ) void {
         if (props.len == 0) return;
         const sh = if (self.impostor_shader) |*sh| sh else return;
+        _ = sun_colour;
         gl.BindBuffer(gl.ARRAY_BUFFER, self.impostor_vbo);
         gl.BufferData(gl.ARRAY_BUFFER, @intCast(props.len * @sizeOf(Prop)), props.ptr, gl.STATIC_DRAW);
         gl.Enable(gl.DEPTH_TEST);

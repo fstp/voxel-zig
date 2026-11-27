@@ -8,6 +8,7 @@ const Shader = @import("shader.zig").Shader;
 const Mat4 = @import("../math/mat4.zig").Mat4;
 const Vec3 = @import("../math/vec.zig").Vec3;
 const Blade = @import("../world/scatter.zig").Blade;
+const ShadowRenderer = @import("shadow_renderer.zig").ShadowRenderer;
 
 const vertex_src: [:0]const u8 =
     \\#version 330 core
@@ -90,18 +91,63 @@ const fragment_src: [:0]const u8 =
     \\in vec3 v_world;
     \\uniform vec3 u_eye;
     \\uniform vec3 u_sun_dir;
+    \\uniform vec3 u_sun_colour;
+    \\uniform vec3 u_ambient_sky;
+    \\uniform vec3 u_ambient_ground;
+    \\uniform mat4 u_light_vp[2];
+    \\uniform sampler2D u_shadow0;
+    \\uniform sampler2D u_shadow1;
+    \\uniform float u_shadow_enabled;
     \\uniform vec3 u_fog_colour;
     \\uniform vec3 u_fog_sun;
     \\uniform float u_fog_density;
     \\uniform float u_fog_height;
     \\uniform float u_fog_base;
     \\out vec4 frag;
+    \\float shadowCascade(mat4 lvp, sampler2D map, vec3 world, vec3 n) {
+    \\    vec4 lp = lvp * vec4(world + n * 0.10, 1.0);
+    \\    vec3 p = lp.xyz / max(lp.w, 1e-5) * 0.5 + 0.5;
+    \\    if (p.x < 0.0 || p.x > 1.0 || p.y < 0.0 || p.y > 1.0 || p.z > 1.0) return 1.0;
+    \\    float bias = 0.0015;
+    \\    float texel = 1.0 / 2048.0;
+    \\    float blocker = 0.0;
+    \\    int blocker_count = 0;
+    \\    for (int i = 0; i < 8; ++i) {
+    \\        float a = float(i) * 0.785398;
+    \\        float d = texture(map, p.xy + vec2(cos(a), sin(a)) * texel * 4.0).r;
+    \\        if (d < p.z - bias) {
+    \\            blocker += d;
+    \\            blocker_count += 1;
+    \\        }
+    \\    }
+    \\    if (blocker_count == 0) return 1.0;
+    \\    float avg = blocker / float(blocker_count);
+    \\    float radius = clamp((p.z - avg) * 120.0, 0.75, 6.0);
+    \\    float sum = 0.0;
+    \\    for (int y = -2; y <= 2; ++y) {
+    \\        for (int x = -2; x <= 2; ++x) {
+    \\            float d = texture(map, p.xy + vec2(x, y) * texel * radius * 0.5).r;
+    \\            sum += (p.z - bias <= d) ? 1.0 : 0.0;
+    \\        }
+    \\    }
+    \\    return sum / 25.0;
+    \\}
+    \\float sunShadow(vec3 world, vec3 n) {
+    \\    if (u_shadow_enabled < 0.5) return 1.0;
+    \\    float d = length(world - u_eye);
+    \\    float s0 = shadowCascade(u_light_vp[0], u_shadow0, world, n);
+    \\    float s1 = shadowCascade(u_light_vp[1], u_shadow1, world, n);
+    \\    return mix(s0, s1, smoothstep(55.0, 75.0, d));
+    \\}
     \\void main() {
     \\    vec3 n = normalize(v_nrm);
     \\    if (!gl_FrontFacing) n = -n;
     \\    float ndl = max(dot(n, u_sun_dir), 0.0);
     \\    float back = max(-dot(n, u_sun_dir), 0.0) * 0.22;
-    \\    vec3 c = v_col * (0.45 + ndl * 0.80 + back) * 0.20;
+    \\    vec3 amb = mix(u_ambient_ground, u_ambient_sky, n.y * 0.5 + 0.5);
+    \\    float shadow = sunShadow(v_world, n);
+    \\    amb *= mix(0.58, 1.0, shadow);
+    \\    vec3 c = v_col * (amb * 2.0 + u_sun_colour * (ndl * 0.80 + back) * shadow) * 0.20;
     \\    c = clamp((c * (2.51 * c + 0.03)) / (c * (2.43 * c + 0.59) + 0.14), 0.0, 1.0);
     \\    vec3 outc = pow(max(c, 0.0), vec3(0.4545));
     \\
@@ -119,9 +165,15 @@ const fragment_src: [:0]const u8 =
     \\}
 ;
 
+const depth_fragment_src: [:0]const u8 =
+    \\#version 330 core
+    \\void main() {}
+;
+
 /// Owns the blade program and the instance buffer. One draw for grass + flowers.
 pub const GrassRenderer = struct {
     shader: Shader,
+    depth_shader: Shader,
     vao: u32 = 0,
     vbo: u32 = 0,
     count: usize = 0,
@@ -129,7 +181,9 @@ pub const GrassRenderer = struct {
     pub fn init() !GrassRenderer {
         var shader = try Shader.init(vertex_src, fragment_src);
         errdefer shader.deinit();
-        return .{ .shader = shader };
+        var depth_shader = try Shader.init(vertex_src, depth_fragment_src);
+        errdefer depth_shader.deinit();
+        return .{ .shader = shader, .depth_shader = depth_shader };
     }
 
     pub fn deinit(self: *GrassRenderer) void {
@@ -137,7 +191,23 @@ pub const GrassRenderer = struct {
             gl.DeleteVertexArrays(1, @ptrCast(&self.vao));
             gl.DeleteBuffers(1, @ptrCast(&self.vbo));
         }
+        self.depth_shader.deinit();
         self.shader.deinit();
+    }
+
+    /// Depth-only shadow pass; the same blade vertex shader with an empty fragment shader.
+    pub fn drawDepth(self: *GrassRenderer, view_projection: Mat4, eye: Vec3, time: f32) void {
+        if (self.vao == 0 or self.count == 0) return;
+        self.depth_shader.use();
+        self.depth_shader.setMat4("u_view_proj", view_projection.m);
+        self.depth_shader.setVec3("u_eye", .{ eye.x, eye.y, eye.z });
+        self.depth_shader.setFloat("u_time", time);
+        gl.Enable(gl.DEPTH_TEST);
+        gl.DepthMask(gl.TRUE);
+        gl.Disable(gl.BLEND);
+        gl.Disable(gl.CULL_FACE);
+        gl.BindVertexArray(self.vao);
+        gl.DrawArraysInstanced(gl.TRIANGLE_STRIP, 0, 7, @intCast(self.count));
     }
 
     pub fn upload(self: *GrassRenderer, blades: []const Blade) void {
@@ -165,12 +235,16 @@ pub const GrassRenderer = struct {
         view_projection: Mat4,
         eye: Vec3,
         sun_dir: Vec3,
+        sun_colour: Vec3,
+        ambient_sky: Vec3,
+        ambient_ground: Vec3,
         fog_colour: Vec3,
         fog_sun: Vec3,
         fog_density: f32,
         fog_height: f32,
         fog_base: f32,
         time: f32,
+        shadow: *ShadowRenderer,
     ) void {
         if (self.vao == 0 or self.count == 0) return;
         gl.Enable(gl.DEPTH_TEST);
@@ -181,6 +255,10 @@ pub const GrassRenderer = struct {
         self.shader.setMat4("u_view_proj", view_projection.m);
         self.shader.setVec3("u_eye", .{ eye.x, eye.y, eye.z });
         self.shader.setVec3("u_sun_dir", .{ sun_dir.x, sun_dir.y, sun_dir.z });
+        self.shader.setVec3("u_sun_colour", .{ sun_colour.x, sun_colour.y, sun_colour.z });
+        self.shader.setVec3("u_ambient_sky", .{ ambient_sky.x, ambient_sky.y, ambient_sky.z });
+        self.shader.setVec3("u_ambient_ground", .{ ambient_ground.x, ambient_ground.y, ambient_ground.z });
+        shadow.setUniforms(&self.shader);
         self.shader.setVec3("u_fog_colour", .{ fog_colour.x, fog_colour.y, fog_colour.z });
         self.shader.setVec3("u_fog_sun", .{ fog_sun.x, fog_sun.y, fog_sun.z });
         self.shader.setFloat("u_fog_density", fog_density);

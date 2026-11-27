@@ -8,6 +8,7 @@ const Shader = @import("shader.zig").Shader;
 const Mat4 = @import("../math/mat4.zig").Mat4;
 const Vec3 = @import("../math/vec.zig").Vec3;
 const dcw = @import("../world/dc_world.zig");
+const ShadowRenderer = @import("shadow_renderer.zig").ShadowRenderer;
 
 /// Cells per side. 96 over a 256 m patch is 2.67 m; fine enough for a shoreline band, cheap
 /// enough to rebuild synchronously when the patch swaps.
@@ -39,6 +40,11 @@ const fragment_src =
     \\in float v_depth;
     \\uniform vec3 u_eye;
     \\uniform vec3 u_sun_dir;
+    \\uniform vec3 u_sun_colour;
+    \\uniform mat4 u_light_vp[2];
+    \\uniform sampler2D u_shadow0;
+    \\uniform sampler2D u_shadow1;
+    \\uniform float u_shadow_enabled;
     \\uniform vec3 u_fog_colour;
     \\uniform vec3 u_fog_sun;
     \\uniform float u_fog_density;
@@ -46,6 +52,41 @@ const fragment_src =
     \\uniform float u_fog_base;
     \\uniform float u_time;
     \\out vec4 frag_colour;
+    \\float shadowCascade(mat4 lvp, sampler2D map, vec3 world, vec3 n) {
+    \\    vec4 lp = lvp * vec4(world + n * 0.10, 1.0);
+    \\    vec3 p = lp.xyz / max(lp.w, 1e-5) * 0.5 + 0.5;
+    \\    if (p.x < 0.0 || p.x > 1.0 || p.y < 0.0 || p.y > 1.0 || p.z > 1.0) return 1.0;
+    \\    float bias = 0.0015;
+    \\    float texel = 1.0 / 2048.0;
+    \\    float blocker = 0.0;
+    \\    int blocker_count = 0;
+    \\    for (int i = 0; i < 8; ++i) {
+    \\        float a = float(i) * 0.785398;
+    \\        float d = texture(map, p.xy + vec2(cos(a), sin(a)) * texel * 4.0).r;
+    \\        if (d < p.z - bias) {
+    \\            blocker += d;
+    \\            blocker_count += 1;
+    \\        }
+    \\    }
+    \\    if (blocker_count == 0) return 1.0;
+    \\    float avg = blocker / float(blocker_count);
+    \\    float radius = clamp((p.z - avg) * 120.0, 0.75, 6.0);
+    \\    float sum = 0.0;
+    \\    for (int y = -2; y <= 2; ++y) {
+    \\        for (int x = -2; x <= 2; ++x) {
+    \\            float d = texture(map, p.xy + vec2(x, y) * texel * radius * 0.5).r;
+    \\            sum += (p.z - bias <= d) ? 1.0 : 0.0;
+    \\        }
+    \\    }
+    \\    return sum / 25.0;
+    \\}
+    \\float sunShadow(vec3 world, vec3 n) {
+    \\    if (u_shadow_enabled < 0.5) return 1.0;
+    \\    float d = length(world - u_eye);
+    \\    float s0 = shadowCascade(u_light_vp[0], u_shadow0, world, n);
+    \\    float s1 = shadowCascade(u_light_vp[1], u_shadow1, world, n);
+    \\    return mix(s0, s1, smoothstep(55.0, 75.0, d));
+    \\}
     \\
     \\vec3 wave_normal(vec2 p, float t) {
     \\    vec2 d1 = normalize(vec2(1.0, 0.35));
@@ -73,7 +114,9 @@ const fragment_src =
     \\
     \\    vec3 half_dir = normalize(view + u_sun_dir);
     \\    float spec = pow(max(dot(n, half_dir), 0.0), 90.0);
-    \\    col += vec3(1.0, 0.94, 0.80) * spec * 0.35;
+    \\    float shadow = sunShadow(v_world, n);
+    \\    body *= mix(0.72, 1.0, shadow);
+    \\    col += u_sun_colour * spec * shadow * 0.35;
     \\
     \\    // Shallow water shows the bed; the deep is nearly opaque; a grazing view reflects more.
     \\    float alpha = mix(0.30, 0.92, clamp(depth / 3.0, 0.0, 1.0));
@@ -199,6 +242,7 @@ pub const WaterRenderer = struct {
         view_projection: Mat4,
         eye: Vec3,
         sun_dir: Vec3,
+        sun_colour: Vec3,
         fog_colour: Vec3,
         fog_sun: Vec3,
         fog_density: f32,
@@ -208,6 +252,7 @@ pub const WaterRenderer = struct {
         min_x: f32,
         min_z: f32,
         size: f32,
+        shadow: *ShadowRenderer,
     ) void {
         if (self.vao == 0) return;
 
@@ -224,6 +269,8 @@ pub const WaterRenderer = struct {
         self.shader.setFloat("u_sea", dcw.SEA_LEVEL);
         self.shader.setVec3("u_eye", .{ eye.x, eye.y, eye.z });
         self.shader.setVec3("u_sun_dir", .{ sun_dir.x, sun_dir.y, sun_dir.z });
+        self.shader.setVec3("u_sun_colour", .{ sun_colour.x, sun_colour.y, sun_colour.z });
+        shadow.setUniforms(&self.shader);
         self.shader.setVec3("u_fog_colour", .{ fog_colour.x, fog_colour.y, fog_colour.z });
         self.shader.setVec3("u_fog_sun", .{ fog_sun.x, fog_sun.y, fog_sun.z });
         self.shader.setFloat("u_fog_density", fog_density);

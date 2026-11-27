@@ -53,6 +53,8 @@ const HudStats = struct {
     trees: usize,
     rocks: usize,
     impostors: usize,
+    snow: usize,
+    shore: usize,
     fly_speed: f32,
     edits: usize,
 };
@@ -61,7 +63,7 @@ const HudStats = struct {
 fn drawHud(hud: *vz.gfx.Hud, width: i32, height: i32, s: HudStats) void {
     hud.begin(width, height);
     hud.scale = 0.85;
-    hud.panel(0, 0, 620, 8 + 5 * hud.lineHeight(), 0.55);
+    hud.panel(0, 0, 900, 8 + 5 * hud.lineHeight(), 0.55);
 
     var buffer: [192]u8 = undefined;
     var y: f32 = 8;
@@ -85,7 +87,7 @@ fn drawHud(hud: *vz.gfx.Hud, width: i32, height: i32, s: HudStats) void {
     y += hud.lineHeight();
 
     hud.setColour(0.6, 0.9, 0.6);
-    if (std.fmt.bufPrint(&buffer, "GRASS {d}  TREES {d}  ROCKS {d}  IMPOSTORS {d}", .{ s.grass, s.trees, s.rocks, s.impostors })) |text| {
+    if (std.fmt.bufPrint(&buffer, "GRASS {d}  TREES {d}  ROCKS {d}  IMPOSTORS {d}  SNOW {d}  SHORE {d}", .{ s.grass, s.trees, s.rocks, s.impostors, s.snow, s.shore })) |text| {
         hud.text(10, y, text);
     } else |_| {}
     y += hud.lineHeight();
@@ -211,6 +213,10 @@ pub fn main(init: std.process.Init) !void {
     }
     const snow_line: f32 = 68.0;
     const mud_band: f32 = 1.4;
+    var ao_enabled = true;
+    if (init.environ_map.get("VOXEL_AO")) |raw| {
+        if (raw.len > 0 and raw[0] == '0') ao_enabled = false;
+    }
     sun.setTime(sun_time);
     std.debug.print("sun time {d:.3} elevation {d:.1} deg\n", .{ sun_time, sun.elevation() });
     var cloud_shift = Vec3.init(0, 0, 0);
@@ -289,6 +295,24 @@ pub fn main(init: std.process.Init) !void {
     var renderer = try vz.gfx.DcRenderer.init();
     defer renderer.deinit();
     renderer.upload(all_verts_s, all_idx_s);
+    renderer.setAoEnabled(ao_enabled);
+    if (ao_enabled) {
+        const ao_t0 = nowNs();
+        const ao_map = try vz.world.heightfield_ao.build(
+            alloc,
+            @floatFromInt(patch_origin * @as(i32, @intCast(CHUNK))),
+            @floatFromInt(patch_origin_z * @as(i32, @intCast(CHUNK))),
+            @floatFromInt(PATCH * @as(i32, @intCast(CHUNK))),
+        );
+        defer alloc.free(ao_map);
+        renderer.uploadAo(
+            ao_map,
+            @floatFromInt(patch_origin * @as(i32, @intCast(CHUNK))),
+            @floatFromInt(patch_origin_z * @as(i32, @intCast(CHUNK))),
+            @floatFromInt(PATCH * @as(i32, @intCast(CHUNK))),
+        );
+        std.debug.print("ao: 64x64 in {d:.2} ms\n", .{@as(f64, @floatFromInt(nowNs() - ao_t0)) / 1e6});
+    }
 
     const scatter_t0 = nowNs();
     var scatter = try scatter_mod.build(
@@ -298,10 +322,12 @@ pub fn main(init: std.process.Init) !void {
         @floatFromInt(patch_origin_z * @as(i32, @intCast(CHUNK))),
         @floatFromInt(PATCH * @as(i32, @intCast(CHUNK))),
     );
-    std.debug.print("scatter: {d} blades, {d} trees, {d} rocks in {d:.1} ms\n", .{
+    std.debug.print("scatter: {d} blades, {d} trees, {d} rocks, {d} snow, {d} shore in {d:.1} ms\n", .{
         scatter.blades.items.len,
         scatter.trees.items.len,
         scatter.rocks.items.len,
+        scatter.snow.items.len,
+        scatter.shore.items.len,
         @as(f64, @floatFromInt(nowNs() - scatter_t0)) / 1e6,
     });
     defer scatter.deinit(alloc);
@@ -311,9 +337,18 @@ pub fn main(init: std.process.Init) !void {
     var props = try PropRenderer.init(alloc);
     defer props.deinit(alloc);
     props.uploadRocks(scatter.rocks.items);
+    props.uploadSnow(scatter.snow.items);
+    props.uploadShore(scatter.shore.items);
 
     var water = try WaterRenderer.init();
     defer water.deinit();
+    var shadow = try vz.gfx.ShadowRenderer.init();
+    defer shadow.deinit();
+    var shadows_enabled = true;
+    if (init.environ_map.get("VOXEL_SHADOWS")) |raw| {
+        if (raw.len > 0 and raw[0] == '0') shadows_enabled = false;
+    }
+    shadow.enabled = shadows_enabled;
     {
         const t0 = nowNs();
         water.ensurePatch(
@@ -469,6 +504,23 @@ pub fn main(init: std.process.Init) !void {
                 renderer.upload(all_verts.items, all_idx.items);
                 patch_origin = pending_x;
                 patch_origin_z = pending_z;
+                if (ao_enabled) {
+                    const at = nowNs();
+                    const ao_map = try vz.world.heightfield_ao.build(
+                        alloc,
+                        @floatFromInt(patch_origin * @as(i32, @intCast(CHUNK))),
+                        @floatFromInt(patch_origin_z * @as(i32, @intCast(CHUNK))),
+                        @floatFromInt(PATCH * @as(i32, @intCast(CHUNK))),
+                    );
+                    defer alloc.free(ao_map);
+                    renderer.uploadAo(
+                        ao_map,
+                        @floatFromInt(patch_origin * @as(i32, @intCast(CHUNK))),
+                        @floatFromInt(patch_origin_z * @as(i32, @intCast(CHUNK))),
+                        @floatFromInt(PATCH * @as(i32, @intCast(CHUNK))),
+                    );
+                    std.debug.print("ao: 64x64 rebuilt in {d:.2} ms\n", .{@as(f64, @floatFromInt(nowNs() - at)) / 1e6});
+                }
                 {
                     const wt = nowNs();
                     water.ensurePatch(
@@ -490,10 +542,14 @@ pub fn main(init: std.process.Init) !void {
                     );
                     grass.upload(scatter.blades.items);
                     props.uploadRocks(scatter.rocks.items);
-                    std.debug.print("scatter: {d} blades, {d} trees, {d} rocks in {d:.1} ms\n", .{
+                    props.uploadSnow(scatter.snow.items);
+                    props.uploadShore(scatter.shore.items);
+                    std.debug.print("scatter: {d} blades, {d} trees, {d} rocks, {d} snow, {d} shore in {d:.1} ms\n", .{
                         scatter.blades.items.len,
                         scatter.trees.items.len,
                         scatter.rocks.items.len,
+                        scatter.snow.items.len,
+                        scatter.shore.items.len,
                         @as(f64, @floatFromInt(nowNs() - st)) / 1e6,
                     });
                 }
@@ -519,6 +575,24 @@ pub fn main(init: std.process.Init) !void {
         cloud_shift = Vec3.init(cloud_shift.x + dt_f * 0.06, 0, cloud_shift.z + dt_f * 0.015);
         const ramp = sun.ramp();
         const lighting = sun.lighting();
+        const sky_sh = sun.skySh();
+        if (shadow.enabled) {
+            shadow.update(camera.position, player.forward(), lighting.sun_dir);
+            for (0..2) |cascade| {
+                shadow.begin(cascade);
+                renderer.drawDepth(shadow.vp[cascade], all_idx.items.len);
+                grass.drawDepth(shadow.vp[cascade], camera.position, water_clock);
+                props.drawTreesDepth(shadow.vp[cascade], water_clock, scatter.trees.items);
+                props.drawRocksDepth(shadow.vp[cascade], water_clock);
+                props.drawSnowDepth(shadow.vp[cascade], water_clock);
+                props.drawShoreDepth(shadow.vp[cascade], water_clock);
+                shadow.end();
+            }
+            gl.Viewport(0, 0, window.width, window.height);
+            gl.Enable(gl.DEPTH_TEST);
+            gl.DepthMask(gl.TRUE);
+            gl.Disable(gl.BLEND);
+        }
         // The sky pass fills the whole screen, so with it running the magenta clear colour is never
         // visible and a hole shows sky instead. In the diagnostic mode the background is left empty
         // so every hole is the one colour the render cannot produce.
@@ -538,6 +612,9 @@ pub fn main(init: std.process.Init) !void {
             vp,
             camera.position,
             lighting.sun_dir,
+            lighting.sun_colour,
+            lighting.ambient_ground,
+            sky_sh.c,
             fog_col,
             fog_sun,
             fog_density,
@@ -549,16 +626,20 @@ pub fn main(init: std.process.Init) !void {
             dcw.SEA_LEVEL,
             snow_line,
             mud_band,
+            &shadow,
             all_idx.items.len,
         );
-        grass.draw(vp, camera.position, lighting.sun_dir, fog_col, fog_sun, fog_density, fog_height, fog_base, water_clock);
-        props.drawTrees(vp, camera.position, camera.right(), camera.up(), lighting.sun_dir, fog_col, fog_sun, fog_density, fog_height, fog_base, water_clock, scatter.trees.items);
-        props.drawRocks(vp, camera.position, lighting.sun_dir, fog_col, fog_sun, fog_density, fog_height, fog_base, water_clock);
+        grass.draw(vp, camera.position, lighting.sun_dir, lighting.sun_colour, lighting.ambient_sky, lighting.ambient_ground, fog_col, fog_sun, fog_density, fog_height, fog_base, water_clock, &shadow);
+        props.drawTrees(vp, camera.position, camera.right(), camera.up(), lighting.sun_dir, lighting.sun_colour, lighting.ambient_sky, lighting.ambient_ground, fog_col, fog_sun, fog_density, fog_height, fog_base, water_clock, &shadow, scatter.trees.items);
+        props.drawRocks(vp, camera.position, lighting.sun_dir, lighting.sun_colour, lighting.ambient_sky, lighting.ambient_ground, fog_col, fog_sun, fog_density, fog_height, fog_base, water_clock, &shadow);
+        props.drawSnow(vp, camera.position, lighting.sun_dir, lighting.sun_colour, lighting.ambient_sky, lighting.ambient_ground, fog_col, fog_sun, fog_density, fog_height, fog_base, water_clock, &shadow);
+        props.drawShore(vp, camera.position, lighting.sun_dir, lighting.sun_colour, lighting.ambient_sky, lighting.ambient_ground, fog_col, fog_sun, fog_density, fog_height, fog_base, water_clock, &shadow);
 
         water.draw(
             vp,
             camera.position,
             lighting.sun_dir,
+            lighting.sun_colour,
             fog_col,
             fog_sun,
             fog_density,
@@ -568,6 +649,7 @@ pub fn main(init: std.process.Init) !void {
             @floatFromInt(patch_origin * @as(i32, @intCast(CHUNK))),
             @floatFromInt(patch_origin_z * @as(i32, @intCast(CHUNK))),
             @floatFromInt(PATCH * @as(i32, @intCast(CHUNK))),
+            &shadow,
         );
 
         if (show_hud) {
@@ -593,6 +675,8 @@ pub fn main(init: std.process.Init) !void {
                 .trees = scatter.trees.items.len,
                 .rocks = scatter.rocks.items.len,
                 .impostors = props.last_impostor_count,
+                .snow = scatter.snow.items.len,
+                .shore = scatter.shore.items.len,
                 .fly_speed = player.fly_speed,
                 .edits = edits.items.len,
             });

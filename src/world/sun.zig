@@ -149,6 +149,11 @@ pub const Sun = struct {
         };
     }
 
+    /// Sky irradiance SH9 for the current sun; the shader evaluates it per normal.
+    pub fn skySh(self: Sun) Sh9 {
+        return skyShFromSun(self);
+    }
+
 
 };
 
@@ -162,6 +167,65 @@ pub const Lighting = struct {
     ambient_sky: Vec3,
     ambient_ground: Vec3,
 };
+
+/// Nine real spherical-harmonic coefficients of the sky's diffuse irradiance, in linear RGB.
+/// The shader evaluates them for the perturbed terrain normal; the projection is done on the CPU
+/// once per frame from the same gradient the sky pass draws (ADR 0027, 11.2).
+pub const Sh9 = struct {
+    c: [9]Vec3 = .{ Vec3.zero, Vec3.zero, Vec3.zero, Vec3.zero, Vec3.zero, Vec3.zero, Vec3.zero, Vec3.zero, Vec3.zero },
+};
+
+const golden_angle: f32 = 2.399963229728653;
+
+/// Projects the sky gradient (without the sun disc or clouds) into SH9. The convolution factors
+/// are folded into the coefficients, so evaluating `Y_lm(n)` in the shader gives irradiance.
+fn skyShFromSun(self: Sun) Sh9 {
+    const r = self.ramp();
+    var out = Sh9{};
+    const samples: usize = 128;
+    const weight = 4.0 * std.math.pi / @as(f32, @floatFromInt(samples));
+    for (0..samples) |i| {
+        const fi: f32 = @floatFromInt(i);
+        const z = 1.0 - 2.0 * (fi + 0.5) / @as(f32, @floatFromInt(samples));
+        const rr = @sqrt(@max(0.0, 1.0 - z * z));
+        const phi = fi * golden_angle;
+        const dir = Vec3.init(rr * @cos(phi), z, rr * @sin(phi));
+        const h = @max(dir.y, 0.0);
+        const t = std.math.pow(f32, h, 0.45);
+        var col = Vec3.init(
+            r.horizon.x + (r.zenith.x - r.horizon.x) * t,
+            r.horizon.y + (r.zenith.y - r.horizon.y) * t,
+            r.horizon.z + (r.zenith.z - r.horizon.z) * t,
+        );
+        // The same horizon haze the sky pass adds (ADR 0021), without the sun disc.
+        const haze = @exp(-h * 7.0) * 0.30;
+        col = Vec3.init(
+            col.x + (r.horizon.x * 1.06 - col.x) * haze,
+            col.y + (r.horizon.y * 1.06 - col.y) * haze,
+            col.z + (r.horizon.z * 1.06 - col.z) * haze,
+        );
+        const x = dir.x;
+        const y = dir.y;
+        const zz = dir.z;
+        const basis = [9]f32{
+            0.282095,
+            0.488603 * y,
+            0.488603 * zz,
+            0.488603 * x,
+            1.092548 * x * y,
+            1.092548 * y * zz,
+            0.315392 * (3.0 * zz * zz - 1.0),
+            1.092548 * x * zz,
+            0.546274 * (x * x - y * y),
+        };
+        const band = [9]f32{ std.math.pi, 2.0 * std.math.pi / 3.0, 2.0 * std.math.pi / 3.0, 2.0 * std.math.pi / 3.0, std.math.pi / 4.0, std.math.pi / 4.0, std.math.pi / 4.0, std.math.pi / 4.0, std.math.pi / 4.0 };
+        for (0..9) |k| {
+            out.c[k] = out.c[k].add(col.scale(weight * basis[k] * band[k]));
+        }
+    }
+    return out;
+}
+
 
 /// Floor so night is dark but still readable (C19): without it the terrain goes
 /// to black once the sun is below the horizon.

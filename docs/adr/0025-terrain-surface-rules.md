@@ -149,3 +149,28 @@ continuous snow or mud layer.
   https://www.cyanilux.com/tutorials/shoreline-shader-breakdown/
 - GPU Gems 2, chapter 1 (Whatley) - terrain-derived placement and the Perlin dissolve, for the
   eventual grass-card pass.
+
+
+## 10.9 - snow clumps and shore detail (implemented 2026-11-27)
+
+The discrete detail is a deterministic scatter pass, not a tessellation/geometry-shader port.
+`src/world/scatter.zig` now builds two more instance lists with the same `Prop` layout:
+
+- **snow**: 3 m candidate cells, a local snow line of `68.0 + (warp-0.5)*2` from the same
+  low-frequency field, up-facing gate `normalY >= 0.80`, hard cap 1,100. Counts: 450 at the peak
+  pose, 527 at the shore patch, 393 at the far pose.
+- **shore**: 2.6 m cells inside `|height - 55| <= 1.4 m`, `normalY >= 0.60`, biased to the
+  waterline, hard cap 700. Counts: 202 peak, 263 shore, 367 far.
+
+`PropRenderer` gained a low snow-clump/ice-shard mesh and a shore mesh containing reeds, a small
+pebble and a driftwood twig, both drawn with the existing instanced prop program and the same fog
+and lighting. HUD carries `SNOW` and `SHORE`; the scatter log carries all five counts.
+
+Scatter rebuild: 7.2-8.1 ms for the whole patch, including the new lists. 60 fps at 3840x2103,
+worst 17.1-17.4 ms; geometry counts unchanged at 111,418-111,874 verts / 88,067-88,470 quads.
+Screenshots: `docs/adr/img/1009-snow.png`, `1009-shore.png`.
+
+Limitation: the white clumps can appear on a high bare-rock patch where the shader's snow
+break-up has removed the white surface; they read as exposed snow patches/ice, not as a second
+snow blanket. The shore mesh uses one instanced draw with pebble/reeds/driftwood combined, so it
+does not give each of those three objects its own LOD.
