@@ -29,7 +29,7 @@ const SEED: u32 = 1337;
 
 /// Bumped whenever the field or the mesher changes. Printed at startup so a stale binary cannot be
 /// mistaken for a change that "made no difference" - which is what the last commit could not rule out.
-const BUILD_TAG = "controls-4";
+const BUILD_TAG = "clouds-3";
 // 8x8 chunks (64 chunks, 256 m^2), re-meshed as the camera crosses a chunk border:: at PATCH=4 the boundary was visible in frame and accounted for
 // 99.6% of the background pixels counted as "holes". A bigger patch pushes the world edge out of
 // shot, which is the honest way to separate a mesher defect from the edge of the world.
@@ -850,6 +850,16 @@ pub fn main(init: std.process.Init) !void {
     _ = sdl.SDL_SetWindowBordered(window.handle, false);
     _ = sdl.SDL_SetWindowPosition(window.handle, 0, 0);
     window.syncSize();
+    // A 4K window at 120 Hz keeps this GPU at ~99 % and the fans at 3.2k RPM. The viewer does not
+    // need 120 fps, so ask for every second refresh (60) instead. VOXEL_DC_FPS=120 restores it.
+    var target_fps: u32 = 60;
+    if (init.environ_map.get("VOXEL_DC_FPS")) |raw| {
+        target_fps = std.fmt.parseInt(u32, raw, 10) catch target_fps;
+    }
+    _ = sdl.SDL_GL_SetSwapInterval(if (target_fps >= 120) 1 else 2);
+    var swap_interval: c_int = -1;
+    _ = sdl.SDL_GL_GetSwapInterval(&swap_interval);
+    std.debug.print("fps cap {d} via swap interval {d}\n", .{ target_fps, swap_interval });
 
     // The engine loads its GL entry points into a ProcTable; without this every gl call
     // below is a null pointer, which is what segfaulted the first build.
@@ -868,9 +878,13 @@ pub fn main(init: std.process.Init) !void {
     // block world uses so the two are comparable by eye.
     var sky = try vz.gfx.SkyRenderer.init();
     defer sky.deinit();
+    // Two cloud decks: the engine's cumulus slab plus its optional high cirrus veil, which has
+    // its own wind. The engine leaves cirrus off; here the second deck is the point.
+    sky.cirrus = true;
     var sun = sun_mod.Sun.init();
     sun.setTime(0.30); // ADR 0009: noon sits at t = 0.30 of the 300 s cycle
     var cloud_shift = Vec3.init(0, 0, 0);
+    var cirrus_shift = Vec3.init(0, 0, 0);
 
     var all_verts: std.ArrayList(Coloured) = .empty;
     defer all_verts.deinit(alloc);
@@ -1057,11 +1071,15 @@ pub fn main(init: std.process.Init) !void {
         camera.pitch = player.pitch;
         const vp = camera.viewProjection(aspect);
 
-        // Clouds drift on the frame delta instead of a fixed 0.016 per frame: the old code moved
-        // 0.016*2.0 per frame, i.e. 3.84 m/s on this 120 Hz display (2 m/s only at 60 Hz). The
-        // speed here is 75 % of what was on screen and no longer depends on the frame rate.
+        // Two decks, frame-delta drift. The engine advances its cloud wind at 0.06 units/s
+        // (`6.0 * dt * 0.01` in app.zig); the viewer's old fixed 0.016*2.0 per frame ran at
+        // 3.84 units/s on a 120 Hz display, 64x the engine. The low cumulus now sits on that
+        // engine speed, and the high cirrus runs 3x faster so two decks visibly move at
+        // different rates instead of the whole sky sliding as one sheet.
         const dt_f: f32 = @floatCast(frame_dt);
-        cloud_shift = Vec3.init(cloud_shift.x + dt_f * 2.9, 0, cloud_shift.z + dt_f * 0.85);
+        cloud_shift = Vec3.init(cloud_shift.x + dt_f * 0.06, 0, cloud_shift.z + dt_f * 0.015);
+        cirrus_shift = Vec3.init(cirrus_shift.x + dt_f * 0.18, 0, cirrus_shift.z + dt_f * 0.045);
+        sky.cirrus_shift = cirrus_shift;
         // The sky pass fills the whole screen, so with it running the magenta clear colour is never
         // visible and a hole shows sky instead. In the diagnostic mode the background is left empty
         // so every hole is the one colour the render cannot produce.

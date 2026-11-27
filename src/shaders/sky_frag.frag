@@ -12,6 +12,8 @@ uniform vec3 u_cloud_shift;    // wind offset in cloud space
 uniform float u_cloud_bottom;
 uniform float u_cloud_top;
 uniform vec3 u_cloud_light;    // sun colour at cloud height
+uniform float u_cirrus;        // 0 off, 1 on: thin high deck with its own wind
+uniform vec3 u_cirrus_shift;   // cirrus wind offset, in the same cloud-space units
 in vec2 v_ndc;
 out vec4 f_colour;
 
@@ -42,7 +44,10 @@ float vnoise(vec3 x) {
 float cloudDensity(vec3 p) {
     vec3 q = p * 0.0038 + u_cloud_shift;
     // Three octaves: the third is what breaks the edge into ragged detail
-    // instead of a smooth blob.
+    // instead of a smooth blob. They share one shift on purpose: sliding the octaves relative
+    // to each other decorrelates the cascade, and the deck loses its contrast (measured: it
+    // turned the puffy cumulus into a solid overcast within ten seconds). Different cloud
+    // speeds come from the separate high deck (`cirrus`), not from shearing these octaves.
     float n = vnoise(q) * 0.55 + vnoise(q * 2.6) * 0.29 + vnoise(q * 6.3) * 0.16;
     // Coverage is weather, not a constant: a low-frequency field puts clear
     // spells next to heavy patches, which is most of what makes a cloudscape
@@ -106,6 +111,27 @@ vec4 clouds(vec3 dir) {
     return vec4(scattered, transmittance);
 }
 
+// A thin high cirrus deck: a veil stretched along the wind on a plane at 1800 blocks. It is
+// optically thin, so two noise octaves and an alpha composite replace a raymarch - a fraction
+// of the cumulus cost, and a second wind for the eye to read against the lower deck.
+vec4 cirrus(vec3 dir) {
+    if (u_cirrus < 0.5 || dir.y < 0.015) return vec4(0.0, 0.0, 0.0, 1.0);
+    float t = (1800.0 - u_eye.y) / dir.y;
+    vec3 p = u_eye + dir * t;
+    // Same world scale as the cumulus base, so one shift unit is the same distance per second;
+    // x is compressed and z stretched, which makes the streaks run along the wind.
+    vec2 q = p.xz * 0.0038 + u_cirrus_shift.xz;
+    float n = vnoise(vec3(q.x * 0.45, q.y * 2.2, 21.0)) * 0.62
+            + vnoise(vec3(q.x * 1.1, q.y * 5.0, 37.0)) * 0.38;
+    // Only the top of the field shows: sparse wisps, not a second overcast.
+    float d = smoothstep(0.54, 0.78, n);
+    float fade = smoothstep(0.015, 0.14, dir.y);
+    // Thin ice cloud is mostly skylight; a little direct sun warms the streaks.
+    vec3 lit = u_zenith * 0.95 + u_cloud_light * 0.30;
+    float alpha = d * fade * 0.40;
+    return vec4(lit * alpha, 1.0 - alpha);
+}
+
 void main() {
     // Unproject the far plane at this corner and take the direction from the eye.
     vec4 far_point = u_inv_vp * vec4(v_ndc, 1.0, 1.0);
@@ -119,6 +145,10 @@ void main() {
     float disc = smoothstep(0.99985, 0.99995, c);
     float glow = pow(max(c, 0.0), 220.0) * 0.55;
     col += u_sun_colour * (disc * 3.0 + glow);
+
+    // Far deck first, then the near one: the cumulus correctly occludes the cirrus.
+    vec4 high = cirrus(dir);
+    col = col * high.a + high.rgb;
 
     // Clouds composite over the gradient and the disc: a cloud in front of the
     // sun dims it, which is the whole point of drawing them here.
