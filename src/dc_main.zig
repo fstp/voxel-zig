@@ -10,6 +10,7 @@ const sdl = @import("sdl3");
 const gl = @import("gl");
 const dcw = vz.world.dc_world;
 const DcPlayer = vz.player.DcPlayer;
+const WaterRenderer = vz.gfx.WaterRenderer;
 
 const CHUNK: usize = dcw.CHUNK;
 const PATCH: i32 = dcw.PATCH;
@@ -183,6 +184,7 @@ pub fn main(init: std.process.Init) !void {
     sun.setTime(sun_time);
     std.debug.print("sun time {d:.3} elevation {d:.1} deg\n", .{ sun_time, sun.elevation() });
     var cloud_shift = Vec3.init(0, 0, 0);
+    var water_clock: f32 = 0;
     // Height-fog coefficients: a thin layer hugging the low ground, scale height 25 m, reaching
     // ~40 % at 200 m from the eye at terrain height. Density is a tuning constant, not a physical
     // atmosphere constant (ADR 0021).
@@ -257,6 +259,9 @@ pub fn main(init: std.process.Init) !void {
     var renderer = try vz.gfx.DcRenderer.init();
     defer renderer.deinit();
     renderer.upload(all_verts_s, all_idx_s);
+
+    var water = try WaterRenderer.init();
+    defer water.deinit();
 
     // ADR 0008: the engine draws into an sRGB framebuffer and every shader writes LINEAR, so the
     // hardware does the encode. The spike omitted this line, which is why its terrain looked washed
@@ -411,6 +416,7 @@ pub fn main(init: std.process.Init) !void {
         // `6.0 * dt * 0.01` in app.zig). The old fixed 0.016*2.0 per frame ran at 3.84 units/s on
         // a 120 Hz display, 64x the engine.
         const dt_f: f32 = @floatCast(frame_dt);
+        water_clock += dt_f;
         cloud_shift = Vec3.init(cloud_shift.x + dt_f * 0.06, 0, cloud_shift.z + dt_f * 0.015);
         const ramp = sun.ramp();
         const lighting = sun.lighting();
@@ -438,6 +444,22 @@ pub fn main(init: std.process.Init) !void {
             fog_base,
             atmosphere,
             all_idx.items.len,
+        );
+
+        water.draw(
+            vp,
+            camera.position,
+            lighting.sun_dir,
+            Vec3.init(encode(ramp.horizon.x), encode(ramp.horizon.y), encode(ramp.horizon.z)),
+            Vec3.init(encode(ramp.sun.x), encode(ramp.sun.y), encode(ramp.sun.z)),
+            fog_density,
+            fog_height,
+            fog_base,
+            water_clock,
+            @floatFromInt(patch_origin * @as(i32, @intCast(CHUNK))),
+            @floatFromInt(patch_origin_z * @as(i32, @intCast(CHUNK))),
+            @floatFromInt(PATCH * @as(i32, @intCast(CHUNK))),
+            dcw.SEA_LEVEL,
         );
 
         if (show_hud) {

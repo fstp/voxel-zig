@@ -189,6 +189,7 @@ pub const DcRenderer = struct {
         index_count: usize,
     ) void {
         gl.Enable(gl.DEPTH_TEST);
+        gl.DepthMask(gl.TRUE);
         gl.Disable(gl.BLEND);
         gl.Disable(gl.CULL_FACE);
         self.shader.use();

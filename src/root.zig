@@ -45,6 +45,7 @@ pub const gfx = struct {
     pub const SkyRenderer = @import("gfx/sky_renderer.zig").SkyRenderer;
     pub const Hud = @import("gfx/hud.zig").Hud;
     pub const DcRenderer = @import("gfx/dc_renderer.zig").DcRenderer;
+    pub const WaterRenderer = @import("gfx/water_renderer.zig").WaterRenderer;
 };
 
 test {

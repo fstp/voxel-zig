@@ -16,6 +16,10 @@ pub const SEED: u32 = 1337;
 pub const PATCH: i32 = 8;
 pub const CELL: f32 = 1.0;
 
+/// Water fills the field below this height. The patch's terrain ranges 49.07-73.07 m, so 55 m
+/// gives a few valley lakes rather than a global ocean.
+pub const SEA_LEVEL: f32 = 55.0;
+
 /// The field, sampled directly from the project's fBm. It used to be a bilinear blend of four
 /// `terrain.heightAt` values - four generator calls per sample, and a rebuild of 64 chunks cost
 /// 157 ms because of it. Sampling the noise once is cheaper AND smoother: the block generator's
