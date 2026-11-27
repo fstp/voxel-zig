@@ -204,6 +204,13 @@ pub fn main(init: std.process.Init) !void {
     if (init.environ_map.get("VOXEL_DETAIL")) |raw| {
         if (raw.len > 0 and raw[0] == '0') detail = 0.0;
     }
+    // VOXEL_SURFACES=0 is the A/B for 10.8: snow above the snow line, mud/wetness around the sea.
+    var surfaces: f32 = 1.0;
+    if (init.environ_map.get("VOXEL_SURFACES")) |raw| {
+        if (raw.len > 0 and raw[0] == '0') surfaces = 0.0;
+    }
+    const snow_line: f32 = 68.0;
+    const mud_band: f32 = 1.4;
     sun.setTime(sun_time);
     std.debug.print("sun time {d:.3} elevation {d:.1} deg\n", .{ sun_time, sun.elevation() });
     var cloud_shift = Vec3.init(0, 0, 0);
@@ -538,6 +545,10 @@ pub fn main(init: std.process.Init) !void {
             fog_base,
             atmosphere,
             detail,
+            surfaces,
+            dcw.SEA_LEVEL,
+            snow_line,
+            mud_band,
             all_idx.items.len,
         );
         grass.draw(vp, camera.position, lighting.sun_dir, fog_col, fog_sun, fog_density, fog_height, fog_base, water_clock);

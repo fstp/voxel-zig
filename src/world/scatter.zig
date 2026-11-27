@@ -155,7 +155,7 @@ pub fn build(
                 if (blocked(edits, px, pz)) continue;
                 const h_grid = grid.at(px, pz);
                 if (h_grid < dcw.SEA_LEVEL + 0.35) continue;
-                if (h_grid > 74.0) continue;
+                if (h_grid > 66.0) continue; // below the 10.8 snow line, so blades do not poke through snow
                 const ny = grid.normalY(px, pz);
                 if (ny < 0.70) continue;
                 const density = grid.density(px, pz);
@@ -189,7 +189,7 @@ pub fn build(
                 const pz = z + (rand01(ix, iz, 0x7EE2) - 0.5) * step * 0.8;
                 if (blocked(edits, px, pz)) continue;
                 const h_grid = grid.at(px, pz);
-                if (h_grid < dcw.SEA_LEVEL + 1.0 or h_grid > 71.0) continue;
+                if (h_grid < dcw.SEA_LEVEL + 1.0 or h_grid > 66.0) continue; // treeline below the snow line
                 const ny = grid.normalY(px, pz);
                 if (ny < 0.86) continue;
                 const density = noise.fbm2(9101, px * 0.018, pz * 0.018, 3, 2.0, 0.5);

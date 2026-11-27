@@ -42,6 +42,10 @@ const fragment_src: [:0]const u8 =
     \\uniform float u_fog_base;    // world y where the density equals u_fog_density
     \\uniform float u_atmosphere;  // 0 off, 1 on
     \\uniform float u_detail;      // 0 = flat A/B path, 1 = procedural detail + bump
+    \\uniform float u_surfaces;    // 0 = flat A/B path, 1 = snow/mud/wetness rules
+    \\uniform float u_sea_level;   // world y of the sea surface (55 m in this world)
+    \\uniform float u_snow_line;   // altitude where snow starts, before the noise warp
+    \\uniform float u_mud_band;    // half-width of the shore mud band, in metres
 
     \\float hash13(vec3 p) {
     \\    p = fract(p * 0.3183099 + vec3(0.1, 0.2, 0.3));
@@ -106,6 +110,34 @@ const fragment_src: [:0]const u8 =
     \\    float bump = v_mat < 0.5 ? 0.18 : (v_mat < 1.5 ? 0.35 : 0.55);
     \\    vec3 n = normalize(v_nrm + grad * bump);
     \\    vec3 l = normalize(vec3(0.45, 0.75, 0.40));
+    \\    // Surface rules (10.8): altitude gives snow, proximity to the sea gives mud and a wet rim.
+    \\    // The masks are noise-warped so their edges do not follow a height contour, and both are
+    \\    // gated on the geometric normal so cliffs stay bare. mott doubles as colour variation.
+    \\    float mott = 0.5;
+    \\    float snow = 0.0;
+    \\    float mud = 0.0;
+    \\    float wet = 0.0;
+    \\    if (u_surfaces > 0.5) {
+    \\        vec4 m = noised(v_pos * 0.055 + vec3(7.1, 2.3, 4.9));
+    \\        mott = m.x;
+    \\        float warp = m.x - 0.5;
+    \\        float up = normalize(v_nrm).y;
+    \\        float snow_h = u_snow_line + warp * 2.0;
+    \\        snow = smoothstep(snow_h, snow_h + 3.0, v_pos.y)
+    \\             * smoothstep(0.65, 0.85, up);
+    \\        // Break the cap with bare rock patches and give the snow surface a drift normal:
+    \\        // without this the plateau reads as one flat white slab.
+    \\        vec4 d = noised(v_pos * 0.45 + vec3(13.0, 2.0, 7.0));
+    \\        snow *= 1.0 - 0.55 * smoothstep(0.35, 0.60, d.x);
+    \\        n = normalize(n + (d.yzw * 0.9 + m.yzw * 0.3) * snow);
+    \\        float shore = abs(v_pos.y - u_sea_level) + warp * 1.5;
+    \\        mud = (1.0 - smoothstep(0.0, u_mud_band, shore))
+    \\            * smoothstep(0.60, 0.82, up);
+    \\        wet = (1.0 - smoothstep(0.0, 0.9, max(v_pos.y - u_sea_level, 0.0)))
+    \\            * step(u_sea_level - 0.05, v_pos.y);
+    \\    }
+    \\    // Snow fills crevices, so flatten the normal toward up where it lies.
+    \\    n = normalize(mix(n, vec3(0.0, 1.0, 0.0), snow * 0.10));
     \\    float ndl = max(dot(n, l), 0.0);
     \\    vec3 sky = vec3(0.36, 0.48, 0.62);
     \\    vec3 ground = vec3(0.16, 0.18, 0.14);
@@ -116,7 +148,18 @@ const fragment_src: [:0]const u8 =
     \\    // Exposure + ACES (Narkowicz), the same curve the engine's post pass applies (ADR 0011).
     \\    // Without it, linear radiance above 1.0 clips to white once the sRGB framebuffer encodes,
     \\    // which is what turned the surface into a pale sheet the moment FRAMEBUFFER_SRGB went on.
-    \\    vec3 c = albedo * (amb + ndl * 1.15) * 0.16;
+    \\    vec3 surf = albedo;
+    \\    surf = mix(surf, vec3(0.34, 0.27, 0.20), mud * (1.0 - snow));
+    \\    surf = mix(surf, vec3(0.16, 0.13, 0.10), mud * wet * 0.55 * (1.0 - snow));
+    \\    surf = mix(surf, vec3(0.84, 0.88, 0.95) * (0.90 + 0.12 * mott), snow);
+    \\    // Snow is a bright diffuse surface; wet mud needs a specular rim to read as wet.
+    \\    float exposure = mix(0.16, 0.34, snow);
+    \\    exposure *= mix(1.0, 0.92, mud * (1.0 - snow));
+    \\    vec3 c = surf * (amb + ndl * 1.15) * exposure;
+    \\    vec3 view = normalize(u_eye - v_pos);
+    \\    vec3 hv = normalize(l + view);
+    \\    float spec = pow(max(dot(n, hv), 0.0), 42.0);
+    \\    c += vec3(spec * (mud * wet * 0.30 + snow * 0.05));
     \\    c = clamp((c * (2.51 * c + 0.03)) / (c * (2.43 * c + 0.59) + 0.14), 0.0, 1.0);
     \\    vec3 outc = pow(c, vec3(0.4545));
     \\    if (u_atmosphere > 0.5) {
@@ -199,6 +242,10 @@ pub const DcRenderer = struct {
         fog_base: f32,
         atmosphere: bool,
         detail: f32,
+        surfaces: f32,
+        sea_level: f32,
+        snow_line: f32,
+        mud_band: f32,
         index_count: usize,
     ) void {
         gl.Enable(gl.DEPTH_TEST);
@@ -216,6 +263,10 @@ pub const DcRenderer = struct {
         self.shader.setFloat("u_fog_base", fog_base);
         self.shader.setFloat("u_atmosphere", if (atmosphere) 1.0 else 0.0);
         self.shader.setFloat("u_detail", detail);
+        self.shader.setFloat("u_surfaces", surfaces);
+        self.shader.setFloat("u_sea_level", sea_level);
+        self.shader.setFloat("u_snow_line", snow_line);
+        self.shader.setFloat("u_mud_band", mud_band);
         gl.BindVertexArray(self.vao);
         gl.DrawElements(gl.TRIANGLES, @intCast(index_count), gl.UNSIGNED_INT, 0);
     }
