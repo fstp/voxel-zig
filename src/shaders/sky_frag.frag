@@ -118,17 +118,29 @@ vec4 cirrus(vec3 dir) {
     if (u_cirrus < 0.5 || dir.y < 0.015) return vec4(0.0, 0.0, 0.0, 1.0);
     float t = (1800.0 - u_eye.y) / dir.y;
     vec3 p = u_eye + dir * t;
-    // Same world scale as the cumulus base, so one shift unit is the same distance per second;
-    // x is compressed and z stretched, which makes the streaks run along the wind.
+    // Same world scale as the cumulus base, so one shift unit is the same distance per second.
     vec2 q = p.xz * 0.0038 + u_cirrus_shift.xz;
-    float n = vnoise(vec3(q.x * 0.45, q.y * 2.2, 21.0)) * 0.62
-            + vnoise(vec3(q.x * 1.1, q.y * 5.0, 37.0)) * 0.38;
-    // Only the top of the field shows: sparse wisps, not a second overcast.
-    float d = smoothstep(0.54, 0.78, n);
+    // Bend the fibre field with a slow warp so the filaments curve and cross instead of
+    // running as parallel bands across the whole sky.
+    vec2 warp = vec2(vnoise(vec3(q * 0.31, 3.0)), vnoise(vec3(q * 0.31, 9.0))) - 0.5;
+    vec2 r = q + warp * 1.1;
+    // Two fibre layers at a slight angle to each other: the first sets the long filaments,
+    // the second breaks them into wisps. Moderate stretch (about 2.5x), not the 5x that read
+    // as regular stripes.
+    const float ca = 0.94;
+    const float sa = 0.34;
+    vec2 r2 = vec2(r.x * ca - r.y * sa, r.x * sa + r.y * ca);
+    float n = vnoise(vec3(r.x * 0.55, r.y * 1.4, 21.0)) * 0.58
+            + vnoise(vec3(r2.x * 1.3, r2.y * 3.2, 37.0)) * 0.42;
+    // Patchy coverage: a slow weather field leaves clear gaps, so the veil reads as separate
+    // sheets of cirrus rather than one continuous brushed texture.
+    float weather = vnoise(vec3(q * 0.16, 51.0));
+    float cover = 0.58 + (weather - 0.5) * 0.18;
+    float d = smoothstep(cover - 0.05, cover + 0.13, n);
     float fade = smoothstep(0.015, 0.14, dir.y);
-    // Thin ice cloud is mostly skylight; a little direct sun warms the streaks.
+    // Thin ice cloud is mostly skylight; a little direct sun warms the wisps.
     vec3 lit = u_zenith * 0.95 + u_cloud_light * 0.30;
-    float alpha = d * fade * 0.40;
+    float alpha = d * fade * 0.32;
     return vec4(lit * alpha, 1.0 - alpha);
 }
 
