@@ -10,7 +10,7 @@
 The DC app did not inherit the block renderer's lighting stack. The current terrain shader has:
 
 - a **hardcoded** direct-light direction `l = normalize(vec3(0.45, 0.75, 0.40))`;
-- a constant hemisphere ambient `mix(vec3(0.16,0.18,0.14), vec3(0.36,0.48,0.62), n.y)`;
+- a constant hemisphere ambient `mix(vec3(0.16,0.18,0.14), vec3(0.36,0.48,0.62), n.y * 0.5 + 0.5)`;
 - **no shadow map and no ambient occlusion**;
 - `Sun.lighting()` (direction, sun colour, ambient sky/ground) exists, but only its direction is
   passed to grass, trees, rocks and water; the terrain shader uses that direction only for fog.
