@@ -152,9 +152,8 @@ pub fn build(
                 const dz = z - center_z;
                 const r2 = dx * dx + dz * dz;
                 if (r2 > radius * radius) continue;
-                // World-constant thinning: the same cell is accepted or rejected in every patch.
-                // Distance only affects the radius cutoff, never the cell's hash.
-                if (rand01(ix, iz, 0x6A55) > 0.26) continue;
+                // Sparse base cover; the clump layer below supplies the dense patches.
+                if (rand01(ix, iz, 0x6A55) > 0.06) continue;
 
                 const jx = (rand01(ix, iz, 0x51ED) - 0.5) * step * 0.9;
                 const jz = (rand01(ix, iz, 0x9E37) - 0.5) * step * 0.9;
@@ -179,6 +178,70 @@ pub fn build(
                     .tint = tint,
                     .kind = if (flower) 1 else 0,
                 });
+            }
+        }
+    }
+
+    // Dense grass clumps. The base lattice above is deliberately sparse; this layer places
+    // overlapping tufts on a coarse world grid so the meadow reads as patches rather than a
+    // uniform carpet. Every clump centre, its radius and every blade offset are hashed from the
+    // world cell, so the patches stay put when the streaming patch moves.
+    {
+        const radius: f32 = 95.0;
+        const clump_step: f32 = 2.6;
+        const ix0: i32 = @intFromFloat(@floor((center_x - radius) / clump_step));
+        const ix1: i32 = @intFromFloat(@ceil((center_x + radius) / clump_step));
+        const iz0: i32 = @intFromFloat(@floor((center_z - radius) / clump_step));
+        const iz1: i32 = @intFromFloat(@ceil((center_z + radius) / clump_step));
+        var iz = iz0;
+        while (iz <= iz1) : (iz += 1) {
+            const zc = (@as(f32, @floatFromInt(iz)) + 0.5) * clump_step;
+            var ix = ix0;
+            while (ix <= ix1) : (ix += 1) {
+                const xc = (@as(f32, @floatFromInt(ix)) + 0.5) * clump_step;
+                const dx = xc - center_x;
+                const dz = zc - center_z;
+                if (dx * dx + dz * dz > radius * radius) continue;
+
+                // Broad density selects whole regions; the fine noise breaks their edges so the
+                // patches do not look like stamped circles.
+                const broad = grid.density(xc, zc) * 0.65 + noise.fbm2(9301, xc * 0.22, zc * 0.22, 2, 2.0, 0.5) * 0.35;
+                const t = std.math.clamp((broad + 0.30) / 0.60, 0, 1);
+                const clump_prob = 0.22 + 0.34 * t;
+                if (rand01(ix, iz, 0xC101) > clump_prob) continue;
+
+                const cx = xc + (rand01(ix, iz, 0xC102) - 0.5) * clump_step * 0.55;
+                const cz = zc + (rand01(ix, iz, 0xC103) - 0.5) * clump_step * 0.55;
+                // Terrain gates once per tuft, not once per blade: all blades in a clump share
+                // the same slope/density regime, and the exact Y is still sampled per blade.
+                const ch = grid.at(cx, cz);
+                if (ch < dcw.SEA_LEVEL + 0.35 or ch > 66.0) continue;
+                const cny = grid.normalY(cx, cz);
+                if (cny < 0.70) continue;
+                if (grid.density(cx, cz) < -0.45) continue;
+                const clump_radius = 1.00 + 1.10 * rand01(ix, iz, 0xC104);
+                const count: usize = 100 + @as(usize, @intFromFloat(rand01(ix, iz, 0xC105) * 160.0));
+
+                var k: usize = 0;
+                while (k < count) : (k += 1) {
+                    const a = rand01(ix, iz, 0xC200 + @as(u32, @intCast(k))) * std.math.tau;
+                    const rr = @sqrt(rand01(ix, iz, 0xC400 + @as(u32, @intCast(k)))) * clump_radius;
+                    const px = cx + @cos(a) * rr;
+                    const pz = cz + @sin(a) * rr;
+                    if (blocked(edits, px, pz)) continue;
+                    const h = dcw.heightAt(px, pz);
+                    if (h < dcw.SEA_LEVEL + 0.35 or h > 66.0) continue;
+
+                    const flower = rand01(ix, iz, 0xC600 + @as(u32, @intCast(k))) < 0.008 and cny > 0.82;
+                    const tint = rand01(ix, iz, 0xC800 + @as(u32, @intCast(k)));
+                    try out.blades.append(alloc, .{
+                        .pos = .{ px, h - 0.05, pz },
+                        .yaw = rand01(ix, iz, 0xCA00 + @as(u32, @intCast(k))) * std.math.tau,
+                        .scale = 0.55 + 0.85 * tint,
+                        .tint = tint,
+                        .kind = if (flower) 1 else 0,
+                    });
+                }
             }
         }
     }
