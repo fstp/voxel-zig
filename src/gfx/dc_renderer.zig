@@ -1,0 +1,207 @@
+//! Terrain renderer for the DC world: the procedural material shader, vertex upload and the draw
+//! call with the atmosphere/fog uniforms (ADR 0022).
+
+const gl = @import("gl");
+const Shader = @import("shader.zig").Shader;
+const Mat4 = @import("../math/mat4.zig").Mat4;
+const Vec3 = @import("../math/vec.zig").Vec3;
+const Vertex = @import("../world/dc_world.zig").Vertex;
+
+const vertex_src: [:0]const u8 =
+    \\#version 330 core
+    \\layout(location = 0) in vec3 a_pos;
+    \\layout(location = 1) in vec3 a_nrm;
+    \\layout(location = 2) in vec3 a_col;
+    \\layout(location = 3) in float a_mat;
+    \\uniform mat4 u_view_proj;
+    \\out vec3 v_nrm;
+    \\out vec3 v_pos;
+    \\out vec3 v_col;
+    \\out float v_mat;
+    \\void main() {
+    \\    v_nrm = a_nrm;
+    \\    v_pos = a_pos;
+    \\    v_col = a_col;
+    \\    v_mat = a_mat;
+    \\    gl_Position = u_view_proj * vec4(a_pos, 1.0);
+    \\}
+;
+
+const fragment_src: [:0]const u8 =
+    \\#version 330 core
+    \\in vec3 v_nrm;
+    \\in vec3 v_pos;
+    \\in vec3 v_col;
+    \\in float v_mat;
+    \\uniform vec3 u_eye;
+    \\uniform vec3 u_sun_dir;
+    \\uniform vec3 u_fog_colour;   // display-space horizon scattering colour
+    \\uniform vec3 u_fog_sun;      // display-space sun tint for the forward-scatter term
+    \\uniform float u_fog_density; // density at u_fog_base, per block
+    \\uniform float u_fog_height;  // exponential scale height
+    \\uniform float u_fog_base;    // world y where the density equals u_fog_density
+    \\uniform float u_atmosphere;  // 0 off, 1 on
+
+    \\float hash13(vec3 p) {
+    \\    p = fract(p * 0.3183099 + vec3(0.1, 0.2, 0.3));
+    \\    p *= 17.0;
+    \\    return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+    \\}
+
+    \\// Inigo Quilez's value noise with analytic derivatives (articles/morenoise): the trilinear
+    \\// interpolation is expanded into the k0..k7 polynomial and differentiated, so the value and its
+    \\// gradient come out of ONE evaluation. Quintic interpolation is mandatory - with the cubic
+    \\// the second derivative breaks and the analytic normal shows facets.
+    \\vec4 noised(vec3 x) {
+    \\    vec3 p = floor(x);
+    \\    vec3 w = fract(x);
+    \\    vec3 u = w * w * w * (w * (w * 6.0 - 15.0) + 10.0);
+    \\    vec3 du = 30.0 * w * w * (w * (w - 2.0) + 1.0);
+    \\    float a = hash13(p + vec3(0, 0, 0));
+    \\    float b = hash13(p + vec3(1, 0, 0));
+    \\    float c = hash13(p + vec3(0, 1, 0));
+    \\    float d = hash13(p + vec3(1, 1, 0));
+    \\    float e = hash13(p + vec3(0, 0, 1));
+    \\    float f = hash13(p + vec3(1, 0, 1));
+    \\    float g = hash13(p + vec3(0, 1, 1));
+    \\    float h = hash13(p + vec3(1, 1, 1));
+    \\    float k0 = a;
+    \\    float k1 = b - a;
+    \\    float k2 = c - a;
+    \\    float k3 = e - a;
+    \\    float k4 = a - b - c + d;
+    \\    float k5 = a - c - e + g;
+    \\    float k6 = a - b - e + f;
+    \\    float k7 = -a + b + c - d + e - f - g + h;
+    \\    float v = k0 + k1*u.x + k2*u.y + k3*u.z + k4*u.x*u.y + k5*u.y*u.z + k6*u.z*u.x + k7*u.x*u.y*u.z;
+    \\    vec3 gr = du * vec3(k1 + k4*u.y + k6*u.z + k7*u.y*u.z,
+    \\                        k2 + k5*u.z + k4*u.x + k7*u.z*u.x,
+    \\                        k3 + k6*u.x + k5*u.y + k7*u.x*u.y);
+    \\    return vec4(v, gr);
+    \\}
+    \\out vec4 frag;
+    \\void main() {
+    \\    // Two octaves of value noise in WORLD space: world-space means the pattern is continuous
+    \\    // across every chunk border and stable through LOD, which blocky textures never were.
+    \\    vec3 wp = v_pos * 0.35;
+    \\    vec4 o1 = noised(wp);
+    \\    vec4 o2 = noised(wp * 2.7 + 11.0);
+    \\    float detail = o1.x * 0.65 + o2.x * 0.35;
+    \\    vec3 grad = o1.yzw * 0.65 + o2.yzw * 2.7 * 0.35;
+    \\
+    \\    // Bump without a normal map: surface normal plus a scaled noise gradient, IQ's form.
+    \\    // bump is per material - rock is rougher than ground, scree roughest.
+    \\    float bump = v_mat < 0.5 ? 0.10 : (v_mat < 1.5 ? 0.22 : 0.34);
+    \\    vec3 n = normalize(v_nrm + grad * bump);
+    \\    vec3 l = normalize(vec3(0.45, 0.75, 0.40));
+    \\    float ndl = max(dot(n, l), 0.0);
+    \\    vec3 sky = vec3(0.36, 0.48, 0.62);
+    \\    vec3 ground = vec3(0.16, 0.18, 0.14);
+    \\    vec3 amb = mix(ground, sky, n.y * 0.5 + 0.5);
+    \\    vec3 albedo = v_col * (0.86 + 0.30 * detail);
+    \\    // Lighting is deliberately shy of 1.0: albedo arrives already close to mid grey, and
+    \\    // multiplying it by ~1.8 and then gamma-encoding clips the whole surface to white.
+    \\    // Exposure + ACES (Narkowicz), the same curve the engine's post pass applies (ADR 0011).
+    \\    // Without it, linear radiance above 1.0 clips to white once the sRGB framebuffer encodes,
+    \\    // which is what turned the surface into a pale sheet the moment FRAMEBUFFER_SRGB went on.
+    \\    vec3 c = albedo * (amb + ndl * 1.15) * 0.16;
+    \\    c = clamp((c * (2.51 * c + 0.03)) / (c * (2.43 * c + 0.59) + 0.14), 0.0, 1.0);
+    \\    vec3 outc = pow(c, vec3(0.4545));
+    \\    if (u_atmosphere > 0.5) {
+    \\        // Aerial perspective: integrate an exponential height density along the view ray.
+    \\        // tau = d0 * exp(-(eye.y - base)/H) * dist * (1 - exp(-dy/H)) / (dy/H), the closed form
+    \\        // of a single-scale-height medium (Decima's analytic height fog; ADR 0021). The colour
+    \\        // is the horizon scattering colour plus a forward-scatter tint toward the sun. Blended
+    \\        // in the terrain shader's display space, the same space the rest of this surface uses.
+    \\        vec3 ray = v_pos - u_eye;
+    \\        float dist = length(ray);
+    \\        float H = max(u_fog_height, 1.0);
+    \\        float k = ray.y / H;
+    \\        float d0 = u_fog_density * exp(-(u_eye.y - u_fog_base) / H);
+    \\        float tau = abs(k) > 1e-4 ? d0 * dist * (1.0 - exp(-k)) / k : d0 * dist;
+    \\        tau = max(tau, 0.0);
+    \\        float fog = 1.0 - exp(-tau);
+    \\        float sun_amt = pow(max(dot(normalize(ray), u_sun_dir), 0.0), 6.0);
+    \\        vec3 fogc = mix(u_fog_colour, u_fog_sun, 0.15 + 0.55 * sun_amt);
+    \\        outc = mix(outc, fogc, fog);
+    \\    }
+    \\    frag = vec4(outc, 1.0);
+    \\}
+;
+
+/// Owns the terrain program and its VAO/VBO/EBO. One instance per window.
+pub const DcRenderer = struct {
+    shader: Shader,
+    vao: u32 = 0,
+    vbo: u32 = 0,
+    ebo: u32 = 0,
+
+    pub fn init() !DcRenderer {
+        var shader = try Shader.init(vertex_src, fragment_src);
+        errdefer shader.deinit();
+        return .{ .shader = shader };
+    }
+
+    pub fn deinit(self: *DcRenderer) void {
+        if (self.vao != 0) {
+            gl.DeleteVertexArrays(1, @ptrCast(&self.vao));
+            gl.DeleteBuffers(1, @ptrCast(&self.vbo));
+            gl.DeleteBuffers(1, @ptrCast(&self.ebo));
+        }
+        self.shader.deinit();
+    }
+
+    pub fn upload(self: *DcRenderer, verts: []const Vertex, idx: []const u32) void {
+        if (self.vao == 0) {
+            gl.GenVertexArrays(1, @ptrCast(&self.vao));
+            gl.GenBuffers(1, @ptrCast(&self.vbo));
+            gl.GenBuffers(1, @ptrCast(&self.ebo));
+        }
+        gl.BindVertexArray(self.vao);
+        gl.BindBuffer(gl.ARRAY_BUFFER, self.vbo);
+        gl.BufferData(gl.ARRAY_BUFFER, @intCast(verts.len * @sizeOf(Vertex)), verts.ptr, gl.STATIC_DRAW);
+        gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, self.ebo);
+        gl.BufferData(gl.ELEMENT_ARRAY_BUFFER, @intCast(idx.len * @sizeOf(u32)), idx.ptr, gl.STATIC_DRAW);
+        gl.EnableVertexAttribArray(0);
+        gl.VertexAttribPointer(0, 3, gl.FLOAT, gl.FALSE, @sizeOf(Vertex), 0);
+        gl.EnableVertexAttribArray(1);
+        gl.VertexAttribPointer(1, 3, gl.FLOAT, gl.FALSE, @sizeOf(Vertex), @sizeOf([3]f32));
+        gl.EnableVertexAttribArray(2);
+        gl.VertexAttribPointer(2, 3, gl.FLOAT, gl.FALSE, @sizeOf(Vertex), @sizeOf([3]f32) * 2);
+        gl.EnableVertexAttribArray(3);
+        gl.VertexAttribPointer(3, 1, gl.FLOAT, gl.FALSE, @sizeOf(Vertex), @sizeOf([3]f32) * 3);
+        gl.BindVertexArray(0);
+    }
+
+    /// Draws the terrain. The app owns clear/viewport; this owns the depth/blend/cull state the
+    /// HUD leaves behind and the fog uniforms.
+    pub fn draw(
+        self: *DcRenderer,
+        view_projection: Mat4,
+        eye: Vec3,
+        sun_dir: Vec3,
+        fog_colour: Vec3,
+        fog_sun: Vec3,
+        fog_density: f32,
+        fog_height: f32,
+        fog_base: f32,
+        atmosphere: bool,
+        index_count: usize,
+    ) void {
+        gl.Enable(gl.DEPTH_TEST);
+        gl.Disable(gl.BLEND);
+        gl.Disable(gl.CULL_FACE);
+        self.shader.use();
+        self.shader.setMat4("u_view_proj", view_projection.m);
+        self.shader.setVec3("u_eye", .{ eye.x, eye.y, eye.z });
+        self.shader.setVec3("u_sun_dir", .{ sun_dir.x, sun_dir.y, sun_dir.z });
+        self.shader.setVec3("u_fog_colour", .{ fog_colour.x, fog_colour.y, fog_colour.z });
+        self.shader.setVec3("u_fog_sun", .{ fog_sun.x, fog_sun.y, fog_sun.z });
+        self.shader.setFloat("u_fog_density", fog_density);
+        self.shader.setFloat("u_fog_height", fog_height);
+        self.shader.setFloat("u_fog_base", fog_base);
+        self.shader.setFloat("u_atmosphere", if (atmosphere) 1.0 else 0.0);
+        gl.BindVertexArray(self.vao);
+        gl.DrawElements(gl.TRIANGLES, @intCast(index_count), gl.UNSIGNED_INT, 0);
+    }
+};

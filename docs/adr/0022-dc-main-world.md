@@ -1,6 +1,6 @@
 # 0022 - The DC world becomes the engine
 
-- Status: implemented (functional port; module split deferred, see below)
+- Status: implemented (8.2 port, 8.4 module split)
 - Date: 2026-11-27
 - Supersedes: the block world (phases 1-4) as the playable world; ADR 0018's DC extraction becomes
   the only world path.
@@ -60,14 +60,27 @@ motion into `src/player/dc_player.zig`; the app loop into `src/dc_main.zig`, whi
 - `zig build -Doptimize=ReleaseFast` and `zig build test` green after deleting every block module
   and `assets/blocks` (2.1 MB). The test tree now exercises math, camera, dc, noise and sun only.
 
-## Deviation from the plan
+## Module layout (8.4)
 
-The functional port is done, but the mesher/sampler/player still live in `src/dc_main.zig` rather
-than being split into `src/world/dc_world.zig`, `src/gfx/dc_renderer.zig` and
-`src/player/dc_player.zig`. The executable has no block dependency and the build is DC-only, so this
-is a code-organisation follow-up, not a blocker; it is left as a separate task.
+The app was split with no behaviour change:
+
+- `src/dc_main.zig` (493 lines, down from 1,265): window and loop, input, HUD, sky, streaming,
+  sun and the save triggers.
+- `src/world/dc_world.zig` (575): `CHUNK`/`SEED`/`PATCH`/`CELL`, `heightAt`, `Vertex` and the
+  material palette, `Edit`/`editField`/`fieldAt`/`raycastField`, `PlayerSave` and the save/load
+  format, chunk/patch stats, `meshChunkInto`/`meshPatch`, and the streaming diagnostics.
+- `src/gfx/dc_renderer.zig` (207): the terrain shaders, the `Shader`, VAO/VBO/EBO ownership, upload
+  and the draw with depth/blend/cull state plus the fog/atmosphere uniforms.
+- `src/player/dc_player.zig` (106): the height-field motion model.
+- `root.zig` exports `world.dc_world`, `gfx.DcRenderer` and `player.DcPlayer`; the test tree
+  imports the new modules.
+
+Verified identical after the split: fresh world 111,665 verts / 88,389 quads; one carve gives
+111,706 / 88,431 and a relaunch reloads it vertex-for-vertex; `zig build` and `zig build test`
+green.
 
 ## Acceptance (met)
 
 `voxel-zig` starts in the DC world at 60 fps/4K; the block modules no longer compile into anything;
-`zig build test` green; dig/place, save and reload verified; docs updated.
+`zig build test` green; dig/place, save and reload verified; docs updated; the app is split into
+world, renderer and player modules.

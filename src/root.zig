@@ -26,8 +26,13 @@ pub const voxel = struct {
 };
 
 pub const world = struct {
+    pub const dc_world = @import("world/dc_world.zig");
     pub const noise = @import("world/noise.zig");
     pub const sun = @import("world/sun.zig");
+};
+
+pub const player = struct {
+    pub const DcPlayer = @import("player/dc_player.zig").DcPlayer;
 };
 
 /// The GL ProcTable owner: any code outside the engine that draws must call `init()`
@@ -39,6 +44,7 @@ pub const gfx = struct {
     pub const Shader = @import("gfx/shader.zig").Shader;
     pub const SkyRenderer = @import("gfx/sky_renderer.zig").SkyRenderer;
     pub const Hud = @import("gfx/hud.zig").Hud;
+    pub const DcRenderer = @import("gfx/dc_renderer.zig").DcRenderer;
 };
 
 test {
@@ -49,6 +55,8 @@ test {
     _ = @import("math/frustum.zig");
     _ = @import("camera.zig");
     _ = @import("voxel/dc.zig");
+    _ = @import("world/dc_world.zig");
     _ = @import("world/noise.zig");
     _ = @import("world/sun.zig");
+    _ = @import("player/dc_player.zig");
 }
