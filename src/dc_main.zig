@@ -11,6 +11,9 @@ const gl = @import("gl");
 const dcw = vz.world.dc_world;
 const DcPlayer = vz.player.DcPlayer;
 const WaterRenderer = vz.gfx.WaterRenderer;
+const GrassRenderer = vz.gfx.GrassRenderer;
+const PropRenderer = vz.gfx.PropRenderer;
+const scatter_mod = vz.world.scatter;
 
 const CHUNK: usize = dcw.CHUNK;
 const PATCH: i32 = dcw.PATCH;
@@ -46,6 +49,10 @@ const HudStats = struct {
     flying: bool,
     swimming: bool,
     on_ground: bool,
+    grass: usize,
+    trees: usize,
+    rocks: usize,
+    impostors: usize,
     fly_speed: f32,
     edits: usize,
 };
@@ -73,6 +80,12 @@ fn drawHud(hud: *vz.gfx.Hud, width: i32, height: i32, s: HudStats) void {
 
     hud.setColour(0.8, 0.8, 0.8);
     if (std.fmt.bufPrint(&buffer, "POS {d:.1} {d:.1} {d:.1}  YAW {d:.2}  PITCH {d:.2}", .{ s.player_x, s.player_y, s.player_z, s.yaw, s.pitch })) |text| {
+        hud.text(10, y, text);
+    } else |_| {}
+    y += hud.lineHeight();
+
+    hud.setColour(0.6, 0.9, 0.6);
+    if (std.fmt.bufPrint(&buffer, "GRASS {d}  TREES {d}  ROCKS {d}  IMPOSTORS {d}", .{ s.grass, s.trees, s.rocks, s.impostors })) |text| {
         hud.text(10, y, text);
     } else |_| {}
     y += hud.lineHeight();
@@ -270,6 +283,28 @@ pub fn main(init: std.process.Init) !void {
     defer renderer.deinit();
     renderer.upload(all_verts_s, all_idx_s);
 
+    const scatter_t0 = nowNs();
+    var scatter = try scatter_mod.build(
+        alloc,
+        edits.items,
+        @floatFromInt(patch_origin * @as(i32, @intCast(CHUNK))),
+        @floatFromInt(patch_origin_z * @as(i32, @intCast(CHUNK))),
+        @floatFromInt(PATCH * @as(i32, @intCast(CHUNK))),
+    );
+    std.debug.print("scatter: {d} blades, {d} trees, {d} rocks in {d:.1} ms\n", .{
+        scatter.blades.items.len,
+        scatter.trees.items.len,
+        scatter.rocks.items.len,
+        @as(f64, @floatFromInt(nowNs() - scatter_t0)) / 1e6,
+    });
+    defer scatter.deinit(alloc);
+    var grass = try GrassRenderer.init();
+    defer grass.deinit();
+    grass.upload(scatter.blades.items);
+    var props = try PropRenderer.init(alloc);
+    defer props.deinit(alloc);
+    props.uploadRocks(scatter.rocks.items);
+
     var water = try WaterRenderer.init();
     defer water.deinit();
     {
@@ -436,6 +471,25 @@ pub fn main(init: std.process.Init) !void {
                     );
                     std.debug.print("water: patch grid rebuilt in {d:.1} ms\n", .{@as(f64, @floatFromInt(nowNs() - wt)) / 1e6});
                 }
+                {
+                    const st = nowNs();
+                    scatter.deinit(alloc);
+                    scatter = try scatter_mod.build(
+                        alloc,
+                        edits.items,
+                        @floatFromInt(patch_origin * @as(i32, @intCast(CHUNK))),
+                        @floatFromInt(patch_origin_z * @as(i32, @intCast(CHUNK))),
+                        @floatFromInt(PATCH * @as(i32, @intCast(CHUNK))),
+                    );
+                    grass.upload(scatter.blades.items);
+                    props.uploadRocks(scatter.rocks.items);
+                    std.debug.print("scatter: {d} blades, {d} trees, {d} rocks in {d:.1} ms\n", .{
+                        scatter.blades.items.len,
+                        scatter.trees.items.len,
+                        scatter.rocks.items.len,
+                        @as(f64, @floatFromInt(nowNs() - st)) / 1e6,
+                    });
+                }
                 pending = false;
                 rebuilds += 1;
                 std.debug.print("stream: patch ({d},{d}) ready, {d} verts, {d} rebuilds, {d:.2} ms this slice\n", .{
@@ -471,12 +525,14 @@ pub fn main(init: std.process.Init) !void {
                 return std.math.pow(f32, @max(x, 0.0), 0.4545);
             }
         }.f;
+        const fog_col = Vec3.init(encode(ramp.horizon.x), encode(ramp.horizon.y), encode(ramp.horizon.z));
+        const fog_sun = Vec3.init(encode(ramp.sun.x), encode(ramp.sun.y), encode(ramp.sun.z));
         renderer.draw(
             vp,
             camera.position,
             lighting.sun_dir,
-            Vec3.init(encode(ramp.horizon.x), encode(ramp.horizon.y), encode(ramp.horizon.z)),
-            Vec3.init(encode(ramp.sun.x), encode(ramp.sun.y), encode(ramp.sun.z)),
+            fog_col,
+            fog_sun,
             fog_density,
             fog_height,
             fog_base,
@@ -484,13 +540,16 @@ pub fn main(init: std.process.Init) !void {
             detail,
             all_idx.items.len,
         );
+        grass.draw(vp, camera.position, lighting.sun_dir, fog_col, fog_sun, fog_density, fog_height, fog_base, water_clock);
+        props.drawTrees(vp, camera.position, camera.right(), camera.up(), lighting.sun_dir, fog_col, fog_sun, fog_density, fog_height, fog_base, water_clock, scatter.trees.items);
+        props.drawRocks(vp, camera.position, lighting.sun_dir, fog_col, fog_sun, fog_density, fog_height, fog_base, water_clock);
 
         water.draw(
             vp,
             camera.position,
             lighting.sun_dir,
-            Vec3.init(encode(ramp.horizon.x), encode(ramp.horizon.y), encode(ramp.horizon.z)),
-            Vec3.init(encode(ramp.sun.x), encode(ramp.sun.y), encode(ramp.sun.z)),
+            fog_col,
+            fog_sun,
             fog_density,
             fog_height,
             fog_base,
@@ -519,6 +578,10 @@ pub fn main(init: std.process.Init) !void {
                 .flying = player.flying,
                 .swimming = player.swimming,
                 .on_ground = player.on_ground,
+                .grass = scatter.blades.items.len,
+                .trees = scatter.trees.items.len,
+                .rocks = scatter.rocks.items.len,
+                .impostors = props.last_impostor_count,
                 .fly_speed = player.fly_speed,
                 .edits = edits.items.len,
             });

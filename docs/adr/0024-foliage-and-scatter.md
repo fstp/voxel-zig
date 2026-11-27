@@ -1,6 +1,6 @@
 # 0024 — Foliage and terrain detail: survey and plan
 
-- Status: proposed (research for 10.1/10.2; no implementation yet)
+- Status: implemented (10.3-10.7, 2026-11-27)
 - Date: 2026-11-27
 
 ## Context
@@ -244,3 +244,73 @@ change the silhouette more than doubling grass density.
 - Foliage overdraw survey: <https://app.cinevva.com/blog/2026-05-11-foliage-overdraw>
 - Houdini heightfield biomes/masks:
   <https://www.bsm3d.com/articles/houdini-heightfield-terrains.html>
+
+## Implementation (10.3-10.7, 2026-11-27)
+
+### Scatter (`src/world/scatter.zig`)
+
+- A 2 m height **and density** grid (129x129) is built once per patch; candidates are jittered
+  cells hashed with Wyhash from integer cell coordinates, so the field is reproducible.
+- Grass has three bands (0.22 m to 25 m, 0.45 m to 55 m, 1.0 m to 95 m) with a hard cap of
+  **70,000 blades**; trees use an 8 m grid with slope/altitude/noise masks and a 4 m footprint;
+  rocks use a 6 m grid with a steep-slope bias. All instance heights come from `heightAt` at the
+  exact position, not the 2 m grid (the grid buried most blades on rough ground).
+- Any sphere edit removes candidates within `r + 1` in 2D; the scatter is rebuilt with the mesh on
+  the same patch-swap/edit path.
+- Determinism: two builds in one process produced the **same Wyhash of the instance buffers**
+  (`73b34da5ed07679d`); a r = 3 dig removed **475 -> 0** blades inside its footprint.
+- Build cost: **6.5-9.9 ms** depending on how much of the patch passes the masks.
+
+### Ground cover (`src/gfx/grass_renderer.zig`)
+
+- One instanced draw, 7-vertex triangle strips generated in the vertex shader; no vertex buffer,
+  no alpha. Voronoi clumping was dropped in favour of the three-band density and per-blade hash
+  (documented as a deviation - the visual target is a stylised meadow).
+- World-space wind (two sines with a per-blade phase), hash thinning from 35 m to 85 m and a
+  near-camera height fade. Colour is tone-mapped with ACES and the terrain exposure so blades do
+  not blow out to white.
+- 70,068 blades at the spawn view; 60 fps at 3840x2103, worst frame 16.9-17.0 ms.
+
+### Trees and rocks (`src/gfx/prop_renderer.zig`)
+
+- Three procedural conifer LODs (**84 / 40 / 20 triangles**: trunk cylinder + overlapping cones),
+  vertex-colour shaded, instanced with a per-frame distance partition at 45 m and 90 m; 248 trees,
+  three instanced draws. Wind uses a per-vertex rigidity attribute, so the trunk stays rigid and
+  the cones bend.
+- Rocks are one 48-triangle flattened boulder mesh, instanced; 114 at the spawn view.
+
+### Octahedral impostors
+
+- At startup the LOD0 tree is baked from an **8x8 hemisphere grid into a 1024 px atlas** (FBO,
+  orthographic cameras, fixed sun), then drawn as camera-facing quads for trees beyond **130 m**.
+  The fragment shader hemi-octahedral-encodes the view direction and blends the three enclosing
+  cells. At the spawn view **55 of 248 trees** are impostors, in one extra draw call.
+- Bake artefacts: the atlas is cleared to alpha 0 and sampled with a 0.5 cutout; no white boxes
+  were visible in the verification screenshots.
+
+### Measured
+
+| Quantity | Value |
+|---|---|
+| blades / trees / rocks at spawn | 70,068 / 248 / 114 |
+| impostors at spawn view | 55 |
+| frame (4K, capped) | 60 fps, worst 16.9-17.0 ms |
+| scatter build on patch swap | 6.5-9.9 ms |
+| startup one-off (bake + shader compile) | worst 48.7 ms on the first second |
+| determinism hash | equal across builds |
+| dig r = 3 | 475 blades -> 0 inside the hole |
+
+### Deviations from the plan
+
+- **No compute/indirect:** the scatter is CPU-built. It is fast enough at this patch size; the
+  GL 4.6 compute path remains the next step if counts grow.
+- **No Voronoi clumps:** the density bands and hash variation stand in for them; the field reads
+  as a stylised meadow rather than a natural clump field.
+- **Patch-wide rebuild, not per-chunk:** an edit or patch swap rebuilds all instances. The cost is
+  a single ~7-10 ms frame inside the existing 16-frame swap; per-chunk lists remain the cleaner
+  end state.
+- **Tree triangle counts are below the 500-2,000 target** (84/40/20), because the trees are
+  stylised cones; the LOD chain and instancing are what the task required.
+- **Impostors bake with a fixed sun**; they do not follow the dynamic sun. Mesh LODs do.
+- **Hard LOD switch** at 130 m, no dither (the app has no TAA).
+- **Flowers are a blade kind** (2 % of blades), not a separate system.

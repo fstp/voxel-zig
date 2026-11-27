@@ -27,6 +27,7 @@ pub const voxel = struct {
 
 pub const world = struct {
     pub const dc_world = @import("world/dc_world.zig");
+    pub const scatter = @import("world/scatter.zig");
     pub const noise = @import("world/noise.zig");
     pub const sun = @import("world/sun.zig");
 };
@@ -46,6 +47,8 @@ pub const gfx = struct {
     pub const Hud = @import("gfx/hud.zig").Hud;
     pub const DcRenderer = @import("gfx/dc_renderer.zig").DcRenderer;
     pub const WaterRenderer = @import("gfx/water_renderer.zig").WaterRenderer;
+    pub const GrassRenderer = @import("gfx/grass_renderer.zig").GrassRenderer;
+    pub const PropRenderer = @import("gfx/prop_renderer.zig").PropRenderer;
 };
 
 test {
@@ -57,6 +60,7 @@ test {
     _ = @import("camera.zig");
     _ = @import("voxel/dc.zig");
     _ = @import("world/dc_world.zig");
+    _ = @import("world/scatter.zig");
     _ = @import("world/noise.zig");
     _ = @import("world/sun.zig");
     _ = @import("player/dc_player.zig");
