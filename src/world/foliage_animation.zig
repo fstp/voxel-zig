@@ -44,6 +44,33 @@ test "screen error falls with distance and cutoff matches it" {
     try std.testing.expectApproxEqAbs(@as(f32, 2.0), screenErrorPixels(0.25, cut, h, fov), 0.02);
 }
 
+/// Screen-space LOD thresholds in pixels at the current focal length. `prev` is the LOD used
+/// in the previous frame; the small hysteresis band stops a tree at a boundary from flickering
+/// between two LODs as the camera drifts.
+pub fn lodForPixels(pixels: f32, prev: u8) u8 {
+    const t0: f32 = 220.0;
+    const t1: f32 = 110.0;
+    const t2: f32 = 75.0;
+    const h: f32 = 0.08;
+    if (prev == 0 and pixels >= t0 * (1.0 - h)) return 0;
+    if (prev == 1 and pixels >= t1 * (1.0 - h) and pixels <= t0 * (1.0 + h)) return 1;
+    if (prev == 2 and pixels >= t2 * (1.0 - h) and pixels <= t1 * (1.0 + h)) return 2;
+    if (pixels >= t0) return 0;
+    if (pixels >= t1) return 1;
+    if (pixels >= t2) return 2;
+    return 3;
+}
+
+test "LOD selection uses projected pixels with hysteresis" {
+    try std.testing.expectEqual(@as(u8, 0), lodForPixels(300.0, 255));
+    try std.testing.expectEqual(@as(u8, 1), lodForPixels(150.0, 255));
+    try std.testing.expectEqual(@as(u8, 2), lodForPixels(90.0, 255));
+    try std.testing.expectEqual(@as(u8, 3), lodForPixels(40.0, 255));
+    // Just above the LOD0 boundary, a previous LOD1 stays LOD1 inside the band.
+    try std.testing.expectEqual(@as(u8, 1), lodForPixels(228.0, 1));
+    try std.testing.expectEqual(@as(u8, 0), lodForPixels(228.0, 255));
+}
+
 test "animation weight fades to zero before the cutoff" {
     try std.testing.expectApproxEqAbs(@as(f32, 1.0), animationWeight(50.0, 90.0, 15.0), 1e-5);
     try std.testing.expectApproxEqAbs(@as(f32, 0.0), animationWeight(90.0, 90.0, 15.0), 1e-5);

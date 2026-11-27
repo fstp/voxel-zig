@@ -85,3 +85,21 @@ extra triangles are negligible (193 x 84), and a near tree now shadows itself ag
 the camera actually sees. Screenshot pair: `docs/adr/img/0029-tree-shadow-fix.png` (same pose, before
 left, after right). `zig build test` green; 60 fps maintained. Far impostor trees still use the mesh
 proxy for their ground shadow because the impostor card has no depth geometry.
+
+## Addendum: grass is not a shadow caster (2026-11-27)
+
+Grass blades still wrote depth into both sun cascades after the tree LOD fix. RenderDoc capture
+`tree_frame1187.rdc` shows the same scene with the grass caster in both cascades:
+
+- near cascade `ResourceId::119`, event 29: `glDrawArraysInstanced`, **7 indices x 98,261 instances**
+- far cascade `ResourceId::120`, event 97: `glDrawArraysInstanced`, **7 indices x 98,261 instances**
+
+The blade shadows landed on the tree cones at an oblique angle as large, blotchy dark patches
+that read as self-shadow acne. `VOXEL_SHADOWS=0` removed them, and disabling only the grass depth
+draw removed them while keeping tree, rock, snow and shore shadows. Grass remains a receiver, so
+the ground grass still darkens under the canopy and clouds; it simply no longer casts blades.
+
+The fix removes `grass.drawDepth(...)` from both cascade loops in `src/dc_main.zig`. The tree caster
+still uses LOD0 for all near trees. Screenshot `docs/adr/img/0029-grass-shadow-fix.png` shows the
+same pose after the change: the central tree and the far-tree line have clean cone shading and an
+attached ground shadow. `zig build test` green; 60 fps holds.

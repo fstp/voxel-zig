@@ -9,6 +9,7 @@ const Mat4 = @import("../math/mat4.zig").Mat4;
 const Vec3 = @import("../math/vec.zig").Vec3;
 const Prop = @import("../world/scatter.zig").Prop;
 const ShadowRenderer = @import("shadow_renderer.zig").ShadowRenderer;
+const animation = @import("../world/foliage_animation.zig");
 
 pub const Vertex = extern struct {
     pos: [3]f32,
@@ -105,6 +106,28 @@ fn buildTree(alloc: std.mem.Allocator, sides: usize, cones: usize) !MeshData {
 }
 
 /// A flattened low-poly boulder.
+fn appendTransformed(dst: *MeshData, src: *const MeshData, alloc: std.mem.Allocator, t: Prop, origin_x: f32, origin_z: f32) !void {
+    const c = @cos(t.yaw);
+    const s = @sin(t.yaw);
+    const base: u32 = @intCast(dst.verts.items.len);
+    for (src.verts.items) |v| {
+        const p = [3]f32{ v.pos[0] * t.scale, v.pos[1] * t.scale, v.pos[2] * t.scale };
+        const n = [3]f32{ v.nrm[0] * c - v.nrm[2] * s, v.nrm[1], v.nrm[0] * s + v.nrm[2] * c };
+        try dst.verts.append(alloc, .{
+            .pos = .{
+                t.pos[0] + p[0] * c - p[2] * s - origin_x,
+                t.pos[1] + p[1],
+                t.pos[2] + p[0] * s + p[2] * c - origin_z,
+            },
+            .nrm = n,
+            .col = v.col,
+            .rigid = 0.0,
+            .pivot = 0.0,
+        });
+    }
+    for (src.idx.items) |i| try dst.idx.append(alloc, base + i);
+}
+
 fn buildRock(alloc: std.mem.Allocator) !MeshData {
     var md = MeshData{};
     errdefer md.deinit(alloc);
@@ -460,6 +483,15 @@ const ATLAS_GRID: usize = 8;
 const ATLAS_CELL: usize = ATLAS_SIZE / ATLAS_GRID;
 
 const MAX_PER_LOD: usize = 256;
+const MAX_TREE_STATE: usize = 512;
+const MAX_AGGREGATES: usize = 64;
+const MAX_AGG_TREES: usize = 32;
+
+const Aggregate = struct {
+    mesh: Mesh = .{},
+    instance_vbo: u32 = 0,
+    tree_count: usize = 0,
+};
 
 /// Shared foliage geometry handles. This is the GL equivalent of the paper's reusable clusters:
 /// each mesh is uploaded once and all instances/LODs that use it reference the same VBO/EBO.
@@ -527,6 +559,17 @@ pub const PropRenderer = struct {
     /// World-unit distance at which per-part wind fades out; set by the app from its screen error.
     animation_cutoff: f32 = 95.0,
     animation_fade: f32 = 15.0,
+    aggregates: [MAX_AGGREGATES]Aggregate = std.mem.zeroes([MAX_AGGREGATES]Aggregate),
+    aggregate_count: usize = 0,
+    aggregate_tree_count: usize = 0,
+    aggregate_center_x: f32 = 0.0,
+    aggregate_center_z: f32 = 0.0,
+    aggregate_distance: f32 = 55.0,
+    lod_focal: f32 = 1519.0,
+    last_lod: [MAX_TREE_STATE]u8 = @splat(255),
+    last_tree_instances: usize = 0,
+    last_aggregate_instances: usize = 0,
+    last_lod_counts: [4]usize = .{ 0, 0, 0, 0 },
 
     pub fn init(alloc: std.mem.Allocator) !PropRenderer {
         var shader = try Shader.init(vertex_src, fragment_src);
@@ -583,6 +626,7 @@ pub const PropRenderer = struct {
 
     pub fn deinit(self: *PropRenderer, alloc: std.mem.Allocator) void {
         _ = alloc;
+        self.clearAggregates();
         self.assets.deinit();
         for (0..3) |i| {
             if (self.tree_instances[i] != 0) gl.DeleteBuffers(1, @ptrCast(&self.tree_instances[i]));
@@ -635,15 +679,115 @@ pub const PropRenderer = struct {
         gl.BufferData(gl.ARRAY_BUFFER, @intCast(props.len * @sizeOf(Prop)), props.ptr, gl.STATIC_DRAW);
     }
 
+    fn clearAggregates(self: *PropRenderer) void {
+        for (self.aggregates[0..self.aggregate_count]) |*a| {
+            destroyMesh(&a.mesh);
+            if (a.instance_vbo != 0) gl.DeleteBuffers(1, @ptrCast(&a.instance_vbo));
+        }
+        self.aggregate_count = 0;
+        self.aggregate_tree_count = 0;
+    }
+
+    /// Merge trees beyond `aggregate_distance` from the patch centre into one static mesh per
+    /// 32 m cell. Near trees keep their per-tree screen-space LODs; far trees collapse to one
+    /// instance per cell. This is the practical GL equivalent of merging distant plant parts.
+    pub fn uploadTrees(self: *PropRenderer, alloc: std.mem.Allocator, trees: []const Prop, min_x: f32, min_z: f32, size: f32) !void {
+        self.clearAggregates();
+        self.aggregate_center_x = min_x + size * 0.5;
+        self.aggregate_center_z = min_z + size * 0.5;
+        self.last_lod = @splat(255);
+
+        const Cell = struct {
+            ix: i32,
+            iz: i32,
+            count: usize = 0,
+            trees: [MAX_AGG_TREES]usize = undefined,
+        };
+        var cells: [MAX_AGGREGATES]Cell = undefined;
+        var cell_count: usize = 0;
+        const cutoff2 = self.aggregate_distance * self.aggregate_distance;
+        for (trees, 0..) |t, i| {
+            const dx = t.pos[0] - self.aggregate_center_x;
+            const dz = t.pos[2] - self.aggregate_center_z;
+            if (dx * dx + dz * dz <= cutoff2) continue;
+            const ix: i32 = @intFromFloat(@floor(t.pos[0] / 32.0));
+            const iz: i32 = @intFromFloat(@floor(t.pos[2] / 32.0));
+            var ci: usize = 0;
+            while (ci < cell_count) : (ci += 1) {
+                if (cells[ci].ix == ix and cells[ci].iz == iz) break;
+            }
+            if (ci == cell_count) {
+                if (cell_count >= MAX_AGGREGATES) continue;
+                cells[cell_count] = .{ .ix = ix, .iz = iz };
+                cell_count += 1;
+            }
+            if (cells[ci].count < MAX_AGG_TREES) {
+                cells[ci].trees[cells[ci].count] = i;
+                cells[ci].count += 1;
+            }
+        }
+        if (cell_count == 0) return;
+
+        var src = try buildTree(alloc, 8, 3);
+        defer src.deinit(alloc);
+        for (cells[0..cell_count]) |cell| {
+            if (cell.count == 0) continue;
+            const origin_x = (@as(f32, @floatFromInt(cell.ix)) + 0.5) * 32.0;
+            const origin_z = (@as(f32, @floatFromInt(cell.iz)) + 0.5) * 32.0;
+            var md = MeshData{};
+            defer md.deinit(alloc);
+            for (cell.trees[0..cell.count]) |ti| {
+                try appendTransformed(&md, &src, alloc, trees[ti], origin_x, origin_z);
+            }
+            if (md.verts.items.len == 0) continue;
+            var instance_vbo: u32 = 0;
+            gl.GenBuffers(1, @ptrCast(&instance_vbo));
+            const cell_prop = Prop{ .pos = .{ origin_x, 0.0, origin_z }, .yaw = 0, .scale = 1, .tint = 0.444 };
+            gl.BindBuffer(gl.ARRAY_BUFFER, instance_vbo);
+            gl.BufferData(gl.ARRAY_BUFFER, @sizeOf(Prop), &cell_prop, gl.STATIC_DRAW);
+            const mesh = try uploadMesh(alloc, &md, instance_vbo);
+            self.aggregates[self.aggregate_count] = .{ .mesh = mesh, .instance_vbo = instance_vbo, .tree_count = cell.count };
+            self.aggregate_count += 1;
+            self.aggregate_tree_count += cell.count;
+        }
+        std.debug.print(
+            "trees: {d} total, {d} merged into {d} aggregate instances (cutoff {d:.0} m)\n",
+            .{ trees.len, self.aggregate_tree_count, self.aggregate_count, self.aggregate_distance },
+        );
+    }
+
+    pub fn logTreeStats(self: *const PropRenderer) void {
+        std.debug.print(
+            "tree draw: {d} per-tree instances (L0 {d} L1 {d} L2 {d} L3 {d}) + {d} aggregate instances ({d} trees merged)\n",
+            .{ self.last_tree_instances, self.last_lod_counts[0], self.last_lod_counts[1], self.last_lod_counts[2], self.last_lod_counts[3], self.last_aggregate_instances, self.aggregate_tree_count },
+        );
+    }
+
     /// Shadow pass: cast the highest-detail tree mesh. Using the mid LOD here while the camera
     /// draws LOD0 made every near tree shadow itself against a different canopy silhouette, which
     /// showed up as hard dark wedges on the lower cones. The extra triangles are trivial next to
     /// a wrong self-shadow.
     pub fn drawTreesDepth(self: *PropRenderer, view_projection: Mat4, time: f32, trees: []const Prop, eye: Vec3) void {
         if (trees.len == 0) return;
-        gl.BindBuffer(gl.ARRAY_BUFFER, self.tree_instances[0]);
-        gl.BufferData(gl.ARRAY_BUFFER, @intCast(trees.len * @sizeOf(Prop)), trees.ptr, gl.STATIC_DRAW);
-        self.drawDepthMesh(self.assets.get(.tree_lod0), self.tree_instances[0], trees.len, view_projection, time, eye);
+        const cutoff2 = self.aggregate_distance * self.aggregate_distance;
+        var near: [MAX_TREE_STATE]Prop = undefined;
+        var near_count: usize = 0;
+        for (trees) |t| {
+            const dx = t.pos[0] - self.aggregate_center_x;
+            const dz = t.pos[2] - self.aggregate_center_z;
+            if (dx * dx + dz * dz > cutoff2) continue;
+            if (near_count >= MAX_TREE_STATE) break;
+            near[near_count] = t;
+            near_count += 1;
+        }
+        if (near_count > 0) {
+            gl.BindBuffer(gl.ARRAY_BUFFER, self.tree_instances[0]);
+            gl.BufferData(gl.ARRAY_BUFFER, @intCast(near_count * @sizeOf(Prop)), &near, gl.STATIC_DRAW);
+            self.drawDepthMesh(self.assets.get(.tree_lod0), self.tree_instances[0], near_count, view_projection, time, eye);
+        }
+        for (self.aggregates[0..self.aggregate_count]) |*a| {
+            self.drawDepthMesh(&a.mesh, a.instance_vbo, 1, view_projection, time, eye);
+        }
     }
 
     pub fn drawRocksDepth(self: *PropRenderer, view_projection: Mat4, time: f32, eye: Vec3) void {
@@ -675,7 +819,8 @@ pub const PropRenderer = struct {
         gl.DrawElementsInstanced(gl.TRIANGLES, @intCast(mesh.index_count), gl.UNSIGNED_INT, 0, @intCast(count));
     }
 
-    /// Partitions trees by distance and draws each LOD with one instanced call.
+    /// Partitions near trees by projected screen size with hysteresis and draws each LOD with one
+    /// instanced call; far trees are already merged into one static aggregate per 32 m cell.
     pub fn drawTrees(
         self: *PropRenderer,
         view_projection: Mat4,
@@ -704,22 +849,35 @@ pub const PropRenderer = struct {
         var n1: usize = 0;
         var n2: usize = 0;
         var n3: usize = 0;
-        for (trees) |t| {
+        const cutoff2 = self.aggregate_distance * self.aggregate_distance;
+        for (trees, 0..) |t, i| {
+            const adx = t.pos[0] - self.aggregate_center_x;
+            const adz = t.pos[2] - self.aggregate_center_z;
+            if (adx * adx + adz * adz > cutoff2) continue; // represented by an aggregate cell
             const dx = t.pos[0] - eye.x;
             const dz = t.pos[2] - eye.z;
-            const d2 = dx * dx + dz * dz;
-            if (d2 < 45.0 * 45.0 and n0 < MAX_PER_LOD) {
-                l0[n0] = t;
-                n0 += 1;
-            } else if (d2 < 90.0 * 90.0 and n1 < MAX_PER_LOD) {
-                l1[n1] = t;
-                n1 += 1;
-            } else if (d2 < 130.0 * 130.0 and n2 < MAX_PER_LOD) {
-                l2[n2] = t;
-                n2 += 1;
-            } else if (n3 < MAX_PER_LOD) {
-                l3[n3] = t;
-                n3 += 1;
+            const distance = @sqrt(dx * dx + dz * dz);
+            const pixels = 6.5 * t.scale * self.lod_focal / @max(distance, 0.1);
+            const prev: u8 = if (i < MAX_TREE_STATE) self.last_lod[i] else 255;
+            const lod = animation.lodForPixels(pixels, prev);
+            if (i < MAX_TREE_STATE) self.last_lod[i] = lod;
+            switch (lod) {
+                0 => if (n0 < MAX_PER_LOD) {
+                    l0[n0] = t;
+                    n0 += 1;
+                },
+                1 => if (n1 < MAX_PER_LOD) {
+                    l1[n1] = t;
+                    n1 += 1;
+                },
+                2 => if (n2 < MAX_PER_LOD) {
+                    l2[n2] = t;
+                    n2 += 1;
+                },
+                else => if (n3 < MAX_PER_LOD) {
+                    l3[n3] = t;
+                    n3 += 1;
+                },
             }
         }
 
@@ -729,6 +887,15 @@ pub const PropRenderer = struct {
         self.drawLod(2, l2[0..n2], time);
         self.last_impostor_count = n3;
         drawImpostors(self, l3[0..n3], view_projection, eye, right, up, sun_dir, sun_colour, fog_colour, fog_sun, fog_density, fog_height, fog_base);
+
+        self.last_tree_instances = n0 + n1 + n2 + n3;
+        self.last_lod_counts = .{ n0, n1, n2, n3 };
+        self.last_aggregate_instances = 0;
+        for (self.aggregates[0..self.aggregate_count]) |*a| {
+            gl.BindVertexArray(a.mesh.vao);
+            gl.DrawElementsInstanced(gl.TRIANGLES, @intCast(a.mesh.index_count), gl.UNSIGNED_INT, 0, 1);
+            self.last_aggregate_instances += 1;
+        }
     }
 
     pub fn drawRocks(

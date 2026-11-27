@@ -357,6 +357,17 @@ pub fn main(init: std.process.Init) !void {
     props.uploadRocks(scatter.rocks.items);
     props.uploadSnow(scatter.snow.items);
     props.uploadShore(scatter.shore.items);
+    if (init.environ_map.get("VOXEL_TREE_AGG")) |raw| {
+        if (raw.len > 0 and raw[0] == '0') props.aggregate_distance = 1.0e9;
+    }
+    props.lod_focal = foliage_anim.focalPixels(@floatFromInt(window.height), camera.fov_y_deg);
+    try props.uploadTrees(
+        alloc,
+        scatter.trees.items,
+        @floatFromInt(patch_origin * @as(i32, @intCast(CHUNK))),
+        @floatFromInt(patch_origin_z * @as(i32, @intCast(CHUNK))),
+        @floatFromInt(PATCH * @as(i32, @intCast(CHUNK))),
+    );
     props.logAssetStats();
 
     // Wind is only worth paying for while its projected displacement can be seen. Use a
@@ -365,6 +376,10 @@ pub fn main(init: std.process.Init) !void {
     var animation_enabled = true;
     if (init.environ_map.get("VOXEL_ANIM")) |raw| {
         if (raw.len > 0 and raw[0] == '0') animation_enabled = false;
+    }
+    var freeze_player = false;
+    if (init.environ_map.get("VOXEL_DC_FREEZE")) |raw| {
+        if (raw.len > 0 and raw[0] == '1') freeze_player = true;
     }
     const animation_cutoff: f32 = if (animation_enabled)
         @min(foliage_anim.cutoffDistance(0.125, 2.0, @floatFromInt(window.height), camera.fov_y_deg), 110.0)
@@ -431,6 +446,7 @@ pub fn main(init: std.process.Init) !void {
     var last_frame_ns = nowNs();
     var accumulator: f64 = 0;
     var was_swimming = false;
+    var tree_stats_logged = false;
     const fixed_dt: f64 = 1.0 / 60.0;
     var frame_ms: f64 = 0;
     var fps_now: f64 = 0;
@@ -441,6 +457,10 @@ pub fn main(init: std.process.Init) !void {
         frame_dt = @min(frame_dt, 0.1);
 
         input.pump(&window);
+        if (freeze_player) {
+            input.mouse_dx = 0;
+            input.mouse_dy = 0;
+        }
         if (input.quit) {
             dcw.saveWorld(init.io, save_path, sun.time, playerSave(player), edits.items) catch |err| {
                 std.debug.print("save on quit failed: {s}\n", .{@errorName(err)});
@@ -517,7 +537,7 @@ pub fn main(init: std.process.Init) !void {
         accumulator += frame_dt;
         var steps: u32 = 0;
         while (accumulator >= fixed_dt and steps < 5) : (steps += 1) {
-            player.update(@floatCast(fixed_dt), wish, up, sprint);
+            if (!freeze_player) player.update(@floatCast(fixed_dt), wish, up, sprint);
             sun.update(@floatCast(fixed_dt));
             accumulator -= fixed_dt;
         }
@@ -613,6 +633,13 @@ pub fn main(init: std.process.Init) !void {
                     props.uploadRocks(scatter.rocks.items);
                     props.uploadSnow(scatter.snow.items);
                     props.uploadShore(scatter.shore.items);
+                    try props.uploadTrees(
+                        alloc,
+                        scatter.trees.items,
+                        @floatFromInt(patch_origin * @as(i32, @intCast(CHUNK))),
+                        @floatFromInt(patch_origin_z * @as(i32, @intCast(CHUNK))),
+                        @floatFromInt(PATCH * @as(i32, @intCast(CHUNK))),
+                    );
                     std.debug.print("scatter: {d} blades, {d} trees, {d} rocks, {d} snow, {d} shore in {d:.1} ms\n", .{
                         scatter.blades.items.len,
                         scatter.trees.items.len,
@@ -650,7 +677,6 @@ pub fn main(init: std.process.Init) !void {
             for (0..2) |cascade| {
                 shadow.begin(cascade);
                 renderer.drawDepth(shadow.vp[cascade], all_idx.items.len);
-                grass.drawDepth(shadow.vp[cascade], camera.position, water_clock);
                 props.drawTreesDepth(shadow.vp[cascade], water_clock, scatter.trees.items, camera.position);
                 props.drawRocksDepth(shadow.vp[cascade], water_clock, camera.position);
                 props.drawSnowDepth(shadow.vp[cascade], water_clock, camera.position);
@@ -700,6 +726,10 @@ pub fn main(init: std.process.Init) !void {
         );
         grass.draw(vp, camera.position, lighting.sun_dir, lighting.sun_colour, lighting.ambient_sky, lighting.ambient_ground, fog_col, fog_sun, fog_density, fog_height, fog_base, water_clock, &shadow);
         props.drawTrees(vp, camera.position, camera.right(), camera.up(), lighting.sun_dir, lighting.sun_colour, lighting.ambient_sky, lighting.ambient_ground, fog_col, fog_sun, fog_density, fog_height, fog_base, water_clock, &shadow, scatter.trees.items);
+        if (!tree_stats_logged) {
+            props.logTreeStats();
+            tree_stats_logged = true;
+        }
         props.drawRocks(vp, camera.position, lighting.sun_dir, lighting.sun_colour, lighting.ambient_sky, lighting.ambient_ground, fog_col, fog_sun, fog_density, fog_height, fog_base, water_clock, &shadow);
         props.drawSnow(vp, camera.position, lighting.sun_dir, lighting.sun_colour, lighting.ambient_sky, lighting.ambient_ground, fog_col, fog_sun, fog_density, fog_height, fog_base, water_clock, &shadow);
         props.drawShore(vp, camera.position, lighting.sun_dir, lighting.sun_colour, lighting.ambient_sky, lighting.ambient_ground, fog_col, fog_sun, fog_density, fog_height, fog_base, water_clock, &shadow);
