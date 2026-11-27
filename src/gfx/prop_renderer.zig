@@ -560,12 +560,15 @@ pub const PropRenderer = struct {
         gl.BufferData(gl.ARRAY_BUFFER, @intCast(props.len * @sizeOf(Prop)), props.ptr, gl.STATIC_DRAW);
     }
 
-    /// Shadow pass: every tree casts through the mid LOD (a proxy for the far impostors too).
+    /// Shadow pass: cast the highest-detail tree mesh. Using the mid LOD here while the camera
+    /// draws LOD0 made every near tree shadow itself against a different canopy silhouette, which
+    /// showed up as hard dark wedges on the lower cones. The extra triangles are trivial next to
+    /// a wrong self-shadow.
     pub fn drawTreesDepth(self: *PropRenderer, view_projection: Mat4, time: f32, trees: []const Prop) void {
         if (trees.len == 0) return;
-        gl.BindBuffer(gl.ARRAY_BUFFER, self.tree_instances[1]);
+        gl.BindBuffer(gl.ARRAY_BUFFER, self.tree_instances[0]);
         gl.BufferData(gl.ARRAY_BUFFER, @intCast(trees.len * @sizeOf(Prop)), trees.ptr, gl.STATIC_DRAW);
-        self.drawDepthMesh(&self.tree_meshes[1], self.tree_instances[1], trees.len, view_projection, time);
+        self.drawDepthMesh(&self.tree_meshes[0], self.tree_instances[0], trees.len, view_projection, time);
     }
 
     pub fn drawRocksDepth(self: *PropRenderer, view_projection: Mat4, time: f32) void {

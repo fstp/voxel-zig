@@ -67,3 +67,21 @@ the patch rebuild, not per frame. `zig build test` green.
 - `src/gfx/prop_renderer.zig`
 - `src/gfx/water_renderer.zig`
 - `src/dc_main.zig`
+
+## Addendum: tree shadow caster LOD (2026-11-27)
+
+The first implementation cast **every** tree through the mid LOD (`tree_meshes[1]`, 40 triangles),
+while the camera drew the nearest trees with LOD0 (84 triangles). A near tree therefore tested its
+own LOD0 canopy against a different LOD1 silhouette, and the lower cones picked up hard dark wedges
+that were neither a correct self-shadow nor a ground shadow.
+
+RenderDoc capture `tree_frame1187.rdc` made the mismatch explicit:
+
+- near shadow cascade, tree depth draw: **120 indices, 193 instances** (LOD1)
+- main pass, near tree draw: **252 indices, 33 instances** (LOD0)
+
+The fix makes the shadow pass use `tree_meshes[0]` and the LOD0 instance buffer for all trees. The
+extra triangles are negligible (193 x 84), and a near tree now shadows itself against the geometry
+the camera actually sees. Screenshot pair: `docs/adr/img/0029-tree-shadow-fix.png` (same pose, before
+left, after right). `zig build test` green; 60 fps maintained. Far impostor trees still use the mesh
+proxy for their ground shadow because the impostor card has no depth geometry.
