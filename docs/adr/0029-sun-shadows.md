@@ -52,8 +52,7 @@ the patch rebuild, not per frame. `zig build test` green.
 - The cascades are camera-centred boxes, not exact frustum splits; a very wide FOV or a camera
   looking sharply sideways can leave near-field casters outside the near map. The far map still
   covers the middle distance.
-- Grass is drawn in full for both cascades; a distance-limited caster would be the next
-  optimisation if the shadow pass grows.
+- Grass does not cast shadows. The blades were removed from both cascades after RenderDoc showed 7 x 98,261 grass instances writing into each depth map; their shadows read as blotchy tree self-shadow. Grass still receives the lookup.
 - Softness is screen-space PCSS, not a physically exact area-light sample; the penumbra radius is
   clamped to 6 texels to keep the 5x5 filter bounded.
 - Water shadowing darkens the body by 28 % and the specular lobe, but does not add refraction or
