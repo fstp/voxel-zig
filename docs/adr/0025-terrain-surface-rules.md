@@ -1,6 +1,6 @@
 # 0025 Terrain surface rules: snow, mud and shore wetness
 
-- Status: implemented (10.8, 2026-11-27)
+- Status: implemented (10.8, 2026-11-27; geometry follow-up in ADR 0026)
 - Depends on: ADR 0019 (procedural materials), ADR 0022 (DC world), ADR 0023 (sea)
 - Task: Vikunja #159 (#81), "10.8 Terrain surface rules: snow, mud and shore wetness"
 
@@ -73,6 +73,10 @@ wet   = (1 - smoothstep(0, 0.9, height - sea)) * step(sea - 0.05, height);
 
 ## Measured
 
+These numbers were taken before ADR 0026 fixed the QEF cell-bias bug, so the geometry in the
+screenshots was still terraced; the shader pass and its cost are unchanged. The A/B numbers remain
+the evidence for the snow/mud masks.
+
 Burken, 3840x2103, ReleaseFast, sun 0.30.
 
 | Quantity | Value |
@@ -111,9 +115,12 @@ continuous snow or mud layer.
 - **No exposure or AO term.** Snow lies on every up-facing surface above the line; there is no
   shadow-map or sky-occlusion pass for it. The paper's `inclination x exposure` model is the
   reference for a future pass.
-- **The terrain is terraced.** Snow on the flat tops exposes the 1 m steps that grass otherwise
-  hides; the bare-rock modulation and drift normals help, but the cap still reads blocky at close
-  range. This is a property of the DC terrain, not the mask.
+- **The terrain was terraced before ADR 0026.** The 10.8 screenshots exposed 1 m rectangular steps
+  that grass had hidden. The cause was not the mask: the QEF solve had no bias term, so an
+  underdetermined cell returned the point closest to the world origin and then clamped to a cell
+  boundary. ADR 0026 adds `eps * cell_centre` to the solve; the mesh now follows `heightAt` to a
+  mean residual of 0.03 m (was 0.43 m, max 1.26 m) and the cap reads as a smooth snow field. The
+  remaining snow limitation is the absence of 3D drift/clump detail, not the terrain.
 - **No snow on trees, rocks or props**, and no displacement/drift geometry. 10.9 adds the
   discrete detail where it matters.
 - **The wet specular is subtle** at a high sun angle; it is a 0.30 lobe, not a reflection.
