@@ -92,7 +92,8 @@ The accepted first stage is:
    terrain, grass, trees and rocks so the time of day cannot disagree between them.
 2. **11.3 Cascaded sun shadows.** Two or three 2048 cascades fitted to the camera frustum, texel
    snapping, PCF/PCSS, terrain + trees + rocks as casters. Target under 1.5 ms; A/B at a low sun
-   and at noon.
+   and at noon. **11.3b** extends the same PCSS path to grass, props, impostor proxies and water
+   receivers, with a 2.5 ms total shadow target.
 3. **11.4 Heightfield horizon AO.** Bake a 4 m/16-direction AO texture (2.12 ms per patch) and
    sample it in the terrain shader; multiply ambient fully and direct light partly. Target under
    2.5 ms added to the patch rebuild; no TAA needed.
@@ -123,6 +124,7 @@ world that already has correct sun, shadows and AO.
 
 - **11.2** Sun-correct lighting and SH9 sky ambient (#85)
 - **11.3** Cascaded sun shadows (#86)
+- **11.3b** Soft shadows from all scene objects (#89), extending 11.3 to grass, props, impostor proxies and water receivers
 - **11.4** Heightfield horizon AO (#87)
 - **11.5** SSGI half-resolution spike, decision gate (#88)
 
