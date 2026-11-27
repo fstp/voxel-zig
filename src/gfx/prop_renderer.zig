@@ -566,6 +566,7 @@ pub const PropRenderer = struct {
     aggregate_center_z: f32 = 0.0,
     aggregate_distance: f32 = 55.0,
     lod_focal: f32 = 1519.0,
+    force_lod: ?u8 = null,
     last_lod: [MAX_TREE_STATE]u8 = @splat(255),
     last_tree_instances: usize = 0,
     last_aggregate_instances: usize = 0,
@@ -859,7 +860,7 @@ pub const PropRenderer = struct {
             const distance = @sqrt(dx * dx + dz * dz);
             const pixels = 6.5 * t.scale * self.lod_focal / @max(distance, 0.1);
             const prev: u8 = if (i < MAX_TREE_STATE) self.last_lod[i] else 255;
-            const lod = animation.lodForPixels(pixels, prev);
+            const lod = self.force_lod orelse animation.lodForPixels(pixels, prev);
             if (i < MAX_TREE_STATE) self.last_lod[i] = lod;
             switch (lod) {
                 0 => if (n0 < MAX_PER_LOD) {

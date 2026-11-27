@@ -95,3 +95,24 @@ number.
 
 - `docs/adr/0034-massive-foliage-adaptation.md`
 - Vikunja tasks 12.1-12.9 (#90-#98)
+
+## 12.4 verification status (2026-11-27)
+
+The implementation is in `f8c815f`: near trees select a LOD from projected pixels (220/110/75 px)
+with an 8 % hysteresis band, and trees beyond 55 m from the patch centre are baked into one mesh
+per 32 m cell. At `tree.sav`: **193 trees -> 42 near-tree instances + 40 aggregate instances = 82
+instances (2.35x fewer)**; L0/L1/L2 counts 20/19/3; ReleaseFast 120 Hz uncapped **8.47-8.54 ms**,
+60 fps capped; `zig build test` green. A 20 px yaw move (82 px/s at 4K) showed no popping in a
+screenshot pair.
+
+**The <=1 px transition target is not met with the current coarsened tree LODs.** Forcing each LOD
+at the same pose with `VOXEL_TREE_FORCE_LOD=0/1/2` and `VOXEL_TREE_AGG=0` gives a LOD0-vs-LOD1
+full-frame difference of mean RGB **2.01/1.88/2.54**, **3.24 %** of pixels >8 levels and **max 192**;
+in the central-tree crop it is **4.81 %** >8. LOD1 is a three-cone tree and LOD0 a five-cone tree,
+so the silhouette changes by tens of pixels at the near threshold. Hiding that behind hysteresis
+would still be a visible LOD pop, not a <=1 px transition.
+
+12.4 therefore remains open. The next choice is explicit: (a) keep LOD0 inside the visible range and
+move coarsening to the aggregate/far path (visual error 0 px, fewer usable LODs), (b) build a
+gradual, error-bounded LOD chain and retune the thresholds from measured error, or (c) revise the
+target and accept the stylised hard switch. The instance-merging and 60 fps parts of the task pass.

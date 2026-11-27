@@ -360,6 +360,12 @@ pub fn main(init: std.process.Init) !void {
     if (init.environ_map.get("VOXEL_TREE_AGG")) |raw| {
         if (raw.len > 0 and raw[0] == '0') props.aggregate_distance = 1.0e9;
     }
+    if (init.environ_map.get("VOXEL_TREE_FORCE_LOD")) |raw| {
+        if (raw.len > 0) {
+            const v = std.fmt.parseInt(u8, raw, 10) catch 255;
+            if (v <= 3) props.force_lod = v;
+        }
+    }
     props.lod_focal = foliage_anim.focalPixels(@floatFromInt(window.height), camera.fov_y_deg);
     try props.uploadTrees(
         alloc,
