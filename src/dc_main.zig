@@ -57,13 +57,16 @@ const HudStats = struct {
     shore: usize,
     fly_speed: f32,
     edits: usize,
+    sun_hours: f32,
+    sun_elevation: f32,
+    sun_paused: bool,
 };
 
 /// The engine's HUD (baked atlas, panel behind the text), at a small scale for a 4K window.
 fn drawHud(hud: *vz.gfx.Hud, width: i32, height: i32, s: HudStats) void {
     hud.begin(width, height);
     hud.scale = 0.85;
-    hud.panel(0, 0, 900, 8 + 5 * hud.lineHeight(), 0.55);
+    hud.panel(0, 0, 900, 8 + 7 * hud.lineHeight(), 0.55);
 
     var buffer: [192]u8 = undefined;
     var y: f32 = 8;
@@ -92,6 +95,17 @@ fn drawHud(hud: *vz.gfx.Hud, width: i32, height: i32, s: HudStats) void {
     } else |_| {}
     y += hud.lineHeight();
 
+    hud.setColour(1.0, 0.85, 0.45);
+    const hours = @mod(s.sun_hours, 24.0);
+    const hour: u32 = @intFromFloat(@floor(hours));
+    const minute: u32 = @intFromFloat(@floor((hours - @floor(hours)) * 60.0));
+    if (std.fmt.bufPrint(&buffer, "TIME {d:0>2}:{d:0>2}  SUN {d:.0}  {s}", .{
+        hour, minute, s.sun_elevation, if (s.sun_paused) "PAUSED" else "RUNNING",
+    })) |text| {
+        hud.text(10, y, text);
+    } else |_| {}
+    y += hud.lineHeight();
+
     hud.setColour(0.7, 1.0, 0.7);
     const mode: []const u8 = if (s.flying) "FLY" else if (s.swimming) "SWIM" else "WALK";
     const where: []const u8 = if (s.flying) "AIR" else if (s.swimming) "WATER" else if (s.on_ground) "GROUND" else "AIR";
@@ -103,7 +117,7 @@ fn drawHud(hud: *vz.gfx.Hud, width: i32, height: i32, s: HudStats) void {
     y += hud.lineHeight();
 
     hud.setColour(0.6, 0.6, 0.6);
-    if (std.fmt.bufPrint(&buffer, "F1 HUD  F FLY  TAB MOUSE  WHEEL FLY SPEED", .{})) |text| {
+    if (std.fmt.bufPrint(&buffer, "F1 HUD  F FLY  TAB MOUSE  P PAUSE  ,/. TIME  1-4 DAWN/NOON/DUSK/MIDNIGHT", .{})) |text| {
         hud.text(10, y, text);
     } else |_| {}
 
@@ -218,7 +232,10 @@ pub fn main(init: std.process.Init) !void {
         if (raw.len > 0 and raw[0] == '0') ao_enabled = false;
     }
     sun.setTime(sun_time);
-    std.debug.print("sun time {d:.3} elevation {d:.1} deg\n", .{ sun_time, sun.elevation() });
+    // Start still so a screenshot/test is reproducible; P resumes the 300 s cycle, comma and
+    // period scrub it, and 1-4 jump to dawn/noon/dusk/midnight.
+    sun.paused = true;
+    std.debug.print("sun time {d:.3} elevation {d:.1} deg paused={s}\n", .{ sun_time, sun.elevation(), if (sun.paused) "true" else "false" });
     var cloud_shift = Vec3.init(0, 0, 0);
     var water_clock: f32 = 0;
     // Height-fog coefficients: a thin layer hugging the low ground, scale height 25 m, reaching
@@ -386,18 +403,30 @@ pub fn main(init: std.process.Init) !void {
 
         input.pump(&window);
         if (input.quit) {
-            dcw.saveWorld(init.io, save_path, sun_time, playerSave(player), edits.items) catch |err| {
+            dcw.saveWorld(init.io, save_path, sun.time, playerSave(player), edits.items) catch |err| {
                 std.debug.print("save on quit failed: {s}\n", .{@errorName(err)});
             };
             break :frame;
         }
         if (input.save_toggle) {
-            dcw.saveWorld(init.io, save_path, sun_time, playerSave(player), edits.items) catch |err| {
+            dcw.saveWorld(init.io, save_path, sun.time, playerSave(player), edits.items) catch |err| {
                 std.debug.print("save failed: {s}\n", .{@errorName(err)});
             };
             std.debug.print("saved {s} ({d} edits)\n", .{ save_path, edits.items.len });
         }
         if (input.hud_toggle) show_hud = !show_hud;
+        if (input.pause_time) {
+            sun.togglePaused();
+            std.debug.print("sun {s} at time {d:.3}\n", .{ if (sun.paused) "paused" else "running", sun.time });
+        }
+        if (input.time_scrub != 0) {
+            sun.setTime(sun.time + @as(f32, @floatFromInt(input.time_scrub)) * 0.02);
+            std.debug.print("sun time {d:.3} ({d:.2} h)\n", .{ sun.time, sun.clockHours() });
+        }
+        if (input.time_jump) |t| {
+            sun.setTime(t);
+            std.debug.print("sun jump time {d:.3} ({d:.2} h)\n", .{ sun.time, sun.clockHours() });
+        }
         if (input.fly_toggle) player.flying = !player.flying;
         if (input.wheel != 0) {
             player.fly_speed *= std.math.pow(f32, 1.25, input.wheel);
@@ -450,6 +479,7 @@ pub fn main(init: std.process.Init) !void {
         var steps: u32 = 0;
         while (accumulator >= fixed_dt and steps < 5) : (steps += 1) {
             player.update(@floatCast(fixed_dt), wish, up, sprint);
+            sun.update(@floatCast(fixed_dt));
             accumulator -= fixed_dt;
         }
         if (steps == 5) accumulator = @mod(accumulator, fixed_dt);
@@ -679,6 +709,9 @@ pub fn main(init: std.process.Init) !void {
                 .shore = scatter.shore.items.len,
                 .fly_speed = player.fly_speed,
                 .edits = edits.items.len,
+                .sun_hours = sun.clockHours(),
+                .sun_elevation = sun.elevation(),
+                .sun_paused = sun.paused,
             });
         }
         window.swap();
