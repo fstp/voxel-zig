@@ -91,7 +91,6 @@ const HudStats = struct {
     update_ms: f32,
     trees: usize,
     rocks: usize,
-    impostors: usize,
     snow: usize,
     shore: usize,
     fly_speed: f32,
@@ -129,7 +128,7 @@ fn drawHud(hud: *vz.gfx.Hud, width: i32, height: i32, s: HudStats) void {
     y += hud.lineHeight();
 
     hud.setColour(0.6, 0.9, 0.6);
-    if (std.fmt.bufPrint(&buffer, "GRASS {d}  TREES {d}  ROCKS {d}  IMPOSTORS {d}  SNOW {d}  SHORE {d}", .{ s.grass, s.trees, s.rocks, s.impostors, s.snow, s.shore })) |text| {
+    if (std.fmt.bufPrint(&buffer, "GRASS {d}  TREES {d}  ROCKS {d}  SNOW {d}  SHORE {d}", .{ s.grass, s.trees, s.rocks, s.snow, s.shore })) |text| {
         hud.text(10, y, text);
     } else |_| {}
     y += hud.lineHeight();
@@ -466,7 +465,7 @@ pub fn main(init: std.process.Init) !void {
     if (init.environ_map.get("VOXEL_TREE_FORCE_LOD")) |raw| {
         if (raw.len > 0) {
             const v = std.fmt.parseInt(u8, raw, 10) catch 255;
-            if (v <= 3) props.force_lod = v;
+            if (v <= 2) props.force_lod = v;
         }
     }
     props.lod_focal = foliage_anim.focalPixels(@floatFromInt(window.height), camera.fov_y_deg);
@@ -474,19 +473,33 @@ pub fn main(init: std.process.Init) !void {
     // projected pixel size the LOD chooser uses, so a pose can be placed exactly at a switch.
     if (init.environ_map.get("VOXEL_TREE_DEBUG")) |raw| {
         if (raw.len > 0 and raw[0] == '1') {
-            std.debug.print("tree debug: focal {d:.1} px, {d} trees\n", .{ props.lod_focal, scatter.trees.items.len });
-            var shown: usize = 0;
+            std.debug.print("tree debug: focal {d:.1} px, {d} trees, aggregate cutoff {d:.0} m\n",
+                .{ props.lod_focal, scatter.trees.items.len, props.aggregate_distance });
+            // Top-10 nearest, so the print answers "what LOD has the closest tree" (ADR 0046).
+            const Item = struct { d: f32, x: f32, z: f32, px: f32, lod: u8 };
+            var items: [10]Item = undefined;
+            var n: usize = 0;
             for (scatter.trees.items) |t| {
                 const dx = t.pos[0] - player.position.x;
                 const dz = t.pos[2] - player.position.z;
                 const d = @sqrt(dx * dx + dz * dz);
-                if (d > 160.0) continue;
+                if (n == items.len and d >= items[n - 1].d) continue;
                 const px = 6.5 * t.scale * props.lod_focal / @max(d, 0.1);
-                std.debug.print("  tree {d:.1} {d:.1} | dist {d:.1} m | {d:.0} px | lod {d}\n",
-                    .{ t.pos[0], t.pos[2], d, px, foliage_anim.lodForPixels(px, 0) });
-                shown += 1;
-                if (shown >= 14) break;
+                const it = Item{ .d = d, .x = t.pos[0], .z = t.pos[2], .px = px, .lod = foliage_anim.lodForPixels(px, 0) };
+                var slot: usize = if (n < items.len) n else items.len - 1;
+                while (slot > 0 and items[slot - 1].d > it.d) : (slot -= 1) {
+                    items[slot] = items[slot - 1];
+                }
+                items[slot] = it;
+                if (n < items.len) n += 1;
             }
+            var max_lod: u8 = 0;
+            for (items[0..n]) |it| {
+                if (it.lod > max_lod) max_lod = it.lod;
+                std.debug.print("  tree {d:.1} {d:.1} | dist {d:.1} m | {d:.0} px | lod {d}\n",
+                    .{ it.x, it.z, it.d, it.px, it.lod });
+            }
+            std.debug.print("  nearest 10: max lod {d} (aggregate cutoff {d:.0} m)\n", .{ max_lod, props.aggregate_distance });
         }
     }
     try props.uploadTrees(
@@ -1022,7 +1035,7 @@ pub fn main(init: std.process.Init) !void {
         }
         q_grass.end();
         q_props.begin();
-        props.drawTrees(vp, camera.position, camera.right(), camera.up(), lighting.sun_dir, lighting.sun_colour, lighting.ambient_sky, lighting.ambient_ground, fog_col, fog_sun, fog_density, fog_height, fog_base, water_clock, &shadow, scatter.trees.items);
+        props.drawTrees(vp, camera.position, lighting.sun_dir, lighting.sun_colour, lighting.ambient_sky, lighting.ambient_ground, fog_col, fog_sun, fog_density, fog_height, fog_base, water_clock, &shadow, scatter.trees.items);
         if (!tree_stats_logged) {
             props.logTreeStats();
             tree_stats_logged = true;
@@ -1078,7 +1091,6 @@ pub fn main(init: std.process.Init) !void {
                 .update_ms = stream_update_ms,
                 .trees = scatter.trees.items.len,
                 .rocks = scatter.rocks.items.len,
-                .impostors = props.last_impostor_count,
                 .snow = scatter.snow.items.len,
                 .shore = scatter.shore.items.len,
                 .fly_speed = player.fly_speed,

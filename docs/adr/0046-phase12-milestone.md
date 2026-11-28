@@ -103,8 +103,13 @@ is 75 px (which would need 131 m). So:
 - **LOD2 and the impostor path are dead code** at any realistic density; the impostor tier would
   need a 131 m tree, which is outside the 128 m patch.
 
-That is recorded rather than removed in this pass: deleting the impostor path (shader, texture, VAO,
-draw branch, ~100 lines) is a separate, reviewable change.
+**Removed (task 14.5, commit follows):** the impostor shader pair, the atlas bake pass and its
+framebuffer, the VAO/VBO/texture, `drawImpostors`, the `lod == 3` branch, `last_impostor_count` and
+the HUD field, plus the now-unused `right`/`up` parameters of `drawTrees`. `lodForPixels` floors at
+LOD2. Verified after removal: tree.sav 1,129 trees / 836 aggregate / worst 16.77-16.86 ms / props
+1.50 ms / RSS 260 MB; peak.sav 1,066 trees / 890 aggregate / worst 16.83-16.90 ms / props 1.76 ms;
+`nearest 10: max lod 0`. The removed path never issued a draw, so draw calls stay at 62 and the
+image is unchanged by construction.
 
 ## Why the frame lines miss by fractions of a millisecond
 

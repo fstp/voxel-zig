@@ -58,14 +58,16 @@ pub fn lodForPixels(pixels: f32, prev: u8) u8 {
     if (pixels >= t0) return 0;
     if (pixels >= t1) return 1;
     if (pixels >= t2) return 2;
-    return 3;
+    // The third tier used to be an impostor card. Aggregation takes over at 55 m where a tree is
+    // still ~177 px tall, so the impostor was unreachable and has been removed (ADR 0046, 14.5).
+    return 2;
 }
 
 test "LOD selection uses projected pixels with hysteresis" {
     try std.testing.expectEqual(@as(u8, 0), lodForPixels(300.0, 255));
     try std.testing.expectEqual(@as(u8, 1), lodForPixels(150.0, 255));
     try std.testing.expectEqual(@as(u8, 2), lodForPixels(90.0, 255));
-    try std.testing.expectEqual(@as(u8, 3), lodForPixels(40.0, 255));
+    try std.testing.expectEqual(@as(u8, 2), lodForPixels(40.0, 255)); // no impostor tier any more
     // Just above the LOD0 boundary, a previous LOD1 stays LOD1 inside the band.
     try std.testing.expectEqual(@as(u8, 1), lodForPixels(228.0, 1));
     try std.testing.expectEqual(@as(u8, 0), lodForPixels(228.0, 255));

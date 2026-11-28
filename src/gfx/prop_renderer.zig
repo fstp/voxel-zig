@@ -464,93 +464,6 @@ const bake_fragment_src: [:0]const u8 =
     \\}
 ;
 
-const impostor_vertex_src: [:0]const u8 =
-    \\#version 330 core
-    \\layout(location = 0) in vec3 a_pos;
-    \\layout(location = 1) in vec3 a_misc; // yaw, scale, tint
-    \\uniform mat4 u_view_proj;
-    \\uniform vec3 u_right;
-    \\uniform vec3 u_up;
-    \\uniform vec3 u_eye;
-    \\out vec2 v_atlas;
-    \\out vec3 v_world;
-    \\out float v_tint;
-    \\out vec3 v_dir;
-    \\void main() {
-    \\    float yaw = a_misc.x;
-    \\    float scale = a_misc.y;
-    \\    float h = 6.5 * scale;
-    \\    float w = 3.4 * scale;
-    \\    float cx = (gl_VertexID == 1 || gl_VertexID == 3) ? 0.5 : -0.5;
-    \\    float cy = (gl_VertexID >= 2) ? 1.0 : 0.0;
-    \\    vec3 world = a_pos + u_right * (cx * w) + u_up * (cy * h);
-    \\    vec3 center = a_pos + vec3(0.0, h * 0.5, 0.0);
-    \\    vec3 dir = normalize(u_eye - center);
-    \\    float c = cos(-yaw);
-    \\    float s = sin(-yaw);
-    \\    v_dir = vec3(dir.x * c - dir.z * s, dir.y, dir.x * s + dir.z * c);
-    \\    v_world = world;
-    \\    v_tint = a_misc.z;
-    \\    gl_Position = u_view_proj * vec4(world, 1.0);
-    \\}
-;
-
-const impostor_fragment_src: [:0]const u8 =
-    \\#version 330 core
-    \\in vec2 v_atlas;
-    \\in vec3 v_world;
-    \\in float v_tint;
-    \\in vec3 v_dir;
-    \\uniform sampler2D u_atlas;
-    \\uniform vec3 u_eye;
-    \\uniform vec3 u_sun_dir;
-    \\uniform vec3 u_fog_colour;
-    \\uniform vec3 u_fog_sun;
-    \\uniform float u_fog_density;
-    \\uniform float u_fog_height;
-    \\uniform float u_fog_base;
-    \\out vec4 frag;
-    \\vec2 hemi_oct(vec3 d) {
-    \\    d = normalize(d);
-    \\    vec2 p = d.xz / (abs(d.x) + abs(d.y) + abs(d.z) + 1e-5);
-    \\    return p * 0.5 + 0.5;
-    \\}
-    \\void main() {
-    \\    vec2 uv = hemi_oct(v_dir);
-    \\    vec2 g = uv * 8.0 - 0.5;
-    \\    vec2 fl = floor(g);
-    \\    vec2 fr = fract(g);
-    \\    vec2 c0, c1, c2;
-    \\    float w0, w1, w2;
-    \\    if (fr.x + fr.y <= 1.0) {
-    \\        c0 = fl;              w0 = 1.0 - fr.x - fr.y;
-    \\        c1 = fl + vec2(1,0);  w1 = fr.x;
-    \\        c2 = fl + vec2(0,1);  w2 = fr.y;
-    \\    } else {
-    \\        c0 = fl + vec2(1,1);  w0 = fr.x + fr.y - 1.0;
-    \\        c1 = fl + vec2(1,0);  w1 = 1.0 - fr.y;
-    \\        c2 = fl + vec2(0,1);  w2 = 1.0 - fr.x;
-    \\    }
-    \\    vec2 uv0 = (clamp(c0, vec2(0.0), vec2(7.0)) + 0.5) / 8.0;
-    \\    vec2 uv1 = (clamp(c1, vec2(0.0), vec2(7.0)) + 0.5) / 8.0;
-    \\    vec2 uv2 = (clamp(c2, vec2(0.0), vec2(7.0)) + 0.5) / 8.0;
-    \\    vec4 s = texture(u_atlas, uv0) * w0 + texture(u_atlas, uv1) * w1 + texture(u_atlas, uv2) * w2;
-    \\    if (s.a < 0.5) discard;
-    \\    vec3 c = s.rgb * (0.8 + 0.4 * v_tint) * 0.30;
-    \\    c = clamp((c * (2.51 * c + 0.03)) / (c * (2.43 * c + 0.59) + 0.14), 0.0, 1.0);
-    \\    vec3 outc = pow(max(c, 0.0), vec3(0.4545));
-    \\    vec3 ray = v_world - u_eye;
-    \\    float dist = length(ray);
-    \\    float H = max(u_fog_height, 1.0);
-    \\    float k = ray.y / H;
-    \\    float d0 = u_fog_density * exp(-(u_eye.y - u_fog_base) / H);
-    \\    float tau = abs(k) > 1e-4 ? d0 * dist * (1.0 - exp(-k)) / k : d0 * dist;
-    \\    float fog = 1.0 - exp(-max(tau, 0.0));
-    \\    vec3 fogc = mix(u_fog_colour, u_fog_sun, 0.15);
-    \\    outc = mix(outc, fogc, fog);
-    \\    frag = vec4(outc, 1.0);
-    \\}
-;
 
 const ATLAS_SIZE: usize = 1024;
 const ATLAS_GRID: usize = 8;
@@ -629,11 +542,6 @@ pub const PropRenderer = struct {
     shore_instances: u32 = 0,
     shore_count: usize = 0,
     rock_tex: [3]u32 = .{ 0, 0, 0 },
-    impostor_shader: ?Shader = null,
-    impostor_vao: u32 = 0,
-    impostor_vbo: u32 = 0,
-    impostor_tex: u32 = 0,
-    last_impostor_count: usize = 0,
     /// World-unit distance at which per-part wind fades out; set by the app from its screen error.
     animation_cutoff: f32 = 95.0,
     animation_fade: f32 = 15.0,
@@ -712,19 +620,6 @@ pub const PropRenderer = struct {
         }
         gl.BindTexture(gl.TEXTURE_2D, 0);
 
-        self.impostor_shader = try Shader.init(impostor_vertex_src, impostor_fragment_src);
-        gl.GenBuffers(1, @ptrCast(&self.impostor_vbo));
-        gl.GenVertexArrays(1, @ptrCast(&self.impostor_vao));
-        gl.BindVertexArray(self.impostor_vao);
-        gl.BindBuffer(gl.ARRAY_BUFFER, self.impostor_vbo);
-        gl.EnableVertexAttribArray(0);
-        gl.VertexAttribPointer(0, 3, gl.FLOAT, gl.FALSE, @sizeOf(Prop), 0);
-        gl.VertexAttribDivisor(0, 1);
-        gl.EnableVertexAttribArray(1);
-        gl.VertexAttribPointer(1, 3, gl.FLOAT, gl.FALSE, @sizeOf(Prop), @sizeOf([3]f32));
-        gl.VertexAttribDivisor(1, 1);
-        gl.BindVertexArray(0);
-        try bakeAtlas(&self);
         return self;
     }
 
@@ -742,10 +637,6 @@ pub const PropRenderer = struct {
         for (0..3) |i| {
             if (self.rock_tex[i] != 0) gl.DeleteTextures(1, @ptrCast(&self.rock_tex[i]));
         }
-        if (self.impostor_shader) |*sh| sh.deinit();
-        if (self.impostor_vao != 0) gl.DeleteVertexArrays(1, @ptrCast(&self.impostor_vao));
-        if (self.impostor_vbo != 0) gl.DeleteBuffers(1, @ptrCast(&self.impostor_vbo));
-        if (self.impostor_tex != 0) gl.DeleteTextures(1, @ptrCast(&self.impostor_tex));
         self.depth_shader.deinit();
         self.shader.deinit();
     }
@@ -956,8 +847,6 @@ pub const PropRenderer = struct {
         self: *PropRenderer,
         view_projection: Mat4,
         eye: Vec3,
-        right: Vec3,
-        up: Vec3,
         sun_dir: Vec3,
         sun_colour: Vec3,
         ambient_sky: Vec3,
@@ -975,11 +864,9 @@ pub const PropRenderer = struct {
         var l0: [MAX_PER_LOD]Prop = undefined;
         var l1: [MAX_PER_LOD]Prop = undefined;
         var l2: [MAX_PER_LOD]Prop = undefined;
-        var l3: [MAX_PER_LOD]Prop = undefined;
         var n0: usize = 0;
         var n1: usize = 0;
         var n2: usize = 0;
-        var n3: usize = 0;
         const cutoff2 = self.aggregate_distance * self.aggregate_distance;
         for (trees, 0..) |t, i| {
             const adx = t.pos[0] - self.aggregate_center_x;
@@ -1005,9 +892,11 @@ pub const PropRenderer = struct {
                     l2[n2] = t;
                     n2 += 1;
                 },
-                else => if (n3 < MAX_PER_LOD) {
-                    l3[n3] = t;
-                    n3 += 1;
+                // No tier beyond LOD2: aggregation at 55 m (where a tree is still ~177 px) takes
+                // over first, so the old impostor tier was unreachable (ADR 0046, task 14.5).
+                else => if (n2 < MAX_PER_LOD) {
+                    l2[n2] = t;
+                    n2 += 1;
                 },
             }
         }
@@ -1016,11 +905,9 @@ pub const PropRenderer = struct {
         self.drawLod(0, l0[0..n0], time);
         self.drawLod(1, l1[0..n1], time);
         self.drawLod(2, l2[0..n2], time);
-        self.last_impostor_count = n3;
-        drawImpostors(self, l3[0..n3], view_projection, eye, right, up, sun_dir, sun_colour, fog_colour, fog_sun, fog_density, fog_height, fog_base);
 
-        self.last_tree_instances = n0 + n1 + n2 + n3;
-        self.last_lod_counts = .{ n0, n1, n2, n3 };
+        self.last_tree_instances = n0 + n1 + n2;
+        self.last_lod_counts = .{ n0, n1, n2, 0 };
         self.last_aggregate_instances = 0;
         // One merged aggregate now; the loop stays so a future split needs no call-site change.
         for (self.aggregates[0..self.aggregate_count]) |*a| {
@@ -1193,109 +1080,6 @@ pub const PropRenderer = struct {
     }
 };
 
-    fn bakeAtlas(self: *PropRenderer) !void {
-        const sun_dir = Vec3.init(0.45, 0.75, 0.40).normalized();
-        var bake_shader = try Shader.init(bake_vertex_src, bake_fragment_src);
-        defer bake_shader.deinit();
-
-        gl.GenTextures(1, @ptrCast(&self.impostor_tex));
-        gl.BindTexture(gl.TEXTURE_2D, self.impostor_tex);
-        gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, ATLAS_SIZE, ATLAS_SIZE, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
-        gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-        gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-        gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-        gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-
-        var fbo: u32 = 0;
-        var rbo: u32 = 0;
-        gl.GenFramebuffers(1, @ptrCast(&fbo));
-        gl.GenRenderbuffers(1, @ptrCast(&rbo));
-        gl.BindFramebuffer(gl.FRAMEBUFFER, fbo);
-        gl.FramebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, self.impostor_tex, 0);
-        gl.BindRenderbuffer(gl.RENDERBUFFER, rbo);
-        gl.RenderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT24, ATLAS_SIZE, ATLAS_SIZE);
-        gl.FramebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, rbo);
-        defer {
-            gl.BindFramebuffer(gl.FRAMEBUFFER, 0);
-            gl.DeleteFramebuffers(1, @ptrCast(&fbo));
-            gl.DeleteRenderbuffers(1, @ptrCast(&rbo));
-            gl.BindTexture(gl.TEXTURE_2D, 0);
-        }
-        if (gl.CheckFramebufferStatus(gl.FRAMEBUFFER) != gl.FRAMEBUFFER_COMPLETE) return error.ImpostorFramebuffer;
-
-        gl.Viewport(0, 0, ATLAS_SIZE, ATLAS_SIZE);
-        gl.ClearColor(0, 0, 0, 0);
-        gl.Clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-        gl.Enable(gl.DEPTH_TEST);
-        gl.DepthMask(gl.TRUE);
-        gl.Disable(gl.BLEND);
-        gl.Disable(gl.CULL_FACE);
-        bake_shader.use();
-        bake_shader.setVec3("u_sun_dir", .{ sun_dir.x, sun_dir.y, sun_dir.z });
-
-        const target = Vec3.init(0, 3.2, 0);
-        const proj = Mat4.ortho(-4.4, 4.4, -4.4, 4.4, 0.1, 60);
-        for (0..ATLAS_GRID) |j| {
-            for (0..ATLAS_GRID) |i| {
-                const u = (@as(f32, @floatFromInt(i)) + 0.5) / @as(f32, @floatFromInt(ATLAS_GRID));
-                const v = (@as(f32, @floatFromInt(j)) + 0.5) / @as(f32, @floatFromInt(ATLAS_GRID));
-                const dir = hemiDecode(u, v);
-                const eye = target.add(dir.scale(24.0));
-                const up_vec = if (@abs(dir.y) > 0.95) Vec3.init(0, 0, 1) else Vec3.init(0, 1, 0);
-                const view = Mat4.lookAt(eye, target, up_vec);
-                const mvp = proj.mul(view);
-                gl.Viewport(@intCast(i * ATLAS_CELL), @intCast(j * ATLAS_CELL), @intCast(ATLAS_CELL), @intCast(ATLAS_CELL));
-                bake_shader.setMat4("u_mvp", mvp.m);
-                const mesh = self.assets.get(.tree_lod0);
-                gl.BindVertexArray(mesh.vao);
-                gl.DrawElements(gl.TRIANGLES, @intCast(mesh.index_count), gl.UNSIGNED_INT, 0);
-            }
-        }
-        gl.BindVertexArray(0);
-        gl.Viewport(0, 0, 3840, 2103);
-    }
-
-    fn drawImpostors(
-        self: *PropRenderer,
-        props: []const Prop,
-        view_projection: Mat4,
-        eye: Vec3,
-        right: Vec3,
-        up: Vec3,
-        sun_dir: Vec3,
-        sun_colour: Vec3,
-        fog_colour: Vec3,
-        fog_sun: Vec3,
-        fog_density: f32,
-        fog_height: f32,
-        fog_base: f32,
-    ) void {
-        if (props.len == 0) return;
-        const sh = if (self.impostor_shader) |*sh| sh else return;
-        _ = sun_colour;
-        gl.BindBuffer(gl.ARRAY_BUFFER, self.impostor_vbo);
-        gl.BufferData(gl.ARRAY_BUFFER, @intCast(props.len * @sizeOf(Prop)), props.ptr, gl.STATIC_DRAW);
-        gl.Enable(gl.DEPTH_TEST);
-        gl.DepthMask(gl.TRUE);
-        gl.Disable(gl.BLEND);
-        gl.Disable(gl.CULL_FACE);
-        sh.use();
-        sh.setMat4("u_view_proj", view_projection.m);
-        sh.setVec3("u_eye", .{ eye.x, eye.y, eye.z });
-        sh.setVec3("u_right", .{ right.x, right.y, right.z });
-        sh.setVec3("u_up", .{ up.x, up.y, up.z });
-        sh.setVec3("u_sun_dir", .{ sun_dir.x, sun_dir.y, sun_dir.z });
-        sh.setVec3("u_fog_colour", .{ fog_colour.x, fog_colour.y, fog_colour.z });
-        sh.setVec3("u_fog_sun", .{ fog_sun.x, fog_sun.y, fog_sun.z });
-        sh.setFloat("u_fog_density", fog_density);
-        sh.setFloat("u_fog_height", fog_height);
-        sh.setFloat("u_fog_base", fog_base);
-        sh.setInt("u_atlas", 0);
-        gl.ActiveTexture(gl.TEXTURE0);
-        gl.BindTexture(gl.TEXTURE_2D, self.impostor_tex);
-        gl.BindVertexArray(self.impostor_vao);
-        gl.DrawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, @intCast(props.len));
-    }
 
     fn hemiDecode(u: f32, v: f32) Vec3 {
         const a = u * 2.0 - 1.0;
