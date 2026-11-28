@@ -462,6 +462,16 @@ pub fn main(init: std.process.Init) !void {
     if (init.environ_map.get("VOXEL_TREE_AGG")) |raw| {
         if (raw.len > 0 and raw[0] == '0') props.aggregate_distance = 1.0e9;
     }
+    // ADR 0047 / task 13.1: draw trees from an imported GLB instead of the procedural mesh.
+    if (init.environ_map.get("VOXEL_TREE_GLB")) |path| {
+        if (path.len > 0) {
+            const tris = props.replaceTreeMeshFromGlb(alloc, io, path, 6.5, 2.2, .{ 1.7, 1.0, 0.30 }) catch |err| blk: {
+                std.debug.print("tree glb: failed to load {s} ({s}); procedural mesh kept\n", .{ path, @errorName(err) });
+                break :blk 0;
+            };
+            if (tris > 0) std.debug.print("tree glb: {s} as LOD0, {d} triangles, scaled to 6.5 m\n", .{ path, tris });
+        }
+    }
     if (init.environ_map.get("VOXEL_TREE_FORCE_LOD")) |raw| {
         if (raw.len > 0) {
             const v = std.fmt.parseInt(u8, raw, 10) catch 255;

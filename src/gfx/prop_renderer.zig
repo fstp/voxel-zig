@@ -3,6 +3,7 @@
 //! vertex-colour program with vertex-rigidity wind for foliage and none for rocks.
 
 const std = @import("std");
+const glb = @import("glb.zig");
 const gl = @import("gl");
 const Shader = @import("shader.zig").Shader;
 const Mat4 = @import("../math/mat4.zig").Mat4;
@@ -657,6 +658,60 @@ pub const PropRenderer = struct {
     }
 
     /// Uploads the rock list once per scatter build.
+    /// Replaces the tree LOD0 mesh with an imported GLB (task 13.1). `target_height` scales the
+    /// asset so its bounding box matches the procedural tree, which is what the LOD chooser and the
+    /// aggregate merge assume. Returns the triangle count that was uploaded.
+    pub fn replaceTreeMeshFromGlb(
+        self: *PropRenderer,
+        alloc: std.mem.Allocator,
+        io: std.Io,
+        path: []const u8,
+        target_height: f32,
+        lin: f32,
+        /// Per-channel multipliers applied after the gamma decode. Kenney's palette leans cyan
+        /// (leafsGreen 0.16/0.79/0.67) where this engine's foliage is yellow-green, so the blue
+        /// channel is pulled down hard; bark passes through.
+        col_scale: [3]f32,
+    ) !usize {
+        var glb_mesh = try glb.loadFile(alloc, io, path, lin);
+        defer glb_mesh.deinit(alloc);
+        if (glb_mesh.verts.items.len == 0) return error.EmptyGlb;
+
+        var lo: f32 = std.math.floatMax(f32);
+        var hi: f32 = -std.math.floatMax(f32);
+        for (glb_mesh.verts.items) |v| {
+            lo = @min(lo, v.pos[1]);
+            hi = @max(hi, v.pos[1]);
+        }
+        const scale = if (hi - lo > 1e-4) target_height / (hi - lo) else 1.0;
+
+        var md = MeshData{};
+        errdefer md.deinit(alloc);
+        try md.verts.ensureTotalCapacity(alloc, glb_mesh.verts.items.len);
+        for (glb_mesh.verts.items) |v| {
+            md.verts.appendAssumeCapacity(.{
+                .pos = .{ v.pos[0] * scale, (v.pos[1] - lo) * scale, v.pos[2] * scale },
+                .nrm = v.nrm,
+                .col = .{
+                    @min(v.col[0] * col_scale[0], 1.0),
+                    @min(v.col[1] * col_scale[1], 1.0),
+                    @min(v.col[2] * col_scale[2], 1.0),
+                },
+                .rigid = 0,
+                .pivot = 0,
+            });
+        }
+        try md.idx.appendSlice(alloc, glb_mesh.idx.items);
+
+        const tris = md.idx.items.len / 3;
+        const slot = &self.assets.meshes[@intFromEnum(AssetId.tree_lod0)];
+        if (slot.vao != 0) gl.DeleteVertexArrays(1, @ptrCast(&slot.vao));
+        if (slot.vbo != 0) gl.DeleteBuffers(1, @ptrCast(&slot.vbo));
+        if (slot.ebo != 0) gl.DeleteBuffers(1, @ptrCast(&slot.ebo));
+        slot.* = try uploadMesh(alloc, &md, self.tree_instances[0]);
+        return tris;
+    }
+
     pub fn uploadRocks(self: *PropRenderer, rocks: []const Prop) void {
         self.rock_count = rocks.len;
         if (rocks.len == 0) return;

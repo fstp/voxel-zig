@@ -71,4 +71,5 @@ test {
     _ = @import("world/blade_stream.zig");
     _ = @import("player/dc_player.zig");
     _ = @import("gfx/prop_renderer.zig");
+    _ = @import("gfx/glb.zig");
 }
