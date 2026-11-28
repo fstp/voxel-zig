@@ -210,6 +210,7 @@ pub const GrassRenderer = struct {
     vao: u32 = 0,
     vbo: u32 = 0,
     count: usize = 0,
+    capacity: usize = 0,
     animation_cutoff: f32 = 95.0,
     animation_fade: f32 = 15.0,
 
@@ -247,24 +248,50 @@ pub const GrassRenderer = struct {
         gl.DrawArraysInstanced(gl.TRIANGLE_STRIP, 0, 7, @intCast(self.count));
     }
 
-    pub fn upload(self: *GrassRenderer, blades: []const Blade) void {
-        self.count = blades.len;
+    /// Allocate the instance buffer for `capacity` blades. Called once at startup and only again
+    /// if the stream outgrows it; the contents are undefined until ranges are uploaded.
+    pub fn ensureCapacity(self: *GrassRenderer, capacity: usize) void {
         if (self.vao == 0) {
             gl.GenVertexArrays(1, @ptrCast(&self.vao));
             gl.GenBuffers(1, @ptrCast(&self.vbo));
-            gl.BindVertexArray(self.vao);
-            gl.BindBuffer(gl.ARRAY_BUFFER, self.vbo);
-            gl.EnableVertexAttribArray(0);
-            gl.VertexAttribPointer(0, 3, gl.FLOAT, gl.FALSE, @sizeOf(Blade), 0);
-            gl.VertexAttribDivisor(0, 1);
-            gl.EnableVertexAttribArray(1);
-            gl.VertexAttribPointer(1, 4, gl.FLOAT, gl.FALSE, @sizeOf(Blade), @sizeOf([3]f32));
-            gl.VertexAttribDivisor(1, 1);
-            gl.BindVertexArray(0);
         }
+        if (capacity <= self.capacity) return;
+        gl.BindBuffer(gl.ARRAY_BUFFER, self.vbo);
+        gl.BufferData(gl.ARRAY_BUFFER, @intCast(capacity * @sizeOf(Blade)), null, gl.DYNAMIC_DRAW);
+        self.capacity = capacity;
+    }
+
+    /// Copy one partition's blades into its persistent slot. This is the only upload a patch move
+    /// performs for the partitions that entered; nothing else is re-sent.
+    pub fn uploadRange(self: *GrassRenderer, offset: usize, blades: []const Blade) void {
         if (blades.len == 0) return;
         gl.BindBuffer(gl.ARRAY_BUFFER, self.vbo);
-        gl.BufferData(gl.ARRAY_BUFFER, @intCast(blades.len * @sizeOf(Blade)), blades.ptr, gl.STATIC_DRAW);
+        gl.BufferSubData(
+            gl.ARRAY_BUFFER,
+            @intCast(offset * @sizeOf(Blade)),
+            @intCast(blades.len * @sizeOf(Blade)),
+            blades.ptr,
+        );
+    }
+
+    /// Whole-buffer upload, kept for the one-shot startup path and the tests.
+    pub fn upload(self: *GrassRenderer, blades: []const Blade) void {
+        self.ensureCapacity(blades.len);
+        self.count = blades.len;
+        self.uploadRange(0, blades);
+    }
+
+    fn bindRange(self: *GrassRenderer, offset: usize) void {
+        const bytes: usize = offset * @sizeOf(Blade);
+        gl.BindVertexArray(self.vao);
+        gl.BindBuffer(gl.ARRAY_BUFFER, self.vbo);
+        gl.EnableVertexAttribArray(0);
+        gl.VertexAttribPointer(0, 3, gl.FLOAT, gl.FALSE, @sizeOf(Blade), bytes);
+        gl.VertexAttribDivisor(0, 1);
+        gl.EnableVertexAttribArray(1);
+        gl.VertexAttribPointer(1, 4, gl.FLOAT, gl.FALSE, @sizeOf(Blade), bytes + @sizeOf([3]f32));
+        gl.VertexAttribDivisor(1, 1);
+        gl.BindVertexArray(0);
     }
 
     pub fn draw(
@@ -283,7 +310,29 @@ pub const GrassRenderer = struct {
         time: f32,
         shadow: *ShadowRenderer,
     ) void {
-        if (self.vao == 0 or self.count == 0) return;
+        self.drawRange(view_projection, eye, sun_dir, sun_colour, ambient_sky, ambient_ground, fog_colour, fog_sun, fog_density, fog_height, fog_base, time, shadow, 0, self.count);
+    }
+
+    /// Draw one partition slot: `offset` and `count` are in instances, not bytes.
+    pub fn drawRange(
+        self: *GrassRenderer,
+        view_projection: Mat4,
+        eye: Vec3,
+        sun_dir: Vec3,
+        sun_colour: Vec3,
+        ambient_sky: Vec3,
+        ambient_ground: Vec3,
+        fog_colour: Vec3,
+        fog_sun: Vec3,
+        fog_density: f32,
+        fog_height: f32,
+        fog_base: f32,
+        time: f32,
+        shadow: *ShadowRenderer,
+        offset: usize,
+        count: usize,
+    ) void {
+        if (self.vao == 0 or count == 0) return;
         gl.Enable(gl.DEPTH_TEST);
         gl.DepthMask(gl.TRUE);
         gl.Disable(gl.BLEND);
@@ -304,7 +353,7 @@ pub const GrassRenderer = struct {
         self.shader.setFloat("u_time", time);
         self.shader.setFloat("u_anim_cutoff", self.animation_cutoff);
         self.shader.setFloat("u_anim_fade", self.animation_fade);
-        gl.BindVertexArray(self.vao);
-        gl.DrawArraysInstanced(gl.TRIANGLE_STRIP, 0, 7, @intCast(self.count));
+        self.bindRange(offset);
+        gl.DrawArraysInstanced(gl.TRIANGLE_STRIP, 0, 7, @intCast(count));
     }
 };

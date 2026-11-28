@@ -32,6 +32,7 @@ pub const world = struct {
     pub const sun = @import("world/sun.zig");
     pub const heightfield_ao = @import("world/heightfield_ao.zig");
     pub const foliage_animation = @import("world/foliage_animation.zig");
+    pub const blade_stream = @import("world/blade_stream.zig");
 };
 
 pub const player = struct {
@@ -67,5 +68,6 @@ test {
     _ = @import("world/noise.zig");
     _ = @import("world/sun.zig");
     _ = @import("world/foliage_animation.zig");
+    _ = @import("world/blade_stream.zig");
     _ = @import("player/dc_player.zig");
 }

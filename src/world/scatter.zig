@@ -43,41 +43,45 @@ pub const Scatter = struct {
     }
 };
 
+/// Partition edge. One DC chunk, so patch streaming moves one strip of these at a time.
+pub const CELL_M: f32 = 32.0;
+/// Cells whose centre is within this distance of the patch centre carry blades. The shader thins
+/// blades out between 55 and 120 m anyway, so the quantised edge this leaves is invisible.
+pub const ACTIVE_RADIUS: f32 = 96.0;
 const GRID_STEP: f32 = 2.0;
 const GRID_N: usize = 129; // 256 m patch / 2 m + 1
 
+/// A 2 m sample lattice over a rectangle. Slice-backed because a patch build needs 129x129
+/// while a single 32 m partition needs only 25x25 around its cell.
 const HeightGrid = struct {
-    h: [GRID_N * GRID_N]f32,
-    dens: [GRID_N * GRID_N]f32,
+    h: []f32,
+    dens: []f32,
+    n: usize,
     min_x: f32,
     min_z: f32,
 
-    fn at(self: *const HeightGrid, x: f32, z: f32) f32 {
-        const fx = std.math.clamp((x - self.min_x) / GRID_STEP, 0, @as(f32, @floatFromInt(GRID_N - 1)) - 0.001);
-        const fz = std.math.clamp((z - self.min_z) / GRID_STEP, 0, @as(f32, @floatFromInt(GRID_N - 1)) - 0.001);
+    fn sample(self: *const HeightGrid, slice: []const f32, x: f32, z: f32) f32 {
+        const limit = @as(f32, @floatFromInt(self.n - 1)) - 0.001;
+        const fx = std.math.clamp((x - self.min_x) / GRID_STEP, 0, limit);
+        const fz = std.math.clamp((z - self.min_z) / GRID_STEP, 0, limit);
         const ix: usize = @intFromFloat(fx);
         const iz: usize = @intFromFloat(fz);
         const tx = fx - @as(f32, @floatFromInt(ix));
         const tz = fz - @as(f32, @floatFromInt(iz));
-        const h00 = self.h[iz * GRID_N + ix];
-        const h10 = self.h[iz * GRID_N + ix + 1];
-        const h01 = self.h[(iz + 1) * GRID_N + ix];
-        const h11 = self.h[(iz + 1) * GRID_N + ix + 1];
+        const base = iz * self.n + ix;
+        const h00 = slice[base];
+        const h10 = slice[base + 1];
+        const h01 = slice[base + self.n];
+        const h11 = slice[base + self.n + 1];
         return (h00 * (1 - tx) + h10 * tx) * (1 - tz) + (h01 * (1 - tx) + h11 * tx) * tz;
     }
 
+    fn at(self: *const HeightGrid, x: f32, z: f32) f32 {
+        return self.sample(self.h, x, z);
+    }
+
     fn density(self: *const HeightGrid, x: f32, z: f32) f32 {
-        const fx = std.math.clamp((x - self.min_x) / GRID_STEP, 0, @as(f32, @floatFromInt(GRID_N - 1)) - 0.001);
-        const fz = std.math.clamp((z - self.min_z) / GRID_STEP, 0, @as(f32, @floatFromInt(GRID_N - 1)) - 0.001);
-        const ix: usize = @intFromFloat(fx);
-        const iz: usize = @intFromFloat(fz);
-        const tx = fx - @as(f32, @floatFromInt(ix));
-        const tz = fz - @as(f32, @floatFromInt(iz));
-        const d00 = self.dens[iz * GRID_N + ix];
-        const d10 = self.dens[iz * GRID_N + ix + 1];
-        const d01 = self.dens[(iz + 1) * GRID_N + ix];
-        const d11 = self.dens[(iz + 1) * GRID_N + ix + 1];
-        return (d00 * (1 - tx) + d10 * tx) * (1 - tz) + (d01 * (1 - tx) + d11 * tx) * tz;
+        return self.sample(self.dens, x, z);
     }
 
     /// Upward component of the normal (1 flat, 0 vertical) from central differences.
@@ -107,54 +111,54 @@ fn blocked(edits: []const dcw.Edit, x: f32, z: f32) bool {
     return false;
 }
 
-/// Builds grass/flowers, trees and rocks for the patch whose south-west corner is
-/// `(min_x, min_z)` and whose side is `size` (normally 256 m). Caller owns the result.
-pub fn build(
+
+/// Blades for one 32 m partition. Same world lattice, same hashes and the same 2 m height
+/// lattice values as the whole-patch build, because the local grid is anchored on the global
+/// 2 m grid; the 8 m halo covers the normal sampling and the blades a tuft spills outside.
+pub fn buildBladesCell(
     alloc: std.mem.Allocator,
     edits: []const dcw.Edit,
-    min_x: f32,
-    min_z: f32,
-    size: f32,
-) !Scatter {
-    var grid: HeightGrid = undefined;
-    grid.min_x = min_x;
-    grid.min_z = min_z;
-    for (0..GRID_N) |iz| {
-        for (0..GRID_N) |ix| {
+    cell_cx: i32,
+    cell_cz: i32,
+    out: *std.ArrayList(Blade),
+) !void {
+    const HALO: f32 = 8.0;
+    const N: usize = 25; // 48 m at 2 m: the 32 m cell plus an 8 m halo each side
+    var h_store: [N * N]f32 = undefined;
+    var d_store: [N * N]f32 = undefined;
+    const min_x = @as(f32, @floatFromInt(cell_cx)) * CELL_M - HALO;
+    const min_z = @as(f32, @floatFromInt(cell_cz)) * CELL_M - HALO;
+    var grid = HeightGrid{ .h = &h_store, .dens = &d_store, .n = N, .min_x = min_x, .min_z = min_z };
+    for (0..N) |iz| {
+        for (0..N) |ix| {
             const x = min_x + @as(f32, @floatFromInt(ix)) * GRID_STEP;
             const z = min_z + @as(f32, @floatFromInt(iz)) * GRID_STEP;
-            grid.h[iz * GRID_N + ix] = dcw.heightAt(x, z);
-            grid.dens[iz * GRID_N + ix] = noise.fbm2(9001, x * 0.03, z * 0.03, 3, 2.0, 0.5);
+            h_store[iz * N + ix] = dcw.heightAt(x, z);
+            d_store[iz * N + ix] = noise.fbm2(9001, x * 0.03, z * 0.03, 3, 2.0, 0.5);
         }
     }
-
-    var out = Scatter{};
-    errdefer out.deinit(alloc);
-
-    const center_x = min_x + size * 0.5;
-    const center_z = min_z + size * 0.5;
 
     // Grass and flowers: one world-anchored lattice. The step never changes with the patch
     // centre, so a given world cell always produces the same jitter; only the acceptance
     // probability fades with distance from the patch centre. This is what keeps blades static
     // while the streaming patch moves underneath them.
     {
-        const radius: f32 = 95.0;
         const step: f32 = 0.25;
-        const ix0: i32 = @intFromFloat(@floor((center_x - radius) / step));
-        const ix1: i32 = @intFromFloat(@ceil((center_x + radius) / step));
-        const iz0: i32 = @intFromFloat(@floor((center_z - radius) / step));
-        const iz1: i32 = @intFromFloat(@ceil((center_z + radius) / step));
+        const cell_lo_x = @as(f32, @floatFromInt(cell_cx)) * CELL_M;
+        const cell_hi_x = cell_lo_x + CELL_M;
+        const cell_lo_z = @as(f32, @floatFromInt(cell_cz)) * CELL_M;
+        const cell_hi_z = cell_lo_z + CELL_M;
+        const ix0: i32 = @intFromFloat(@floor(cell_lo_x / step));
+        const ix1: i32 = @intFromFloat(@ceil(cell_hi_x / step));
+        const iz0: i32 = @intFromFloat(@floor(cell_lo_z / step));
+        const iz1: i32 = @intFromFloat(@ceil(cell_hi_z / step));
         var iz = iz0;
         while (iz <= iz1) : (iz += 1) {
             const z = (@as(f32, @floatFromInt(iz)) + 0.5) * step;
             var ix = ix0;
             while (ix <= ix1) : (ix += 1) {
                 const x = (@as(f32, @floatFromInt(ix)) + 0.5) * step;
-                const dx = x - center_x;
-                const dz = z - center_z;
-                const r2 = dx * dx + dz * dz;
-                if (r2 > radius * radius) continue;
+                if (x < cell_lo_x or x >= cell_hi_x or z < cell_lo_z or z >= cell_hi_z) continue;
                 // Sparse base cover; the clump layer below supplies the dense patches. A little
                 // more base cover keeps the meadow from showing bald ground between tufts.
                 if (rand01(ix, iz, 0x6A55) > 0.12) continue;
@@ -179,7 +183,7 @@ pub fn build(
                 const flower = rand01(ix, iz, 0xF10A) < 0.02 and ny > 0.82;
                 const tint = rand01(ix, iz, 0x1234);
                 const h = dcw.heightAt(px, pz) + micro;
-                try out.blades.append(alloc, .{
+                try out.append(alloc, .{
                     .pos = .{ px, h - 0.02, pz },
                     .yaw = rand01(ix, iz, 0xA5A5) * std.math.tau,
                     .scale = 0.55 + 0.85 * tint,
@@ -195,21 +199,22 @@ pub fn build(
     // uniform carpet. Every clump centre, its radius and every blade offset are hashed from the
     // world cell, so the patches stay put when the streaming patch moves.
     {
-        const radius: f32 = 95.0;
         const clump_step: f32 = 1.3;
-        const ix0: i32 = @intFromFloat(@floor((center_x - radius) / clump_step));
-        const ix1: i32 = @intFromFloat(@ceil((center_x + radius) / clump_step));
-        const iz0: i32 = @intFromFloat(@floor((center_z - radius) / clump_step));
-        const iz1: i32 = @intFromFloat(@ceil((center_z + radius) / clump_step));
+        const cell_lo_x = @as(f32, @floatFromInt(cell_cx)) * CELL_M;
+        const cell_hi_x = cell_lo_x + CELL_M;
+        const cell_lo_z = @as(f32, @floatFromInt(cell_cz)) * CELL_M;
+        const cell_hi_z = cell_lo_z + CELL_M;
+        const ix0: i32 = @intFromFloat(@floor(cell_lo_x / clump_step));
+        const ix1: i32 = @intFromFloat(@ceil(cell_hi_x / clump_step));
+        const iz0: i32 = @intFromFloat(@floor(cell_lo_z / clump_step));
+        const iz1: i32 = @intFromFloat(@ceil(cell_hi_z / clump_step));
         var iz = iz0;
         while (iz <= iz1) : (iz += 1) {
             const zc = (@as(f32, @floatFromInt(iz)) + 0.5) * clump_step;
             var ix = ix0;
             while (ix <= ix1) : (ix += 1) {
                 const xc = (@as(f32, @floatFromInt(ix)) + 0.5) * clump_step;
-                const dx = xc - center_x;
-                const dz = zc - center_z;
-                if (dx * dx + dz * dz > radius * radius) continue;
+                if (xc < cell_lo_x or xc >= cell_hi_x or zc < cell_lo_z or zc >= cell_hi_z) continue;
 
                 // Broad density selects whole regions; the fine noise breaks their edges so the
                 // patches do not look like stamped circles.
@@ -250,7 +255,7 @@ pub fn build(
 
                     const flower = rand01(ix, iz, 0xC600 + @as(u32, @intCast(k))) < 0.04 and cny > 0.82;
                     const tint = rand01(ix, iz, 0xC800 + @as(u32, @intCast(k)));
-                    try out.blades.append(alloc, .{
+                    try out.append(alloc, .{
                         .pos = .{ px, h - 0.02, pz },
                         .yaw = rand01(ix, iz, 0xCA00 + @as(u32, @intCast(k))) * std.math.tau,
                         .scale = 0.55 + 0.85 * tint,
@@ -266,21 +271,22 @@ pub fn build(
     // narrower blades. They share the grass instance stream and world-cell hashing, so they stay
     // put across streaming and need no extra draw call or asset.
     {
-        const radius: f32 = 95.0;
         const step: f32 = 7.0;
-        const ix0: i32 = @intFromFloat(@floor((center_x - radius) / step));
-        const ix1: i32 = @intFromFloat(@ceil((center_x + radius) / step));
-        const iz0: i32 = @intFromFloat(@floor((center_z - radius) / step));
-        const iz1: i32 = @intFromFloat(@ceil((center_z + radius) / step));
+        const cell_lo_x = @as(f32, @floatFromInt(cell_cx)) * CELL_M;
+        const cell_hi_x = cell_lo_x + CELL_M;
+        const cell_lo_z = @as(f32, @floatFromInt(cell_cz)) * CELL_M;
+        const cell_hi_z = cell_lo_z + CELL_M;
+        const ix0: i32 = @intFromFloat(@floor(cell_lo_x / step));
+        const ix1: i32 = @intFromFloat(@ceil(cell_hi_x / step));
+        const iz0: i32 = @intFromFloat(@floor(cell_lo_z / step));
+        const iz1: i32 = @intFromFloat(@ceil(cell_hi_z / step));
         var iz = iz0;
         while (iz <= iz1) : (iz += 1) {
             const zc = (@as(f32, @floatFromInt(iz)) + 0.5) * step;
             var ix = ix0;
             while (ix <= ix1) : (ix += 1) {
                 const xc = (@as(f32, @floatFromInt(ix)) + 0.5) * step;
-                const dx = xc - center_x;
-                const dz = zc - center_z;
-                if (dx * dx + dz * dz > radius * radius) continue;
+                if (xc < cell_lo_x or xc >= cell_hi_x or zc < cell_lo_z or zc >= cell_hi_z) continue;
                 if (rand01(ix, iz, 0xB001) > 0.22) continue;
                 const cx = xc + (rand01(ix, iz, 0xB002) - 0.5) * step * 0.7;
                 const cz = zc + (rand01(ix, iz, 0xB003) - 0.5) * step * 0.7;
@@ -299,7 +305,7 @@ pub fn build(
                     const h = dcw.heightAt(px, pz);
                     if (h < dcw.SEA_LEVEL + 0.35 or h > 66.0) continue;
                     const tint = rand01(ix, iz, 0xB300 + @as(u32, @intCast(k)));
-                    try out.blades.append(alloc, .{
+                    try out.append(alloc, .{
                         .pos = .{ px, h - 0.05, pz },
                         .yaw = rand01(ix, iz, 0xB400 + @as(u32, @intCast(k))) * std.math.tau,
                         .scale = 0.85 + 0.65 * tint,
@@ -314,21 +320,22 @@ pub fn build(
     // Ferns and taller weeds: a second, smaller tuft family with narrow blades and a different
     // colour range. Same mechanism, different distribution and scale.
     {
-        const radius: f32 = 95.0;
         const step: f32 = 4.5;
-        const ix0: i32 = @intFromFloat(@floor((center_x - radius) / step));
-        const ix1: i32 = @intFromFloat(@ceil((center_x + radius) / step));
-        const iz0: i32 = @intFromFloat(@floor((center_z - radius) / step));
-        const iz1: i32 = @intFromFloat(@ceil((center_z + radius) / step));
+        const cell_lo_x = @as(f32, @floatFromInt(cell_cx)) * CELL_M;
+        const cell_hi_x = cell_lo_x + CELL_M;
+        const cell_lo_z = @as(f32, @floatFromInt(cell_cz)) * CELL_M;
+        const cell_hi_z = cell_lo_z + CELL_M;
+        const ix0: i32 = @intFromFloat(@floor(cell_lo_x / step));
+        const ix1: i32 = @intFromFloat(@ceil(cell_hi_x / step));
+        const iz0: i32 = @intFromFloat(@floor(cell_lo_z / step));
+        const iz1: i32 = @intFromFloat(@ceil(cell_hi_z / step));
         var iz = iz0;
         while (iz <= iz1) : (iz += 1) {
             const zc = (@as(f32, @floatFromInt(iz)) + 0.5) * step;
             var ix = ix0;
             while (ix <= ix1) : (ix += 1) {
                 const xc = (@as(f32, @floatFromInt(ix)) + 0.5) * step;
-                const dx = xc - center_x;
-                const dz = zc - center_z;
-                if (dx * dx + dz * dz > radius * radius) continue;
+                if (xc < cell_lo_x or xc >= cell_hi_x or zc < cell_lo_z or zc >= cell_hi_z) continue;
                 if (rand01(ix, iz, 0xF001) > 0.24) continue;
                 const cx = xc + (rand01(ix, iz, 0xF002) - 0.5) * step * 0.7;
                 const cz = zc + (rand01(ix, iz, 0xF003) - 0.5) * step * 0.7;
@@ -347,7 +354,7 @@ pub fn build(
                     const h = dcw.heightAt(px, pz);
                     if (h < dcw.SEA_LEVEL + 0.35 or h > 66.0) continue;
                     const tint = rand01(ix, iz, 0xF300 + @as(u32, @intCast(k)));
-                    try out.blades.append(alloc, .{
+                    try out.append(alloc, .{
                         .pos = .{ px, h - 0.05, pz },
                         .yaw = rand01(ix, iz, 0xF400 + @as(u32, @intCast(k))) * std.math.tau,
                         .scale = 0.70 + 0.55 * tint,
@@ -358,6 +365,76 @@ pub fn build(
             }
         }
     }
+
+}
+
+/// Full patch build: props plus every blade partition, concatenated in cell order. The startup
+/// path and the scatter tests use this; the running app streams the partitions instead.
+pub fn build(
+    alloc: std.mem.Allocator,
+    edits: []const dcw.Edit,
+    min_x: f32,
+    min_z: f32,
+    size: f32,
+) !Scatter {
+    var out = try buildProps(alloc, edits, min_x, min_z, size);
+    errdefer out.deinit(alloc);
+    const center_x = min_x + size * 0.5;
+    const center_z = min_z + size * 0.5;
+    // Blades come from 32 m partitions, concatenated in cell order. Each partition builds its own
+    // local height lattice, so the whole-patch build and the streamed build produce the same
+    // instances: the lattice points fall on the same absolute 2 m grid.
+    {
+        const cells: i32 = @intFromFloat(size / CELL_M);
+        const base_cx: i32 = @intFromFloat(@floor(min_x / CELL_M));
+        const base_cz: i32 = @intFromFloat(@floor(min_z / CELL_M));
+        var cz: i32 = 0;
+        while (cz < cells) : (cz += 1) {
+            var cx: i32 = 0;
+            while (cx < cells) : (cx += 1) {
+                const wcx = base_cx + cx;
+                const wcz = base_cz + cz;
+                const cell_x = (@as(f32, @floatFromInt(wcx)) + 0.5) * CELL_M;
+                const cell_z = (@as(f32, @floatFromInt(wcz)) + 0.5) * CELL_M;
+                const dx = cell_x - center_x;
+                const dz = cell_z - center_z;
+                if (dx * dx + dz * dz > ACTIVE_RADIUS * ACTIVE_RADIUS) continue;
+                try buildBladesCell(alloc, edits, wcx, wcz, &out.blades);
+            }
+        }
+    }
+
+    return out;
+}
+
+/// Props only (trees, bushes, rocks, snow, shore) for the patch whose south-west corner is
+/// `(min_x, min_z)` and whose side is `size` (normally 256 m). Blades come from `buildBladesCell`;
+/// the app streams those per 32 m partition, this stays a whole-patch build because it is cheap.
+pub fn buildProps(
+    alloc: std.mem.Allocator,
+    edits: []const dcw.Edit,
+    min_x: f32,
+    min_z: f32,
+    size: f32,
+) !Scatter {
+    var h_store: [GRID_N * GRID_N]f32 = undefined;
+    var d_store: [GRID_N * GRID_N]f32 = undefined;
+    var grid = HeightGrid{ .h = &h_store, .dens = &d_store, .n = GRID_N, .min_x = min_x, .min_z = min_z };
+    for (0..GRID_N) |iz| {
+        for (0..GRID_N) |ix| {
+            const x = min_x + @as(f32, @floatFromInt(ix)) * GRID_STEP;
+            const z = min_z + @as(f32, @floatFromInt(iz)) * GRID_STEP;
+            h_store[iz * GRID_N + ix] = dcw.heightAt(x, z);
+            d_store[iz * GRID_N + ix] = noise.fbm2(9001, x * 0.03, z * 0.03, 3, 2.0, 0.5);
+        }
+    }
+
+    var out = Scatter{};
+    errdefer out.deinit(alloc);
+
+    // The prop bush layer is radius-gated around the patch centre like the blades are.
+    const center_x = min_x + size * 0.5;
+    const center_z = min_z + size * 0.5;
 
     // Small bushes: a distinct rounded prop asset rather than another grass tuft. The cells are
     // coarse and sparse so they read as occasional shrubs, not a second ground cover.
@@ -639,17 +716,21 @@ test "world-anchored scatter keeps overlapping foliage fixed" {
             if (matched == 0) return error.TestExpectedEqual;
             std.debug.print("scatter {s}: {d} overlapping instances exact\n", .{ label, matched });
         }
+        /// The window must sit inside the active-cell set of both patches. Cells are quantised, so
+        /// a cell that is active for one centre can be outside the other's 80 m radius; with the
+        /// cell half-diagonal (22.6 m) and the blade spill (2.5 m), anything within 55 m of both
+        /// centres is guaranteed to come from cells both builds contain.
         fn checkBlades(list_a: []const Blade, list_b: []const Blade) !void {
             var seen = std.AutoHashMap(u64, void).init(std.testing.allocator);
             defer seen.deinit();
             for (list_a) |p| {
-                if (p.pos[0] >= 96.0 and p.pos[0] < 192.0 and p.pos[2] >= 96.0 and p.pos[2] < 192.0) {
+                if (p.pos[0] >= 112.0 and p.pos[0] < 176.0 and p.pos[2] >= 112.0 and p.pos[2] < 176.0) {
                     try seen.put(key(p.pos), {});
                 }
             }
             var matched: usize = 0;
             for (list_b) |p| {
-                if (p.pos[0] >= 96.0 and p.pos[0] < 192.0 and p.pos[2] >= 96.0 and p.pos[2] < 192.0) {
+                if (p.pos[0] >= 112.0 and p.pos[0] < 176.0 and p.pos[2] >= 112.0 and p.pos[2] < 176.0) {
                     if (seen.contains(key(p.pos))) {
                         matched += 1;
                     } else {

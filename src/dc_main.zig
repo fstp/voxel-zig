@@ -15,6 +15,7 @@ const WaterRenderer = vz.gfx.WaterRenderer;
 const GrassRenderer = vz.gfx.GrassRenderer;
 const PropRenderer = vz.gfx.PropRenderer;
 const scatter_mod = vz.world.scatter;
+const blade_stream = vz.world.blade_stream;
 
 const CHUNK: usize = dcw.CHUNK;
 const PATCH: i32 = dcw.PATCH;
@@ -51,6 +52,9 @@ const HudStats = struct {
     swimming: bool,
     on_ground: bool,
     grass: usize,
+    parts: usize,
+    dirty: usize,
+    update_ms: f32,
     trees: usize,
     rocks: usize,
     impostors: usize,
@@ -92,6 +96,12 @@ fn drawHud(hud: *vz.gfx.Hud, width: i32, height: i32, s: HudStats) void {
 
     hud.setColour(0.6, 0.9, 0.6);
     if (std.fmt.bufPrint(&buffer, "GRASS {d}  TREES {d}  ROCKS {d}  IMPOSTORS {d}  SNOW {d}  SHORE {d}", .{ s.grass, s.trees, s.rocks, s.impostors, s.snow, s.shore })) |text| {
+        hud.text(10, y, text);
+    } else |_| {}
+    y += hud.lineHeight();
+
+    hud.setColour(0.65, 0.9, 0.7);
+    if (std.fmt.bufPrint(&buffer, "PARTS {d}  DIRTY {d}  BLADE UPD {d:.2} ms", .{ s.parts, s.dirty, s.update_ms })) |text| {
         hud.text(10, y, text);
     } else |_| {}
     y += hud.lineHeight();
@@ -333,15 +343,14 @@ pub fn main(init: std.process.Init) !void {
     }
 
     const scatter_t0 = nowNs();
-    var scatter = try scatter_mod.build(
+    var scatter = try scatter_mod.buildProps(
         alloc,
         edits.items,
         @floatFromInt(patch_origin * @as(i32, @intCast(CHUNK))),
         @floatFromInt(patch_origin_z * @as(i32, @intCast(CHUNK))),
         @floatFromInt(PATCH * @as(i32, @intCast(CHUNK))),
     );
-    std.debug.print("scatter: {d} blades, {d} trees, {d} bushes, {d} rocks, {d} snow, {d} shore in {d:.1} ms\n", .{
-        scatter.blades.items.len,
+    std.debug.print("scatter props: {d} trees, {d} bushes, {d} rocks, {d} snow, {d} shore in {d:.1} ms\n", .{
         scatter.trees.items.len,
         scatter.bushes.items.len,
         scatter.rocks.items.len,
@@ -352,7 +361,57 @@ pub fn main(init: std.process.Init) !void {
     defer scatter.deinit(alloc);
     var grass = try GrassRenderer.init();
     defer grass.deinit();
-    grass.upload(scatter.blades.items);
+    // Blade partitions: the same stream the patch swap uses, run to completion once at startup.
+    var blade_capacity: usize = 4_000_000;
+    var stream = try blade_stream.Stream.init(alloc, blade_capacity);
+    defer stream.deinit(alloc);
+    var uploads: std.ArrayList(blade_stream.Upload) = .empty;
+    defer uploads.deinit(alloc);
+    {
+        const st = nowNs();
+        const patch_min_x = @as(f32, @floatFromInt(patch_origin * @as(i32, @intCast(CHUNK))));
+        const patch_min_z = @as(f32, @floatFromInt(patch_origin_z * @as(i32, @intCast(CHUNK))));
+        stream.begin(patch_origin, patch_origin_z, PATCH, patch_min_x + 128.0, patch_min_z + 128.0);
+        while (!(try stream.step(alloc, edits.items, 1 << 30, &uploads))) {}
+        _ = stream.commit(alloc);
+        grass.ensureCapacity(blade_capacity);
+        for (uploads.items) |u| grass.uploadRange(u.offset, u.blades);
+        std.debug.print("blades: {d} partitions, {d} instances, slots {d}/{d}, built in {d:.1} ms\n", .{
+            stream.liveCount(), stream.liveBlades(), stream.used, blade_capacity,
+            @as(f64, @floatFromInt(nowNs() - st)) / 1e6,
+        });
+        uploads.clearRetainingCapacity();
+
+        // VOXEL_BLADE_CHECK=1: prove the streamed partitions carry exactly the instances of a
+        // whole-patch build. Order-independent: count plus a commutative sum of per-blade hashes.
+        if (init.environ_map.get("VOXEL_BLADE_CHECK")) |raw| {
+            if (raw.len > 0 and raw[0] == '1') {
+                const ct = nowNs();
+                var ref = try scatter_mod.build(alloc, edits.items, patch_min_x, patch_min_z, @floatFromInt(PATCH * @as(i32, @intCast(CHUNK))));
+                defer ref.deinit(alloc);
+                var stream_sum: u64 = 0;
+                for (stream.parts.items) |*pp| {
+                    if (!pp.live) continue;
+                    for (pp.blades.items) |b| {
+                        var hh = std.hash.Wyhash.init(0);
+                        hh.update(std.mem.asBytes(&b));
+                        stream_sum +%= hh.final();
+                    }
+                }
+                var ref_sum: u64 = 0;
+                for (ref.blades.items) |b| {
+                    var hh = std.hash.Wyhash.init(0);
+                    hh.update(std.mem.asBytes(&b));
+                    ref_sum +%= hh.final();
+                }
+                std.debug.print("blade check: stream {d} blades sum {x}, full build {d} blades sum {x}, equal {}\n", .{
+                    stream.liveBlades(), stream_sum, ref.blades.items.len, ref_sum,
+                    stream.liveBlades() == ref.blades.items.len and stream_sum == ref_sum,
+                });
+                std.debug.print("blade check took {d:.1} ms\n", .{@as(f64, @floatFromInt(nowNs() - ct)) / 1e6});
+            }
+        }
+    }
     var props = try PropRenderer.init(alloc);
     defer props.deinit(alloc);
     props.uploadRocks(scatter.rocks.items);
@@ -455,6 +514,8 @@ pub fn main(init: std.process.Init) !void {
     var accumulator: f64 = 0;
     var was_swimming = false;
     var tree_stats_logged = false;
+    var stream_update_ms: f32 = 0;
+    var stream_dirty: usize = 0;
     const fixed_dt: f64 = 1.0 / 60.0;
     var frame_ms: f64 = 0;
     var fps_now: f64 = 0;
@@ -579,6 +640,7 @@ pub fn main(init: std.process.Init) !void {
             pending_x = want_x;
             pending_z = want_z;
             pending_cursor = 0;
+            stream.begin(pending_x, pending_z, PATCH, @as(f32, @floatFromInt(pending_x * @as(i32, @intCast(CHUNK)))) + 128.0, @as(f32, @floatFromInt(pending_z * @as(i32, @intCast(CHUNK)))) + 128.0);
             next_verts.clearRetainingCapacity();
             next_idx.clearRetainingCapacity();
         }
@@ -593,7 +655,33 @@ pub fn main(init: std.process.Init) !void {
                 _ = try dcw.meshChunkInto(alloc, edits.items, pending_x, pending_z, cx, cz, &next_verts, &next_idx);
                 pending_cursor += 1;
             }
-            if (pending_cursor >= PATCH * PATCH) {
+            // One blade partition per frame into its persistent slot: the partitions that stay do
+            // not rebuild, and nothing that did not change is re-uploaded.
+            {
+                const pt = nowNs();
+                _ = stream.step(alloc, edits.items, 1, &uploads) catch |err| switch (err) {
+                    error.BufferFull => blk: {
+                        std.debug.print("blades: buffer full at {d} instances, growing to {d}\n", .{ stream.used, blade_capacity * 2 });
+                        blade_capacity *= 2;
+                        grass.ensureCapacity(blade_capacity);
+                        for (stream.parts.items) |*pp| {
+                            if (pp.live and pp.blades.items.len > 0) grass.uploadRange(pp.slot.start, pp.blades.items);
+                        }
+                        break :blk false;
+                    },
+                    else => return err,
+                };
+                stream_dirty = uploads.items.len;
+                for (uploads.items) |u| {
+                    grass.uploadRange(u.offset, u.blades);
+                    std.debug.print("blades: partition slot {d} +{d} instances in {d:.2} ms\n", .{
+                        u.offset, u.blades.len, @as(f64, @floatFromInt(nowNs() - pt)) / 1e6,
+                    });
+                }
+                uploads.clearRetainingCapacity();
+                stream_update_ms = @as(f32, @floatFromInt(nowNs() - pt)) / 1e6;
+            }
+            if (pending_cursor >= PATCH * PATCH and stream.pendingCount() == 0) {
                 // Complete: swap the buffers and upload both at once. Uploading is the only part that
                 // must not be interrupted, and it is ~2 MB of vertex data.
                 std.mem.swap(std.ArrayList(dcw.Vertex), &all_verts, &next_verts);
@@ -630,14 +718,14 @@ pub fn main(init: std.process.Init) !void {
                 {
                     const st = nowNs();
                     scatter.deinit(alloc);
-                    scatter = try scatter_mod.build(
+                    scatter = try scatter_mod.buildProps(
                         alloc,
                         edits.items,
                         @floatFromInt(patch_origin * @as(i32, @intCast(CHUNK))),
                         @floatFromInt(patch_origin_z * @as(i32, @intCast(CHUNK))),
                         @floatFromInt(PATCH * @as(i32, @intCast(CHUNK))),
                     );
-                    grass.upload(scatter.blades.items);
+                    const dropped = stream.commit(alloc);
                     props.uploadRocks(scatter.rocks.items);
                     props.uploadBushes(scatter.bushes.items);
                     props.uploadSnow(scatter.snow.items);
@@ -649,14 +737,18 @@ pub fn main(init: std.process.Init) !void {
                         @floatFromInt(patch_origin_z * @as(i32, @intCast(CHUNK))),
                         @floatFromInt(PATCH * @as(i32, @intCast(CHUNK))),
                     );
-                    std.debug.print("scatter: {d} blades, {d} trees, {d} bushes, {d} rocks, {d} snow, {d} shore in {d:.1} ms\n", .{
-                        scatter.blades.items.len,
+                    std.debug.print("scatter props: {d} trees, {d} bushes, {d} rocks, {d} snow, {d} shore in {d:.1} ms; blades {d} partitions ({d} dropped), {d} instances, slots {d}/{d}\n", .{
                         scatter.trees.items.len,
                         scatter.bushes.items.len,
                         scatter.rocks.items.len,
                         scatter.snow.items.len,
                         scatter.shore.items.len,
                         @as(f64, @floatFromInt(nowNs() - st)) / 1e6,
+                        stream.liveCount(),
+                        dropped,
+                        stream.liveBlades(),
+                        stream.used,
+                        blade_capacity,
                     });
                 }
                 pending = false;
@@ -737,7 +829,10 @@ pub fn main(init: std.process.Init) !void {
             &shadow,
             all_idx.items.len,
         );
-        grass.draw(vp, camera.position, lighting.sun_dir, lighting.sun_colour, lighting.ambient_sky, lighting.ambient_ground, fog_col, fog_sun, fog_density, fog_height, fog_base, water_clock, &shadow);
+        for (stream.parts.items) |*p| {
+            if (!p.live or p.blades.items.len == 0) continue;
+            grass.drawRange(vp, camera.position, lighting.sun_dir, lighting.sun_colour, lighting.ambient_sky, lighting.ambient_ground, fog_col, fog_sun, fog_density, fog_height, fog_base, water_clock, &shadow, p.slot.start, p.blades.items.len);
+        }
         props.drawTrees(vp, camera.position, camera.right(), camera.up(), lighting.sun_dir, lighting.sun_colour, lighting.ambient_sky, lighting.ambient_ground, fog_col, fog_sun, fog_density, fog_height, fog_base, water_clock, &shadow, scatter.trees.items);
         if (!tree_stats_logged) {
             props.logTreeStats();
@@ -784,7 +879,10 @@ pub fn main(init: std.process.Init) !void {
                 .flying = player.flying,
                 .swimming = player.swimming,
                 .on_ground = player.on_ground,
-                .grass = scatter.blades.items.len,
+                .grass = stream.liveBlades(),
+                .parts = stream.liveCount(),
+                .dirty = stream_dirty,
+                .update_ms = stream_update_ms,
                 .trees = scatter.trees.items.len,
                 .rocks = scatter.rocks.items.len,
                 .impostors = props.last_impostor_count,
@@ -806,6 +904,9 @@ pub fn main(init: std.process.Init) !void {
         const elapsed = nowNs() - window_start;
         if (elapsed >= 1_000_000_000) {
             fps_now = @as(f64, @floatFromInt(frames)) * 1e9 / @as(f64, @floatFromInt(elapsed));
+            std.debug.print("stream: parts {d}  dirty {d}  upd {d:.2} ms  blades {d}  slots {d}/{d}\n", .{
+                stream.liveCount(), stream_dirty, stream_update_ms, stream.liveBlades(), stream.used, blade_capacity,
+            });
             std.debug.print("fps {d:.1}  worst frame {d:.2} ms  verts {d}  quads {d}  pos {d:.1} {d:.1} {d:.1}  yaw {d:.3} pitch {d:.3}  {s} {s} speed {d:.0}\n", .{
                 fps_now,
                 @as(f64, @floatFromInt(worst_ns)) / 1e6,
