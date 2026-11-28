@@ -18,6 +18,9 @@ const vertex_src: [:0]const u8 =
     \\uniform vec3 u_eye;
     \\uniform float u_time;
     \\uniform float u_anim_cutoff;
+    \\uniform float u_active_radius;   // ADR 0039: the stream drops blades past this, so the field fades by then
+    \\uniform float u_active_fade;
+    \\uniform vec2 u_field_centre;
     \\uniform float u_anim_fade;
     \\out vec3 v_col;
     \\out vec3 v_nrm;
@@ -46,18 +49,6 @@ const vertex_src: [:0]const u8 =
     \\    else if (is_bush) { base_h = 0.45 + 0.55 * scale; w = 0.035; }
     \\    else if (is_fern) { base_h = 0.50 + 0.60 * scale; w = 0.014; }
     \\    float h = base_h * (0.70 + 0.60 * length_hash) * 0.85;
-    \\    float near = smoothstep(0.15, 1.40, length(a_pos.xz - u_eye.xz));
-    \\    h *= mix(0.30, 1.0, near);
-    \\
-    \\    // Hash thinning: full density near, gone by 95 m. Stable per instance, so no flicker.
-    \\    float dist = length(a_pos.xz - u_eye.xz);
-    \\    float keep = 1.0 - smoothstep(55.0, 120.0, dist);
-    \\    float r = hash11(float(gl_InstanceID) * 0.731 + tint * 17.0);
-    \\    if (r > keep) {
-    \\        gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
-    \\        return;
-    \\    }
-    \\
     \\    int id = gl_VertexID;
     \\    float t = 0.0;
     \\    float side = 0.0;
@@ -113,6 +104,8 @@ const vertex_src: [:0]const u8 =
     \\    }
     \\    v_col = mix(base, tipc, t * (is_flower ? 1.0 : 0.85));
     \\
+    \\    float field = length(a_pos.xz - u_field_centre);
+    \\    world.y -= max(field - (u_active_radius - u_active_fade), 0.0) * 0.09;
     \\    gl_Position = u_view_proj * vec4(world, 1.0);
     \\}
 ;
@@ -212,6 +205,11 @@ pub const GrassRenderer = struct {
     count: usize = 0,
     capacity: usize = 0,
     animation_cutoff: f32 = 95.0,
+    /// Blade field extent, mirrored from scatter.ACTIVE_RADIUS: the last cell centre sits at most
+    /// this far out, so the fade ends by radius minus half a cell diagonal.
+    active_radius: f32 = 96.0,
+    active_fade: f32 = 22.0,
+    field_centre: [2]f32 = .{ 0, 0 },
     animation_fade: f32 = 15.0,
 
     pub fn init() !GrassRenderer {

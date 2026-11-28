@@ -453,8 +453,18 @@ pub fn main(init: std.process.Init) !void {
     else
         0.0;
     const animation_fade: f32 = 15.0;
+    grass.active_radius = scatter_mod.ACTIVE_RADIUS;
+    grass.field_centre = .{
+        @as(f32, @floatFromInt(patch_origin * @as(i32, @intCast(CHUNK)))) + 128.0,
+        @as(f32, @floatFromInt(patch_origin_z * @as(i32, @intCast(CHUNK)))) + 128.0,
+    };
+    renderer.meadow_centre = grass.field_centre;
     grass.animation_cutoff = animation_cutoff;
     grass.animation_fade = animation_fade;
+    // Far-field stamp A/B: VOXEL_STAMP=0 turns the painted meadow off.
+    if (init.environ_map.get("VOXEL_STAMP")) |raw| {
+        if (raw.len > 0 and raw[0] == '0') renderer.stamp_on = false;
+    }
     props.animation_cutoff = animation_cutoff;
     props.animation_fade = animation_fade;
     {
@@ -726,6 +736,10 @@ pub fn main(init: std.process.Init) !void {
                         @floatFromInt(PATCH * @as(i32, @intCast(CHUNK))),
                     );
                     const dropped = stream.commit(alloc);
+                    const pmx = @as(f32, @floatFromInt(patch_origin * @as(i32, @intCast(CHUNK)))) + 128.0;
+                    const pmz = @as(f32, @floatFromInt(patch_origin_z * @as(i32, @intCast(CHUNK)))) + 128.0;
+                    grass.field_centre = .{ pmx, pmz };
+                    renderer.meadow_centre = .{ pmx, pmz };
                     props.uploadRocks(scatter.rocks.items);
                     props.uploadBushes(scatter.bushes.items);
                     props.uploadSnow(scatter.snow.items);

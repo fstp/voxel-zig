@@ -83,6 +83,15 @@ const fragment_src: [:0]const u8 =
     \\uniform sampler2D u_ground_tex1; // sparse dirt/grass patch
     \\uniform sampler2D u_ground_tex2; // mossy ground
     \\uniform float u_ground_enabled;
+    \\uniform float u_meadow_radius;   // blade field radius around u_meadow_centre (ADR 0039)
+    \\uniform float u_meadow_band;     // metres of blend between blades and the stamp
+    \\uniform vec2 u_meadow_centre;    // patch centre, xz
+    \\uniform float u_stamp_on;        // 0 = off (A/B), 1 = stamp the far meadow
+    \\uniform vec3 u_stamp_low;        // linear meadow colour where no blade would cover the ground
+    \\uniform vec3 u_stamp_high;       // linear meadow colour where a blade would
+    \\uniform vec3 u_stamp_dry;        // linear dry-grass accent
+    \\uniform float u_stamp_lo;        // noise threshold where coverage starts
+    \\uniform float u_stamp_hi;        // noise threshold where coverage is complete
     \\uniform sampler2D u_snow_tex0; // snow with grass stalks / edge
     \\uniform sampler2D u_snow_tex1; // clean deep snow
     \\uniform sampler2D u_snow_tex2; // patchy snow and grass
@@ -213,6 +222,33 @@ const fragment_src: [:0]const u8 =
     \\    vec3 mixed = mix(granite, rough, 0.35 + 0.35 * lichen);
     \\    mixed = mix(mixed, stone, 0.22 + 0.30 * (1.0 - lichen));
     \\    return mixed * (0.78 + 0.30 * mott);
+    \\}
+    \\float hash12(vec2 p) {
+    \\    vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+    \\    p3 += dot(p3, p3.yzx + 33.33);
+    \\    return fract((p3.x + p3.y) * p3.z);
+    \\}
+    \\// Far-field grass stamp (ADR 0039): beyond the blade field the meadow has to be painted into
+    \\// the ground, and it has to compose to the colour the blades themselves average to. The
+    \\// constants below are the linear palette and lighting of grass_renderer.zig's meadow branch,
+    \\// so calibrateStamp() can invert them for a measured frame.
+    \\vec3 meadowStamp(vec2 p, float mott) {
+    \\    vec2 warp = vec2(noised(vec3(p * 0.021, 4.3)).x,
+    \\                     noised(vec3(p * 0.026, 9.1)).x) - 0.5;
+    \\    // Streams of strand-scale detail: blades lean, so streaks along one axis and a jittered
+    \\    // threshold read as grass at 100 m better than isotropic noise does.
+    \\    vec2 q = vec2(p.x * 0.62 + warp.x * 0.05, p.y * 2.9 + warp.y * 0.16);
+    \\    float blades = noised(vec3(q, 1.0)).x;
+    \\    blades = mix(blades, hash12(floor(q * 1.6)), 0.22);
+    \\    float cover = smoothstep(u_stamp_lo, u_stamp_hi, blades + (mott - 0.5) * 0.12);
+    \\    vec3 low = u_stamp_low;
+    \\    vec3 high = u_stamp_high;
+    \\    float patch = smoothstep(0.45, 0.80, noised(vec3(p * 0.014 + vec2(3.7, 8.2), 6.0)).x);
+    \\    vec3 col = mix(low, high, cover);
+    \\    // Dry yellow-green islands and a shading break-up at clump scale.
+    \\    col = mix(col, u_stamp_dry, patch * 0.30 * cover);
+    \\    col *= 0.92 + 0.16 * noised(vec3(p * 0.09, 2.0)).x;
+    \\    return col;
     \\}
     \\float microHash(vec2 p) {
     \\    return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
@@ -400,6 +436,18 @@ const fragment_src: [:0]const u8 =
     \\        surf = mix(surf, vec3(0.34, 0.27, 0.20), mud * (1.0 - snow));
     \\        surf = mix(surf, vec3(0.16, 0.13, 0.10), mud * wet * 0.55 * (1.0 - snow));
     \\    }
+    \\    // Far-field meadow stamp: where the blade field has thinned out, paint the averaged meadow
+    \\    // colour into the ground. The band matches the blade shader's own 55-120 m thinning so the
+    \\    // two representations cross over instead of one ending in front of the other.
+    \\    if (u_stamp_on > 0.5) {
+    \\        float flat_g = smoothstep(0.60, 0.88, normalize(v_nrm).y) * (1.0 - snow) * (1.0 - mud);
+    \\        float cd = length(v_pos.xz - u_meadow_centre);
+    \\        float far_f = smoothstep(u_meadow_radius - u_meadow_band * 0.5, u_meadow_radius + u_meadow_band * 0.5, cd);
+    \\        float amt = far_f * flat_g;
+    \\        if (amt > 0.001) {
+    \\            surf = mix(surf, meadowStamp(v_pos.xz, mott) * 0.35, amt);
+    \\        }
+    \\    }
     \\    if (snow > 0.001 && u_snow_enabled > 0.5) {
     \\        vec3 snow_col = snowTexture(v_pos.xz, mott, snow);
     \\        surf = mix(surf, snow_col, snow * 0.92);
@@ -450,6 +498,16 @@ pub const DcRenderer = struct {
     ao_min_z: f32 = 0,
     ao_size: f32 = 256,
     ao_enabled: bool = true,
+    /// Far-field meadow stamp (ADR 0039).
+    stamp_on: bool = true,
+    meadow_radius: f32 = 110.0,
+    meadow_band: f32 = 14.0,
+    meadow_centre: [2]f32 = .{ 0, 0 },
+    stamp_low: Vec3 = .{ .x = 0.020, .y = 0.045, .z = 0.016 },
+    stamp_high: Vec3 = .{ .x = 0.055, .y = 0.135, .z = 0.032 },
+    stamp_dry: Vec3 = .{ .x = 0.16, .y = 0.17, .z = 0.06 },
+    stamp_lo: f32 = 0.42,
+    stamp_hi: f32 = 0.62,
     ground_tex: [3]u32 = .{ 0, 0, 0 },
     snow_tex: [3]u32 = .{ 0, 0, 0 },
     shore_tex: [3]u32 = .{ 0, 0, 0 },
@@ -684,6 +742,15 @@ pub const DcRenderer = struct {
             gl.BindTexture(gl.TEXTURE_2D, tex);
         }
         self.shader.setFloat("u_ground_enabled", 1.0);
+        self.shader.setFloat("u_meadow_radius", self.meadow_radius);
+        self.shader.setFloat("u_meadow_band", self.meadow_band);
+        self.shader.setFloat2("u_meadow_centre", .{ self.meadow_centre[0], self.meadow_centre[1] });
+        self.shader.setFloat("u_stamp_on", if (self.stamp_on) 1.0 else 0.0);
+        self.shader.setVec3("u_stamp_low", .{ self.stamp_low.x, self.stamp_low.y, self.stamp_low.z });
+        self.shader.setVec3("u_stamp_high", .{ self.stamp_high.x, self.stamp_high.y, self.stamp_high.z });
+        self.shader.setVec3("u_stamp_dry", .{ self.stamp_dry.x, self.stamp_dry.y, self.stamp_dry.z });
+        self.shader.setFloat("u_stamp_lo", self.stamp_lo);
+        self.shader.setFloat("u_stamp_hi", self.stamp_hi);
         self.shader.setFloat("u_snow_enabled", 1.0);
         self.shader.setFloat("u_shore_enabled", 1.0);
         self.shader.setFloat("u_rock_enabled", 1.0);
