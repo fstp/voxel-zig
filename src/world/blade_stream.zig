@@ -194,7 +194,11 @@ pub const Stream = struct {
                 const cell_z = (@as(f32, @floatFromInt(wz)) + 0.5) * scatter.CELL_M;
                 const dx = cell_x - center_x;
                 const dz = cell_z - center_z;
-                if (dx * dx + dz * dz > scatter.ACTIVE_RADIUS * scatter.ACTIVE_RADIUS) continue;
+                // Keep a cell when any part of it is inside the radius, not only its centre: the
+                // centre test left a ragged gap of up to half a cell diagonal (22.6 m) inside the
+                // radius, which the shader's fade then could not hide (ADR 0045).
+                const reach = scatter.ACTIVE_RADIUS + scatter.CELL_M * 0.5 * std.math.sqrt2;
+                if (dx * dx + dz * dz > reach * reach) continue;
                 if (self.find(wx, wz)) |p| {
                     p.wanted = true;
                 } else {

@@ -45,9 +45,11 @@ pub const Scatter = struct {
 
 /// Partition edge. One DC chunk, so patch streaming moves one strip of these at a time.
 pub const CELL_M: f32 = 32.0;
-/// Cells whose centre is within this distance of the patch centre carry blades. The shader thins
-/// blades out between 55 and 120 m anyway, so the quantised edge this leaves is invisible.
-pub const ACTIVE_RADIUS: f32 = 96.0;
+/// Cells whose centre is within this distance of the patch centre carry blades. The shader fades
+/// blades out across the last ACTIVE_FADE metres so the quantised edge is not a hard line.
+pub const ACTIVE_RADIUS: f32 = 84.0;
+/// Metres of fade before ACTIVE_RADIUS: blades sink away over this span instead of vanishing.
+pub const ACTIVE_FADE: f32 = 24.0;
 const GRID_STEP: f32 = 2.0;
 const GRID_N: usize = 129; // 256 m patch / 2 m + 1
 

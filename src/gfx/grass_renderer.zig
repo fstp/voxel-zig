@@ -105,7 +105,11 @@ const vertex_src: [:0]const u8 =
     \\    v_col = mix(base, tipc, t * (is_flower ? 1.0 : 0.85));
     \\
     \\    float field = length(a_pos.xz - u_field_centre);
-    \\    world.y -= max(field - (u_active_radius - u_active_fade), 0.0) * 0.09;
+    \\    // Sink into the ground across the last FADE metres, reaching zero at the cell-quantised edge.
+    \\    // 0.09 m/m sank a 0.44 m blade 3.5 m underground by 79 m while cells still carried geometry to
+    \\    // 113 m: a 39 m dead band of paid-for, invisible blades (ADR 0045).
+    \\    float fade_t = clamp((field - (u_active_radius - u_active_fade)) / max(u_active_fade, 1.0), 0.0, 1.0);
+    \\    world.y -= fade_t * fade_t * 0.55;
     \\    gl_Position = u_view_proj * vec4(world, 1.0);
     \\}
 ;
@@ -208,7 +212,7 @@ pub const GrassRenderer = struct {
     /// Blade field extent, mirrored from scatter.ACTIVE_RADIUS: the last cell centre sits at most
     /// this far out, so the fade ends by radius minus half a cell diagonal.
     active_radius: f32 = 96.0,
-    active_fade: f32 = 22.0,
+    active_fade: f32 = 24.0,
     field_centre: [2]f32 = .{ 0, 0 },
     animation_fade: f32 = 15.0,
 

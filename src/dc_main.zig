@@ -496,6 +496,7 @@ pub fn main(init: std.process.Init) !void {
         0.0;
     const animation_fade: f32 = 15.0;
     grass.active_radius = scatter_mod.ACTIVE_RADIUS;
+    grass.active_fade = scatter_mod.ACTIVE_FADE;
     grass.field_centre = .{
         @as(f32, @floatFromInt(patch_origin * @as(i32, @intCast(CHUNK)))) + 128.0,
         @as(f32, @floatFromInt(patch_origin_z * @as(i32, @intCast(CHUNK)))) + 128.0,
