@@ -31,6 +31,38 @@ fn nowNsIo(io: std.Io) i64 {
     return @intCast(ts.nanoseconds);
 }
 
+/// GL_TIME_ELAPSED around one swap-frame section. The read is deferred one frame so the query is
+/// already finished and costs no stall (ADR 0041/14.2).
+const GpuQuery = struct {
+    id: gl.uint = 0,
+    active: bool = false,
+    armed: bool = false,
+    last_ms: f64 = 0,
+
+    fn begin(self: *GpuQuery) void {
+        if (self.id == 0) gl.GenQueries(1, @ptrCast(&self.id));
+        gl.BeginQuery(gl.TIME_ELAPSED, self.id);
+        self.active = true;
+    }
+
+    fn end(self: *GpuQuery) void {
+        if (!self.active) return;
+        gl.EndQuery(gl.TIME_ELAPSED);
+        self.active = false;
+        self.armed = true;
+    }
+
+    /// Blocks only until the frame that armed it has finished, which is at least one frame back.
+    fn read(self: *GpuQuery) f64 {
+        if (!self.armed) return self.last_ms;
+        var ns: gl.uint = 0;
+        gl.GetQueryObjectuiv(self.id, gl.QUERY_RESULT, @ptrCast(&ns));
+        self.last_ms = @as(f64, @floatFromInt(ns)) / 1e6;
+        self.armed = false;
+        return self.last_ms;
+    }
+};
+
 fn playerSave(p: DcPlayer) dcw.PlayerSave {
     return .{ .x = p.position.x, .y = p.position.y, .z = p.position.z, .yaw = p.yaw, .pitch = p.pitch, .flying = p.flying };
 }
@@ -543,11 +575,24 @@ pub fn main(init: std.process.Init) !void {
     // Terrain double buffering (ADR 0042): the pending mesh is uploaded in slices while it grows.
     var up_v: usize = 0;
     var up_i: usize = 0;
+    var q_flip = GpuQuery{};
+    var q_ao = GpuQuery{};
+    var q_water = GpuQuery{};
+    var q_props = GpuQuery{};
+    var swap_gpu_pending = false;
+    // VOXEL_GPU_SYNC=1: drain the GPU at frame end so the CPU frame time includes the queue.
+    const gpu_sync = if (init.environ_map.get("VOXEL_GPU_SYNC")) |raw| raw.len > 0 and raw[0] == '1' else false;
     const fixed_dt: f64 = 1.0 / 60.0;
     var frame_ms: f64 = 0;
     var fps_now: f64 = 0;
     frame: while (true) {
         const frame_start = nowNsIo(io);
+        if (swap_gpu_pending) {
+            swap_gpu_pending = false;
+            std.debug.print("swap gpu: flip {d:.3} ms | ao {d:.3} | water {d:.3} | props {d:.3} (GPU time)\n", .{
+                q_flip.read(), q_ao.read(), q_water.read(), q_props.read(),
+            });
+        }
         var frame_dt = @as(f64, @floatFromInt(frame_start - last_frame_ns)) / 1e9;
         last_frame_ns = frame_start;
         frame_dt = @min(frame_dt, 0.1);
@@ -788,8 +833,10 @@ pub fn main(init: std.process.Init) !void {
                     up_i = next_idx.items.len;
                 }
                 const t_c = nowNsIo(io);
+                q_flip.begin();
                 renderer.setIndexCount(next_idx.items.len);
                 renderer.flip();
+                q_flip.end();
                 const t_flip = nowNsIo(io);
                 std.debug.print("  swap breakdown: fits+realloc {d} us, remainder upload {d} us, flip {d} us\n", .{
                     @divTrunc(t_b - t_a, 1000), @divTrunc(t_c - t_b, 1000), @divTrunc(t_flip - t_c, 1000),
@@ -798,6 +845,7 @@ pub fn main(init: std.process.Init) !void {
                 std.mem.swap(std.ArrayList(u32), &all_idx, &next_idx);
                 patch_origin = pending_x;
                 patch_origin_z = pending_z;
+                q_ao.begin();
                 if (ao_enabled and ao_work != null) {
                     renderer.uploadAo(
                         ao_work.?,
@@ -807,8 +855,12 @@ pub fn main(init: std.process.Init) !void {
                     );
                 }
                 const t_ao = nowNsIo(io);
+                q_ao.end();
+                q_water.begin();
                 water.uploadPatch();
+                q_water.end();
                 const t_water = nowNsIo(io);
+                q_props.begin();
                 {
                     const dropped = stream.commit(alloc);
                     props.uploadRocks(scatter.rocks.items);
@@ -835,6 +887,8 @@ pub fn main(init: std.process.Init) !void {
                         @as(f64, @floatFromInt(nowNsIo(io) - swap_t)) / 1e6,
                     });
                 }
+                q_props.end();
+                swap_gpu_pending = true;
                 const t_parts = nowNsIo(io);
                 std.debug.print("swap parts: remainder {d:.2} ms | flip {d:.2} | ao {d:.2} | water {d:.2} | props+commit {d:.2}\n", .{
                     @as(f64, @floatFromInt(t_flip - swap_t)) / 1e6,
@@ -988,6 +1042,11 @@ pub fn main(init: std.process.Init) !void {
                 .sun_elevation = sun.elevation(),
                 .sun_paused = sun.paused,
             });
+        }
+        if (gpu_sync) {
+            const sync_t = nowNsIo(io);
+            gl.Finish();
+            std.debug.print("gpu sync: {d:.2} ms of queue drained at frame end\n", .{@as(f64, @floatFromInt(nowNsIo(io) - sync_t)) / 1e6});
         }
         window.swap();
 

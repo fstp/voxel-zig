@@ -50,7 +50,30 @@ the largest blade partition built inline (10.02 ms), the prop rebuild (6.1 ms) a
 task's acceptance line is **not met**, and the shrink from 30-42 ms to 23-30 ms is the honest
 result.
 
-## Left open: the swap frame still peaks at ~23-30 ms
+## The stall was a full GPU queue, proved by the sync A/B (14.2)
+
+`VOXEL_GPU_SYNC=1` drains the queue with `glFinish` at frame end, and the picture changes completely:
+
+| Measurement | Unsynced | `VOXEL_GPU_SYNC=1` |
+|---|---|---|
+| GPU time per swap section (`GL_TIME_ELAPSED`) | 0.000-0.009 ms | 0.000-0.009 ms |
+| CPU time in the swap sections | 10-11 ms in whichever section came first | **0.04-0.08 ms** |
+| Queue drained at frame end | not measured | **16.0-16.2 ms every frame** |
+| Worst frame on a swap (after startup) | 23-30 ms | **17.11 ms** |
+| Steady frame, same pose | 16.8-16.9 ms | 17.0-17.1 ms |
+
+The per-section GPU queries report essentially nothing, so the 10 ms was never work in those
+sections. It was the CPU blocking inside whichever GL call first made the driver wait for a queue
+that was ~16 ms deep — which is why the label moved between `remainder`, `flip` and `water` from
+one swap to the next. **With the queue kept short, the swap costs 0.04-0.08 ms and the frame sits
+0.1 ms above the steady frame.**
+
+So the renderer is GPU-bound at ~16 ms in this pose, and the patch swap was a victim of that, not a
+cause. The remaining 0.4 ms above 16.7 is the steady frame, and RenderDoc's overdraw pass names
+where it goes: **29x estimated average overdraw in the shadow cascades** (44 draws into a
+3840x2127 target).
+
+## Left open: the *steady* frame, not the swap
 
 Measured worst frames on a 12 s walk at 60 fps: **23.4-30.4 ms**, with the first second after start
 at 42 ms. The
