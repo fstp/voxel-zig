@@ -167,6 +167,7 @@ pub fn build(
                 const micro = microdetail.height(px, pz);
                 const mg = microdetail.gradient(px, pz);
                 if (@abs(mg[0]) + @abs(mg[1]) > 1.35) continue;
+                if (microdetail.pebbleMask(px, pz) > 0.62) continue;
                 const h_grid = grid.at(px, pz);
                 if (h_grid < dcw.SEA_LEVEL + 0.35) continue;
                 if (h_grid > 66.0) continue; // below the 10.8 snow line, so blades do not poke through snow
@@ -232,7 +233,7 @@ pub fn build(
                 // Micro-height is sampled once per tuft: the 2.7M blade budget cannot afford four
                 // trig evaluations per blade, and blades within a 1-2 m tuft share the same bump.
                 const clump_micro = microdetail.height(cx, cz);
-                if (microdetail.pebbleMask(cx, cz) > 0.90) continue;
+                if (microdetail.pebbleMask(cx, cz) > 0.55) continue;
                 // More tufts, fewer blades per tuft: spreads the 10x budget across the meadow so
                 // there are no large bald patches between clumps.
                 const count: usize = 143 + @as(usize, @intFromFloat(rand01(ix, iz, 0xC105) * 230.0));
@@ -469,6 +470,41 @@ pub fn build(
                     .pos = .{ px, h - 0.15, pz },
                     .yaw = rand01(ix, iz, 0x0CC6) * std.math.tau,
                     .scale = 0.35 + 1.1 * tint,
+                    .tint = tint,
+                });
+            }
+        }
+    }
+
+
+    // Loose pebbles: a fine layer of small stones that catches the light between grass tufts.
+    // This is deliberately separate from the boulder pass: the stones are 5-15 cm and do not
+    // affect the grass scatter or the terrain collider.
+    {
+        const step: f32 = 2.20;
+        const ix0: i32 = @intFromFloat(@floor(min_x / step));
+        const ix1: i32 = @intFromFloat(@floor((min_x + size - 0.001) / step));
+        const iz0: i32 = @intFromFloat(@floor(min_z / step));
+        const iz1: i32 = @intFromFloat(@floor((min_z + size - 0.001) / step));
+        var iz = iz0;
+        while (iz <= iz1) : (iz += 1) {
+            const z = (@as(f32, @floatFromInt(iz)) + 0.5) * step;
+            var ix = ix0;
+            while (ix <= ix1) : (ix += 1) {
+                const x = (@as(f32, @floatFromInt(ix)) + 0.5) * step;
+                const px = x + (rand01(ix, iz, 0x0DD1) - 0.5) * step * 0.85;
+                const pz = z + (rand01(ix, iz, 0x0DD2) - 0.5) * step * 0.85;
+                if (blocked(edits, px, pz)) continue;
+                if (rand01(ix, iz, 0x0DD3) > 0.48) continue;
+                const h = dcw.heightAt(px, pz) + microdetail.height(px, pz);
+                if (h < dcw.SEA_LEVEL + 0.10) continue;
+                const ny = grid.normalY(px, pz);
+                if (ny < 0.62) continue;
+                const tint = rand01(ix, iz, 0x0DD4);
+                try out.rocks.append(alloc, .{
+                    .pos = .{ px, h - 0.015, pz },
+                    .yaw = rand01(ix, iz, 0x0DD5) * std.math.tau,
+                    .scale = 0.070 + 0.170 * tint,
                     .tint = tint,
                 });
             }

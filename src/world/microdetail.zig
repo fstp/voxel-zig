@@ -28,7 +28,8 @@ pub fn height(x: f32, z: f32) f32 {
     var h: f32 = 0.0;
     h += 0.016 * std.math.sin(x * 2.7 + z * 0.7) * std.math.cos(z * 2.1 - x * 0.3);
     h += 0.009 * std.math.sin(x * 7.3 + 1.7) * std.math.cos(z * 6.1 + 0.4);
-    h += 0.032 * pebble(x, z);
+    h += 0.045 * pebble(x, z);
+    h += 0.006 * std.math.sin(x * 19.3 + 0.8) * std.math.cos(z * 17.1 - 0.4);
     return h;
 }
 

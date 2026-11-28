@@ -230,7 +230,8 @@ const fragment_src: [:0]const u8 =
     \\float microHeight(vec2 p) {
     \\    float h = 0.016 * sin(p.x * 2.7 + p.y * 0.7) * cos(p.y * 2.1 - p.x * 0.3);
     \\    h += 0.009 * sin(p.x * 7.3 + 1.7) * cos(p.y * 6.1 + 0.4);
-    \\    h += 0.032 * microPebble(p);
+    \\    h += 0.045 * microPebble(p);
+    \\    h += 0.006 * sin(p.x * 19.3 + 0.8) * cos(p.y * 17.1 - 0.4);
     \\    return h;
     \\}
     \\vec3 shIrradiance(vec3 n) {
@@ -343,11 +344,11 @@ const fragment_src: [:0]const u8 =
     \\    if (micro_amt > 0.001) {
     \\        float mh = microHeight(v_pos.xz);
     \\        const float me = 0.025;
-    \\        vec2 mg = vec2(microHeight(v_pos.xz + vec2(me, 0.0)) - microHeight(v_pos.xz - vec2(me, 0.0)),
-    \\                       microHeight(v_pos.xz + vec2(0.0, me)) - microHeight(v_pos.xz - vec2(0.0, me))) / (2.0 * me);
+    \\        vec2 mg = vec2(microHeight(v_pos.xz + vec2(me, 0.0)) - mh,
+    \\                       microHeight(v_pos.xz + vec2(0.0, me)) - mh) / me;
     \\        vec2 view_xz = normalize(v_pos.xz - u_eye.xz);
     \\        micro_p += view_xz * (mh * 3.2) * micro_amt;
-    \\        n = normalize(n + vec3(-mg.x, 0.0, -mg.y) * 0.34 * micro_amt);
+    \\        n = normalize(n + vec3(-mg.x, 0.0, -mg.y) * 0.52 * micro_amt);
     \\    }
     \\    float ndl = max(dot(n, l), 0.0);
     \\    float shadow = sunShadow(v_pos, n);
@@ -370,6 +371,8 @@ const fragment_src: [:0]const u8 =
     \\        float ground_mask = (1.0 - smoothstep(0.45, 0.55, v_mat)) * flatness
     \\                          * (1.0 - snow) * (1.0 - mud);
     \\        vec3 ground = groundTexture(micro_p, mott) * 1.10;
+    \\        float gravel = smoothstep(0.55, 0.92, microPebble(v_pos.xz));
+    \\        ground = mix(ground, vec3(0.30, 0.28, 0.25), gravel * 0.22);
     \\        albedo = mix(albedo, ground, ground_mask * 0.85);
     \\    }
     \\    if (u_rock_enabled > 0.5) {
@@ -377,10 +380,12 @@ const fragment_src: [:0]const u8 =
     \\        vec2 rock_uv = v_pos.xz;
     \\        if (an.y <= max(an.x, an.z)) rock_uv = an.x > an.z ? v_pos.zy : v_pos.xy;
     \\        float rock_mask = smoothstep(0.45, 0.55, v_mat) * (1.0 - snow) * (1.0 - mud);
-    \\        vec3 vd = normalize(v_pos - u_eye);
-    \\        vec2 rv = an.y > max(an.x, an.z) ? vd.xz : (an.x > an.z ? vd.zy : vd.xy);
-    \\        vec3 rock = rockTexture(rock_uv, mott, rv);
-    \\        albedo = mix(albedo, rock, rock_mask * 0.82);
+    \\        if (rock_mask > 0.001) {
+    \\            vec3 vd = normalize(v_pos - u_eye);
+    \\            vec2 rv = an.y > max(an.x, an.z) ? vd.xz : (an.x > an.z ? vd.zy : vd.xy);
+    \\            vec3 rock = rockTexture(rock_uv, mott, rv);
+    \\            albedo = mix(albedo, rock, rock_mask * 0.82);
+    \\        }
     \\    }
     \\    // Lighting is deliberately shy of 1.0: albedo arrives already close to mid grey, and
     \\    // multiplying it by ~1.8 and then gamma-encoding clips the whole surface to white.
