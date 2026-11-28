@@ -575,10 +575,17 @@ pub fn main(init: std.process.Init) !void {
     // Terrain double buffering (ADR 0042): the pending mesh is uploaded in slices while it grows.
     var up_v: usize = 0;
     var up_i: usize = 0;
+    var q_shadow = [2]GpuQuery{ GpuQuery{}, GpuQuery{} };
+    var q_sky = GpuQuery{};
+    var q_terrain = GpuQuery{};
+    var q_grass = GpuQuery{};
+    var q_props = GpuQuery{};
+    var q_water = GpuQuery{};
+    var q_water_swap = GpuQuery{};
+    var q_swprops = GpuQuery{};
+    var q_hud = GpuQuery{};
     var q_flip = GpuQuery{};
     var q_ao = GpuQuery{};
-    var q_water = GpuQuery{};
-    var q_props = GpuQuery{};
     var swap_gpu_pending = false;
     // VOXEL_GPU_SYNC=1: drain the GPU at frame end so the CPU frame time includes the queue.
     const gpu_sync = if (init.environ_map.get("VOXEL_GPU_SYNC")) |raw| raw.len > 0 and raw[0] == '1' else false;
@@ -590,7 +597,7 @@ pub fn main(init: std.process.Init) !void {
         if (swap_gpu_pending) {
             swap_gpu_pending = false;
             std.debug.print("swap gpu: flip {d:.3} ms | ao {d:.3} | water {d:.3} | props {d:.3} (GPU time)\n", .{
-                q_flip.read(), q_ao.read(), q_water.read(), q_props.read(),
+                q_flip.read(), q_ao.read(), q_water_swap.read(), q_swprops.read(),
             });
         }
         var frame_dt = @as(f64, @floatFromInt(frame_start - last_frame_ns)) / 1e9;
@@ -856,11 +863,11 @@ pub fn main(init: std.process.Init) !void {
                 }
                 const t_ao = nowNsIo(io);
                 q_ao.end();
-                q_water.begin();
+                q_water_swap.begin();
                 water.uploadPatch();
-                q_water.end();
+                q_water_swap.end();
                 const t_water = nowNsIo(io);
-                q_props.begin();
+                q_swprops.begin();
                 {
                     const dropped = stream.commit(alloc);
                     props.uploadRocks(scatter.rocks.items);
@@ -887,7 +894,7 @@ pub fn main(init: std.process.Init) !void {
                         @as(f64, @floatFromInt(nowNsIo(io) - swap_t)) / 1e6,
                     });
                 }
-                q_props.end();
+                q_swprops.end();
                 swap_gpu_pending = true;
                 const t_parts = nowNsIo(io);
                 std.debug.print("swap parts: remainder {d:.2} ms | flip {d:.2} | ao {d:.2} | water {d:.2} | props+commit {d:.2}\n", .{
@@ -926,25 +933,31 @@ pub fn main(init: std.process.Init) !void {
         const sky_sh = sun.skySh();
         if (shadow.enabled) {
             shadow.update(camera.position, player.forward(), lighting.sun_dir);
-            for (0..2) |cascade| {
-                shadow.begin(cascade);
-                renderer.drawDepth(shadow.vp[cascade], all_idx.items.len);
-                props.drawTreesDepth(shadow.vp[cascade], water_clock, scatter.trees.items, camera.position);
-                props.drawRocksDepth(shadow.vp[cascade], water_clock, camera.position);
-                props.drawBushesDepth(shadow.vp[cascade], water_clock, camera.position);
-                props.drawSnowDepth(shadow.vp[cascade], water_clock, camera.position);
-                props.drawShoreDepth(shadow.vp[cascade], water_clock, camera.position);
+            for (0..2) |ci| {
+                q_shadow[ci].begin();
+                shadow.begin(@intCast(ci));
+                renderer.drawDepth(shadow.vp[ci], all_idx.items.len);
+                props.drawTreesDepth(shadow.vp[ci], water_clock, scatter.trees.items, camera.position);
+                props.drawRocksDepth(shadow.vp[ci], water_clock, camera.position);
+                props.drawBushesDepth(shadow.vp[ci], water_clock, camera.position);
+                props.drawSnowDepth(shadow.vp[ci], water_clock, camera.position);
+                props.drawShoreDepth(shadow.vp[ci], water_clock, camera.position);
                 shadow.end();
+                q_shadow[ci].end();
             }
-            gl.Viewport(0, 0, window.width, window.height);
-            gl.Enable(gl.DEPTH_TEST);
-            gl.DepthMask(gl.TRUE);
-            gl.Disable(gl.BLEND);
         }
+        // The shadow passes leave the 2048 viewport bound; restore the window before anything draws
+        // to it (the per-frame state rules in the skill apply here too).
+        gl.Viewport(0, 0, window.width, window.height);
+        gl.Enable(gl.DEPTH_TEST);
+        gl.DepthMask(gl.TRUE);
+        gl.Disable(gl.BLEND);
         // The sky pass fills the whole screen, so with it running the magenta clear colour is never
         // visible and a hole shows sky instead. In the diagnostic mode the background is left empty
         // so every hole is the one colour the render cannot produce.
+        q_sky.begin();
         if (!bg_magenta) sky.draw(vp, camera.position, &sun, true, cloud_shift);
+        q_sky.end();
 
         // Fog colours are passed display-encoded because the terrain shader applies its own gamma
         // encode on top of the sRGB framebuffer; matching that space keeps the look and makes the
@@ -956,6 +969,7 @@ pub fn main(init: std.process.Init) !void {
         }.f;
         const fog_col = Vec3.init(encode(ramp.horizon.x), encode(ramp.horizon.y), encode(ramp.horizon.z));
         const fog_sun = Vec3.init(encode(ramp.sun.x), encode(ramp.sun.y), encode(ramp.sun.z));
+        q_terrain.begin();
         renderer.draw(
             vp,
             camera.position,
@@ -977,10 +991,14 @@ pub fn main(init: std.process.Init) !void {
             &shadow,
             all_idx.items.len,
         );
+        q_terrain.end();
+        q_grass.begin();
         for (stream.parts.items) |*p| {
             if (!p.live or p.blades.items.len == 0) continue;
             grass.drawRange(vp, camera.position, lighting.sun_dir, lighting.sun_colour, lighting.ambient_sky, lighting.ambient_ground, fog_col, fog_sun, fog_density, fog_height, fog_base, water_clock, &shadow, p.slot.start, p.blades.items.len);
         }
+        q_grass.end();
+        q_props.begin();
         props.drawTrees(vp, camera.position, camera.right(), camera.up(), lighting.sun_dir, lighting.sun_colour, lighting.ambient_sky, lighting.ambient_ground, fog_col, fog_sun, fog_density, fog_height, fog_base, water_clock, &shadow, scatter.trees.items);
         if (!tree_stats_logged) {
             props.logTreeStats();
@@ -991,6 +1009,8 @@ pub fn main(init: std.process.Init) !void {
         props.drawSnow(vp, camera.position, lighting.sun_dir, lighting.sun_colour, lighting.ambient_sky, lighting.ambient_ground, fog_col, fog_sun, fog_density, fog_height, fog_base, water_clock, &shadow);
         props.drawShore(vp, camera.position, lighting.sun_dir, lighting.sun_colour, lighting.ambient_sky, lighting.ambient_ground, fog_col, fog_sun, fog_density, fog_height, fog_base, water_clock, &shadow);
 
+        q_props.end();
+        q_water.begin();
         water.draw(
             vp,
             camera.position,
@@ -1008,7 +1028,9 @@ pub fn main(init: std.process.Init) !void {
             &shadow,
         );
 
+        q_water.end();
         if (show_hud) {
+            q_hud.begin();
             drawHud(&hud, window.width, window.height, .{
                 .fps = if (fps_now > 0) fps_now else 1000.0 / @max(frame_ms, 0.001),
                 .frame_ms = frame_ms,
@@ -1042,6 +1064,7 @@ pub fn main(init: std.process.Init) !void {
                 .sun_elevation = sun.elevation(),
                 .sun_paused = sun.paused,
             });
+            q_hud.end();
         }
         if (gpu_sync) {
             const sync_t = nowNsIo(io);
@@ -1057,6 +1080,10 @@ pub fn main(init: std.process.Init) !void {
         const elapsed = nowNsIo(io) - window_start;
         if (elapsed >= 1_000_000_000) {
             fps_now = @as(f64, @floatFromInt(frames)) * 1e9 / @as(f64, @floatFromInt(elapsed));
+            std.debug.print("gpu passes: sky {d:.2} | terrain {d:.2} | grass {d:.2} | props {d:.2} | water {d:.2} | hud {d:.2} | shadow {d:.2}+{d:.2} ms\n", .{
+                q_sky.read(), q_terrain.read(), q_grass.read(), q_props.read(), q_water.read(), q_hud.read(),
+                q_shadow[0].read(), q_shadow[1].read(),
+            });
             std.debug.print("stream: parts {d}  dirty {d}  upd {d:.2} ms  blades {d}  slots {d}/{d}\n", .{
                 stream.liveCount(), stream_dirty, stream_update_ms, stream.liveBlades(), stream.used, blade_capacity,
             });

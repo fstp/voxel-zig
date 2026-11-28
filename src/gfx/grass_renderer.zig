@@ -289,7 +289,9 @@ pub const GrassRenderer = struct {
         gl.EnableVertexAttribArray(1);
         gl.VertexAttribPointer(1, 4, gl.FLOAT, gl.FALSE, @sizeOf(Blade), bytes + @sizeOf([3]f32));
         gl.VertexAttribDivisor(1, 1);
-        gl.BindVertexArray(0);
+        // Do NOT unbind here: the caller draws immediately after, and drawing with VAO 0 in a core
+        // profile is GL_INVALID_OPERATION. That silent no-op was why 2.9M blade instances measured
+        // 0.00 ms of GPU time (ADR 0043).
     }
 
     pub fn draw(
@@ -351,7 +353,14 @@ pub const GrassRenderer = struct {
         self.shader.setFloat("u_time", time);
         self.shader.setFloat("u_anim_cutoff", self.animation_cutoff);
         self.shader.setFloat("u_anim_fade", self.animation_fade);
+        // These three had no uploader at all: the shader read 0, so every blade was lowered by
+        // `field * 0.09` from the origin (15 m at x=z=120) and the whole meadow drew underground
+        // while still costing vertex time. Any uniform added to a shader needs its setter here.
+        self.shader.setFloat("u_active_radius", self.active_radius);
+        self.shader.setFloat("u_active_fade", self.active_fade);
+        self.shader.setFloat2("u_field_centre", self.field_centre);
         self.bindRange(offset);
         gl.DrawArraysInstanced(gl.TRIANGLE_STRIP, 0, 7, @intCast(count));
+        gl.BindVertexArray(0);
     }
 };
