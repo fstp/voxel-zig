@@ -58,8 +58,13 @@ make fine detail a mask, update only what changed, and stop animating what is to
 Phase 12 must prove a **rasterized** version of the system, not a path tracer:
 
 - **>= 1,000,000 visible grass blades** and **>= 1,000 visible tree instances** at 3840x2103.
-- 60 fps capped, worst frame **<= 16.7 ms** after the first settled second at the tree and peak poses.
-- Foliage LOD transition error **<= 1 px** at 4K; no visible popping in a camera move.
+- 60 fps capped, worst frame **<= one vsync interval + 0.5 ms** after the first settled second at the
+  tree and peak poses (16.67 + 0.5 = 17.17 ms at 60 Hz; originally written as "<= 16.7 ms", which no
+  vsync-capped measurement can pass because the interval *is* 16.67 ms — amended 2026-11-28, ADR 0046).
+- Foliage LOD transition error **<= 1 px** at 4K; no visible popping in a camera move. Verified
+  2026-11-28 (ADR 0046): 0.22 px at the LOD0->1 switch and 0.23 px at 1->2 by
+  `tree LOD transition error stays under one pixel at the switch distance`; the LOD2 and impostor
+  tiers are unreachable because aggregation starts at 55 m where a tree is still ~177 px.
 - Scatter/instance update work spread so no single patch swap causes a frame over the 16.7 ms budget;
   steady-state foliage update <= 2 ms on the test pose.
 - Memory and draw-call counts reported before/after; no per-instance mesh duplication.

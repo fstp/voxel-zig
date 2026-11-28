@@ -1349,3 +1349,88 @@ fn destroyMesh(m: *Mesh) void {
         gl.DeleteBuffers(1, @ptrCast(&m.ebo));
     }
 }
+
+test "tree LOD transition error stays under one pixel at the switch distance" {
+    const alloc = std.testing.allocator;
+
+    // The three LODs differ only in trunk tessellation; cone sides and cone count are identical, so
+    // the canopy must be bit-identical and the only transition error is the trunk silhouette.
+    // LOD thresholds are 220 px (0->1) and 110 px (1->2) for a 6.5 m tree, so the projected scale is
+    // threshold / 6.5 pixels per metre.
+    const lods = [_]struct { trunk_sides: usize, cone_sides: usize, cones: usize }{
+        .{ .trunk_sides = 12, .cone_sides = 12, .cones = 5 },
+        .{ .trunk_sides = 8, .cone_sides = 12, .cones = 5 },
+        .{ .trunk_sides = 5, .cone_sides = 12, .cones = 5 },
+    };
+    const thresholds = [_]f32{ 220.0, 110.0 };
+
+    var meshes: [3]MeshData = undefined;
+    for (0..3) |i| meshes[i] = try buildTree(alloc, lods[i].trunk_sides, lods[i].cone_sides, lods[i].cones);
+    defer for (0..3) |i| meshes[i].deinit(alloc);
+
+    // Canopy: every vertex of the coarse mesh must exist exactly in the finer one.
+    for (0..2) |i| {
+        for (meshes[i + 1].verts.items) |c| {
+            if (c.pos[1] <= 2.21) continue; // trunk rings are at y = 0 and y = 2.2
+            var found = false;
+            for (meshes[i].verts.items) |f| {
+                if (f.pos[1] <= 2.21) continue;
+                if (f.pos[0] == c.pos[0] and f.pos[1] == c.pos[1] and f.pos[2] == c.pos[2]) {
+                    found = true;
+                    break;
+                }
+            }
+            try std.testing.expect(found);
+        }
+    }
+
+    // Trunk: distance from each coarse vertex to the finer ring POLYLINE (surface deviation, not
+    // vertex distance - vertex-to-vertex roughly quadruples the error a viewer can see).
+    for (0..2) |i| {
+        const coarse = meshes[i + 1].verts.items;
+        const fine = meshes[i].verts.items;
+        var worst: f32 = 0.0;
+        for (coarse) |c| {
+            if (c.pos[1] > 2.21 or !(c.col[0] > c.col[1])) continue;
+            var best: f32 = std.math.floatMax(f32);
+            // ring edges: consecutive fine trunk vertices at the same height, cyclic
+            const n = lods[i].trunk_sides;
+            var k: usize = 0;
+            while (k < n) : (k += 1) {
+                const a = ringVertex(fine, c.pos[1], k);
+                const b = ringVertex(fine, c.pos[1], (k + 1) % n);
+                if (a == null or b == null) continue;
+                const d = segDist2(c.pos, a.?, b.?);
+                if (d < best) best = d;
+            }
+            if (best != std.math.floatMax(f32) and best > worst) worst = best;
+        }
+        const px_per_m = thresholds[i] / 6.5;
+        std.debug.print("lod {d}->{d}: worst trunk surface delta {d:.4} m = {d:.2} px at the switch distance\n", .{ i, i + 1, worst, worst * px_per_m });
+        try std.testing.expect(worst * px_per_m <= 1.0);
+    }
+}
+
+/// The k-th trunk vertex at the given ring height, or null if this mesh has no vertex there.
+fn ringVertex(verts: []const Vertex, y: f32, k: usize) ?[3]f32 {
+    var seen: usize = 0;
+    for (verts) |v| {
+        if (@abs(v.pos[1] - y) > 0.001 or !(v.col[0] > v.col[1])) continue; // trunk is brown: R > G
+        if (seen == k) return v.pos;
+        seen += 1;
+    }
+    return null;
+}
+
+fn segDist2(p: [3]f32, a: [3]f32, b: [3]f32) f32 {
+    const abx = b[0] - a[0];
+    const abz = b[2] - a[2];
+    const apx = p[0] - a[0];
+    const apz = p[2] - a[2];
+    const len2 = abx * abx + abz * abz;
+    var t: f32 = 0;
+    if (len2 > 0) t = @max(0, @min(1, (apx * abx + apz * abz) / len2));
+    const dx = apx - abx * t;
+    const dz = apz - abz * t;
+    return @sqrt(dx * dx + dz * dz);
+}

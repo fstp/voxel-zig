@@ -35,7 +35,7 @@ worst dropped from 22.3 ms to 16.9 ms at the pose that used to miss the budget.
 | Frame worst, settled | ≤ 16.7 ms | 16.76-16.92 ms | **missed by 0.06-0.25 ms** |
 | Steady-state foliage update | ≤ 2 ms | 0.00 ms | met |
 | No patch swap over 16.7 ms | ≤ 16.7 ms | 17.11 ms swap frame (ADR 0041) | missed by 0.4 ms |
-| LOD transition error | ≤ 1 px | not re-measured this phase close | **unverified** |
+| LOD transition error | ≤ 1 px | **0.22 px** (0→1), **0.23 px** (1→2); LOD2/impostor unreachable | **met** |
 | Memory and draw calls reported | required | 261/242 MB, 62 draws | met |
 | No per-instance mesh duplication | required | one shared VBO/EBO per part, instanced | met |
 
@@ -69,6 +69,42 @@ candidates** (all evaluated by the same filters, ranked by their own hash) lands
 `zig build test` now reports `scatter trees: 1020 overlapping instances exact`, i.e. the same trees
 in every patch build. That is the property the phase is built on, and the finer grid is what made
 the old shortcut fail loudly instead of silently.
+
+
+## LOD transition error: measured, and two tiers turn out to be unreachable
+
+A permanent test now covers the transition error —
+`tree LOD transition error stays under one pixel at the switch distance` in `prop_renderer.zig`
+(pulled into the test binary from `root.zig`, which previously did not import that file at all, so a
+test there would silently never have run).
+
+The three tree LODs differ **only in trunk tessellation** (12 / 8 / 5 sides); cone sides and cone
+count are identical, so the canopy cannot move between LODs and the test asserts that by requiring
+every coarse canopy vertex to exist exactly in the finer mesh. The remaining error is the trunk
+silhouette, measured as the distance from each coarse vertex to the finer ring **polyline** (surface
+deviation — vertex-to-vertex distance overstates it about fourfold):
+
+| Transition | Worst surface delta | Pixels at the switch distance |
+|---|---|---|
+| LOD 0 -> 1 (220 px threshold) | 0.0065 m | **0.22 px** |
+| LOD 1 -> 2 (110 px threshold) | 0.0139 m | **0.23 px** |
+
+Both are inside the 1 px target by a factor of four.
+
+### The LOD2 and impostor tiers never run
+
+`trees: 1129 total, 836 merged into 1 aggregate instances (cutoff 55 m)`. At 55 m a 6.5 m tree is
+1501.7 / 55 * 6.5 = **177 px** tall, while the LOD1->2 threshold is 110 px and the impostor threshold
+is 75 px (which would need 131 m). So:
+
+- LOD0 is used to ~44 m, LOD1 to the 55 m aggregate cutoff, and then the aggregate mesh takes over.
+- The aggregate is built from the **12-side** trunk, i.e. it switches *up* in fidelity at 55 m
+  (error 0.0065 m = 0.18 px at that distance), so the swap cannot pop.
+- **LOD2 and the impostor path are dead code** at any realistic density; the impostor tier would
+  need a 131 m tree, which is outside the 128 m patch.
+
+That is recorded rather than removed in this pass: deleting the impostor path (shader, texture, VAO,
+draw branch, ~100 lines) is a separate, reviewable change.
 
 ## Why the frame lines miss by fractions of a millisecond
 

@@ -470,6 +470,25 @@ pub fn main(init: std.process.Init) !void {
         }
     }
     props.lod_focal = foliage_anim.focalPixels(@floatFromInt(window.height), camera.fov_y_deg);
+    // ADR 0047: verification aid for the LOD transition error. Prints the nearest trees with the
+    // projected pixel size the LOD chooser uses, so a pose can be placed exactly at a switch.
+    if (init.environ_map.get("VOXEL_TREE_DEBUG")) |raw| {
+        if (raw.len > 0 and raw[0] == '1') {
+            std.debug.print("tree debug: focal {d:.1} px, {d} trees\n", .{ props.lod_focal, scatter.trees.items.len });
+            var shown: usize = 0;
+            for (scatter.trees.items) |t| {
+                const dx = t.pos[0] - player.position.x;
+                const dz = t.pos[2] - player.position.z;
+                const d = @sqrt(dx * dx + dz * dz);
+                if (d > 160.0) continue;
+                const px = 6.5 * t.scale * props.lod_focal / @max(d, 0.1);
+                std.debug.print("  tree {d:.1} {d:.1} | dist {d:.1} m | {d:.0} px | lod {d}\n",
+                    .{ t.pos[0], t.pos[2], d, px, foliage_anim.lodForPixels(px, 0) });
+                shown += 1;
+                if (shown >= 14) break;
+            }
+        }
+    }
     try props.uploadTrees(
         alloc,
         scatter.trees.items,
