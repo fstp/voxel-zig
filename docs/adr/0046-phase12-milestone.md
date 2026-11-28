@@ -1,6 +1,6 @@
 # 0046 — Phase 12 milestone: 2.98M blades at 4K/60, but no pose has 1,000 trees
 
-- Status: **milestone measured; left OPEN with three named lines** (2026-11-28)
+- Status: **milestone measured; tree line fixed; frame line still not passable as written** (2026-11-28)
 - Task: Vikunja #97, 12.8
 - Target: ADR 0034 ("≥ 1,000,000 visible grass blades and ≥ 1,000 visible tree instances at
   3840x2103; 60 fps capped, worst frame ≤ 16.7 ms; LOD error ≤ 1 px; no swap over budget;
@@ -31,7 +31,7 @@ worst dropped from 22.3 ms to 16.9 ms at the pose that used to miss the budget.
 | Line | Target | Measured | Verdict |
 |---|---|---|---|
 | Visible grass blades | ≥ 1,000,000 | 2,978,891 / 2,251,579 | **met, 2.2-3.0x** |
-| Visible tree instances | ≥ 1,000 | **193 / 183** | **failed** |
+| Visible tree instances | ≥ 1,000 | **1,129 / 1,066** | **met** |
 | Frame worst, settled | ≤ 16.7 ms | 16.76-16.92 ms | **missed by 0.06-0.25 ms** |
 | Steady-state foliage update | ≤ 2 ms | 0.00 ms | met |
 | No patch swap over 16.7 ms | ≤ 16.7 ms | 17.11 ms swap frame (ADR 0041) | missed by 0.4 ms |
@@ -39,21 +39,36 @@ worst dropped from 22.3 ms to 16.9 ms at the pose that used to miss the budget.
 | Memory and draw calls reported | required | 261/242 MB, 62 draws | met |
 | No per-instance mesh duplication | required | one shared VBO/EBO per part, instanced | met |
 
-## Why the tree line fails, and what it would take
+## The tree line was fixed by densifying the scatter (option 1)
 
-The scatter places **193 trees in the whole 256 m patch** at tree.sav (183 at peak.sav). The target
-asks for 1,000 *visible* tree instances in one pose. That is not a renderer limit — the far trees are
-already one merged draw (40-44 cells, 151-161 trees) and near trees are instanced — it is a **content
-density** decision: the world would need roughly 5x the tree count, which then also raises the
-aggregate vertex load and the shadow-caster count.
+The scatter placed **193 trees in the whole 256 m patch**. The candidate grid was 8 m with a 55 %
+keep and 4 m spacing. Now it is **4 m candidates, 90 % keep, 2.5 m spacing**:
 
-Options, for the record:
-1. Raise tree density ~5x in `scatter.buildProps` and re-measure; expect the aggregate mesh to grow
-   from 13.4k verts to ~65k and shadow depth passes to grow with it.
-2. Amend ADR 0034's target to "1,000 visible foliage *instances* (trees + bushes + rocks)", which the
-   current world already meets many times over, and record that as the phase's definition.
-3. Leave the milestone open indefinitely, which hides the fact that everything except this line is
-   done.
+| | tree.sav | peak.sav |
+|---|---|---|
+| Trees before | 193 | 183 |
+| **Trees after** | **1,129** (5.8x) | **1,066** (5.8x) |
+| Aggregate after | 53 cells -> 1 draw, 836 trees, 74,404 verts | 54 cells -> 1 draw, 890 trees, 79,210 verts |
+| Draw calls | **62 (unchanged)** | — |
+| Frame worst | 16.77-16.81 ms | 16.83-17.02 ms |
+| Props pass | 1.52 ms | 2.03 ms |
+| Scatter + props | 3.3 ms | 3.3 ms |
+| Peak RSS | 267 MB | 242 MB |
+
+**The density was nearly free**: the far trees merge into the single aggregate draw (836-890 trees),
+and near trees are instanced batches, so the draw count did not move and the frame worst stayed where
+it was. The cost shows up as props GPU time (0.2 -> 1.5-2.0 ms) and 210-224k aggregate indices.
+
+### A real bug this exposed
+
+Densifying the grid made the tree spacing rule (reject within 2.5 m of an already-placed tree) start
+biting, and the world-anchoring test caught it: a tree's fate depended on **which patch scanned it
+first**, so the same world cell could be forest in one patch and empty in the next. The rule is now
+local and order-independent — a candidate is rejected only if one of its **eight neighbouring
+candidates** (all evaluated by the same filters, ranked by their own hash) lands within the spacing.
+`zig build test` now reports `scatter trees: 1020 overlapping instances exact`, i.e. the same trees
+in every patch build. That is the property the phase is built on, and the finer grid is what made
+the old shortcut fail loudly instead of silently.
 
 ## Why the frame lines miss by fractions of a millisecond
 

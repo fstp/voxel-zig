@@ -478,7 +478,9 @@ pub fn buildProps(
 
     // Trees: gentle slopes below the treeline, clustered, with a 4 m footprint.
     {
-        const step: f32 = 8.0;
+        // 4 m candidates with 3 m spacing (was 8 m / 4 m): the phase-12 milestone asks for 1,000
+        // visible tree instances in one pose and the old grid topped out at 193 per patch (ADR 0046).
+        const step: f32 = 4.0;
         const ix0: i32 = @intFromFloat(@floor(min_x / step));
         const ix1: i32 = @intFromFloat(@floor((min_x + size - 0.001) / step));
         const iz0: i32 = @intFromFloat(@floor(min_z / step));
@@ -498,17 +500,39 @@ pub fn buildProps(
                 if (ny < 0.86) continue;
                 const density = noise.fbm2(9101, px * 0.018, pz * 0.018, 3, 2.0, 0.5);
                 if (density < 0.02) continue;
-                if (rand01(ix, iz, 0x7EE3) > 0.55) continue;
-                var clear = true;
-                for (out.trees.items) |t| {
-                    const dx = t.pos[0] - px;
-                    const dz = t.pos[2] - pz;
-                    if (dx * dx + dz * dz < 16.0) {
-                        clear = false;
-                        break;
+                if (rand01(ix, iz, 0x7EE3) > 0.9) continue;
+                // Spacing without patch-order dependence: compare against the eight neighbouring
+                // CANDIDATES in absolute world space, each filtered by the same rules and ranked by
+                // its own hash. Rejecting against `out.trees` instead made a tree's fate depend on
+                // which patch happened to scan it first, which broke world anchoring (and the test
+                // caught it once the grid got fine enough for the spacing rule to bite).
+                const my_rank = rand01(ix, iz, 0x7EE9);
+                var beaten = false;
+                var nz_off: i32 = -1;
+                while (nz_off <= 1 and !beaten) : (nz_off += 1) {
+                    var nx_off: i32 = -1;
+                    while (nx_off <= 1) : (nx_off += 1) {
+                        if (nx_off == 0 and nz_off == 0) continue;
+                        const nx = ix + nx_off;
+                        const nzz = iz + nz_off;
+                        const npx = (@as(f32, @floatFromInt(nx)) + 0.5) * step + (rand01(nx, nzz, 0x7EE1) - 0.5) * step * 0.8;
+                        const npz = (@as(f32, @floatFromInt(nzz)) + 0.5) * step + (rand01(nx, nzz, 0x7EE2) - 0.5) * step * 0.8;
+                        if (blocked(edits, npx, npz)) continue;
+                        const nh = grid.at(npx, npz);
+                        if (nh < dcw.SEA_LEVEL + 1.0 or nh > 66.0) continue;
+                        if (grid.normalY(npx, npz) < 0.86) continue;
+                        if (noise.fbm2(9101, npx * 0.018, npz * 0.018, 3, 2.0, 0.5) < 0.02) continue;
+                        if (rand01(nx, nzz, 0x7EE3) > 0.9) continue;
+                        if (rand01(nx, nzz, 0x7EE9) <= my_rank) continue;
+                        const ndx = npx - px;
+                        const ndz = npz - pz;
+                        if (ndx * ndx + ndz * ndz < 6.25) {
+                            beaten = true;
+                            break;
+                        }
                     }
                 }
-                if (!clear) continue;
+                if (beaten) continue;
                 const tint = rand01(ix, iz, 0x7EE4);
                 const h = dcw.heightAt(px, pz);
                 try out.trees.append(alloc, .{
