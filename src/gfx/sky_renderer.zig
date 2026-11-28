@@ -27,6 +27,9 @@ pub const SkyRenderer = struct {
     /// Optional atmospheric horizon haze + Mie glow (ADR 0021). Off by default so the engine's
     /// accepted sky look is unchanged; the DC viewer turns it on for the atmosphere pass.
     atmosphere: bool = false,
+    /// Cloud march steps. Was 22; measured at 4K the sky pass costs 8.12 ms median at 22 and
+    /// 5.77 ms at 10, with a mean pixel difference of 1.9 against the 22-step frame (ADR 0044).
+    cloud_steps: i32 = 10,
 
     pub fn init() !SkyRenderer {
         var shader = try Shader.init(VERT_SRC, FRAG_SRC);
@@ -84,6 +87,7 @@ pub const SkyRenderer = struct {
         const cloud_ramp = sun.ramp();
         self.shader.setFloat("u_clouds", if (clouds_enabled) 1.0 else 0.0);
         self.shader.setFloat("u_cloud_coverage", 0.43);
+        self.shader.setInt("u_cloud_steps", self.cloud_steps);
         self.shader.setVec3("u_cloud_shift", .{ cloud_shift.x, cloud_shift.y, cloud_shift.z });
         self.shader.setFloat("u_cloud_bottom", 380.0);
         self.shader.setFloat("u_cloud_top", 700.0);

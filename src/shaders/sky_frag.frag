@@ -9,6 +9,7 @@ uniform float u_stars; // 0 day, 1 night
 uniform float u_clouds;        // 0 off, 1 on (3.11)
 uniform float u_cloud_coverage;// 0..1, higher = fewer gaps
 uniform vec3 u_cloud_shift;    // wind offset in cloud space
+uniform int u_cloud_steps;     // march budget: the single biggest cost in this pass (ADR 0044)
 uniform float u_cloud_bottom;
 uniform float u_cloud_top;
 uniform vec3 u_cloud_light;    // sun colour at cloud height
@@ -76,7 +77,7 @@ vec4 clouds(vec3 dir) {
     float t1 = min((u_cloud_top - u_eye.y) / dir.y, t0 + MAX_TRAVEL);
     if (t1 <= t0) return vec4(0.0, 0.0, 0.0, 1.0);
 
-    const int STEPS = 22;
+    int STEPS = max(u_cloud_steps, 4);
     float dt = (t1 - t0) / float(STEPS);
     float cos_angle = dot(dir, u_sun_dir);
     // Henyey-Greenstein, forward peaked: thin edges glow when backlit.

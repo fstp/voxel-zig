@@ -589,6 +589,9 @@ pub fn main(init: std.process.Init) !void {
     var swap_gpu_pending = false;
     // VOXEL_GPU_SYNC=1: drain the GPU at frame end so the CPU frame time includes the queue.
     const gpu_sync = if (init.environ_map.get("VOXEL_GPU_SYNC")) |raw| raw.len > 0 and raw[0] == '1' else false;
+    if (init.environ_map.get("VOXEL_CLOUD_STEPS")) |raw| {
+        sky.cloud_steps = std.fmt.parseInt(i32, std.mem.trim(u8, raw, " \t"), 10) catch 22;
+    }
     const fixed_dt: f64 = 1.0 / 60.0;
     var frame_ms: f64 = 0;
     var fps_now: f64 = 0;
