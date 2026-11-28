@@ -845,26 +845,38 @@ pub const PropRenderer = struct {
 
         var src = try buildTree(alloc, 12, 12, 5);
         defer src.deinit(alloc);
+        // One mesh and one instance buffer for every far cell (ADR 0042): 45 cells used to be 45
+        // draw calls in the main pass and 45 more in each shadow cascade. The cells are static for
+        // the life of a patch, so nothing is lost by concatenating them; each cell keeps its own
+        // origin baked into its vertices.
+        var merged = MeshData{};
+        defer merged.deinit(alloc);
+        var cells_used: usize = 0;
+        var merged_trees: usize = 0;
         for (cells[0..cell_count]) |cell| {
             if (cell.count == 0) continue;
             const origin_x = (@as(f32, @floatFromInt(cell.ix)) + 0.5) * 32.0;
             const origin_z = (@as(f32, @floatFromInt(cell.iz)) + 0.5) * 32.0;
-            var md = MeshData{};
-            defer md.deinit(alloc);
             for (cell.trees[0..cell.count]) |ti| {
-                try appendTransformed(&md, &src, alloc, trees[ti], origin_x, origin_z);
+                try appendTransformed(&merged, &src, alloc, trees[ti], origin_x, origin_z);
             }
-            if (md.verts.items.len == 0) continue;
-            var instance_vbo: u32 = 0;
-            gl.GenBuffers(1, @ptrCast(&instance_vbo));
-            const cell_prop = Prop{ .pos = .{ origin_x, 0.0, origin_z }, .yaw = 0, .scale = 1, .tint = 0.444 };
-            gl.BindBuffer(gl.ARRAY_BUFFER, instance_vbo);
-            gl.BufferData(gl.ARRAY_BUFFER, @sizeOf(Prop), &cell_prop, gl.STATIC_DRAW);
-            const mesh = try uploadMesh(alloc, &md, instance_vbo);
-            self.aggregates[self.aggregate_count] = .{ .mesh = mesh, .instance_vbo = instance_vbo, .tree_count = cell.count };
-            self.aggregate_count += 1;
-            self.aggregate_tree_count += cell.count;
+            cells_used += 1;
+            merged_trees += cell.count;
         }
+        if (merged.verts.items.len == 0) return;
+        var instance_vbo: u32 = 0;
+        gl.GenBuffers(1, @ptrCast(&instance_vbo));
+        // The instance record is the identity: everything is already in world space.
+        const identity = Prop{ .pos = .{ 0.0, 0.0, 0.0 }, .yaw = 0, .scale = 1, .tint = 0.444 };
+        gl.BindBuffer(gl.ARRAY_BUFFER, instance_vbo);
+        gl.BufferData(gl.ARRAY_BUFFER, @sizeOf(Prop), &identity, gl.STATIC_DRAW);
+        const mesh = try uploadMesh(alloc, &merged, instance_vbo);
+        self.aggregates[self.aggregate_count] = .{ .mesh = mesh, .instance_vbo = instance_vbo, .tree_count = merged_trees };
+        self.aggregate_count += 1;
+        self.aggregate_tree_count = merged_trees;
+        std.debug.print("aggregate: {d} cells merged into 1 draw, {d} trees, {d} verts, {d} indices\n", .{
+            cells_used, merged_trees, merged.verts.items.len, merged.idx.items.len,
+        });
         std.debug.print(
             "trees: {d} total, {d} merged into {d} aggregate instances (cutoff {d:.0} m)\n",
             .{ trees.len, self.aggregate_tree_count, self.aggregate_count, self.aggregate_distance },
@@ -1010,6 +1022,7 @@ pub const PropRenderer = struct {
         self.last_tree_instances = n0 + n1 + n2 + n3;
         self.last_lod_counts = .{ n0, n1, n2, n3 };
         self.last_aggregate_instances = 0;
+        // One merged aggregate now; the loop stays so a future split needs no call-site change.
         for (self.aggregates[0..self.aggregate_count]) |*a| {
             gl.BindVertexArray(a.mesh.vao);
             gl.DrawElementsInstanced(gl.TRIANGLES, @intCast(a.mesh.index_count), gl.UNSIGNED_INT, 0, 1);

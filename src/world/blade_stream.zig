@@ -7,6 +7,10 @@
 //!
 //! Slots are byte ranges in an instance buffer; the allocator is first-fit with coalescing, so a
 //! cell keeps its range across frames and its instances never move while it stays live.
+//!
+//! ADR 0041: a cell's blades are generated on a worker thread into a buffer the job owns, then
+//! drained on the main thread and copied into the stream. This module never touches an Io handle
+//! itself, so its tests stay synchronous.
 
 const std = @import("std");
 const scatter = @import("scatter.zig");
@@ -48,6 +52,23 @@ pub const Upload = struct {
     blades: []const Blade,
 };
 
+/// One partition generated off the main thread. `blades` is owned by the job until `takeJob`
+/// moves it into a part. Thread safety rests on two rules: the job object is only touched by the
+/// worker until its `Future` is awaited, and the worker's only output is a buffer it allocated
+/// itself.
+pub const Job = struct {
+    cx: i32,
+    cz: i32,
+    blades: std.ArrayList(Blade) = .empty,
+    failed: bool = false,
+};
+
+fn jobMain(job: *Job, edits: []const @import("dc_world.zig").Edit, cx: i32, cz: i32) void {
+    scatter.buildBladesCell(std.heap.page_allocator, edits, cx, cz, &job.blades) catch {
+        job.failed = true;
+    };
+}
+
 pub const Stream = struct {
     parts: std.ArrayList(Part) = .empty,
     /// Holes in the buffer, sorted by start and already coalesced.
@@ -58,6 +79,19 @@ pub const Stream = struct {
     reused_slots: usize = 0,
     freed_slots: usize = 0,
     built_total: usize = 0,
+    /// In-flight generation; awaited before the job object is reused.
+    job: ?std.Io.Future(void) = null,
+    job_ptr: ?*Job = null,
+    /// Nanoseconds from `startJob` to the landed upload, i.e. generation plus everything the frame
+    /// paid. Raw, because a whole cell can complete inside the resolution of a millisecond figure.
+    last_job_ms_ns: i64 = 0,
+    /// Main-thread time inside `takeJob`, i.e. how long the await actually blocked the frame.
+    last_wait_ms: f32 = 0,
+    /// Stamped by `startJobTimed`.
+    job_started_ns: i64 = 0,
+    /// Instances in the most recently landed job (for the log line).
+    last_landed: usize = 0,
+    timer_start_ns: i64 = 0,
 
     pub fn init(alloc: std.mem.Allocator, capacity: usize) !Stream {
         var self = Stream{ .capacity = capacity };
@@ -66,6 +100,7 @@ pub const Stream = struct {
         return self;
     }
 
+    /// Frees every part.
     pub fn deinit(self: *Stream, alloc: std.mem.Allocator) void {
         for (self.parts.items) |*p| p.blades.deinit(alloc);
         self.parts.deinit(alloc);
@@ -170,6 +205,70 @@ pub const Stream = struct {
         }
     }
 
+    /// The first cell that still needs building, skipping the one an in-flight job owns.
+    pub fn nextMissing(self: *Stream) ?*Part {
+        for (self.parts.items) |*p| {
+            if (!p.wanted or p.live or p.built) continue;
+            if (self.job_ptr) |j| {
+                if (j.cx == p.cx and j.cz == p.cz) continue;
+            }
+            return p;
+        }
+        return null;
+    }
+
+    /// Start generating the next missing cell on the Io pool. Returns false when a job is already
+    /// in flight or nothing is missing. `job` must outlive the wait in `takeJob`.
+    pub fn startJob(self: *Stream, io: std.Io, job: *Job, edits: []const @import("dc_world.zig").Edit) !bool {
+        if (self.job != null) return false;
+        const p = self.nextMissing() orelse return false;
+        job.* = .{ .cx = p.cx, .cz = p.cz };
+        self.job = io.async(jobMain, .{ job, edits, p.cx, p.cz });
+        self.job_ptr = job;
+        return true;
+    }
+
+    /// `startJob` plus the caller's monotonic timestamp, so `takeJob` can report the whole wait.
+    pub fn startJobTimed(self: *Stream, io: std.Io, job: *Job, edits: []const @import("dc_world.zig").Edit, now: i64) !bool {
+        self.timer_start_ns = now;
+        self.job_started_ns = now;
+        self.last_wait_ms = 0;
+        return self.startJob(io, job, edits);
+    }
+
+    /// Main thread, once per frame. If the job is done, its blades move into the cell's part and
+    /// its slot is reserved; `uploads` receives the range to copy. `alloc` must be the allocator
+    /// given to `startJob` -- it is the pool an `await` returns capacity to.
+    pub fn takeJob(self: *Stream, io: std.Io, uploads: *std.ArrayList(Upload), now: i64) !bool {
+        const job = self.job_ptr orelse return false;
+        if (self.job) |*f| f.await(io);
+        self.last_job_ms_ns = now - self.job_started_ns;
+        self.last_wait_ms = @as(f32, @floatFromInt(now - self.timer_start_ns)) / 1e6;
+        self.job = null;
+        self.job_ptr = null;
+        defer job.blades.deinit(std.heap.page_allocator);
+        if (job.failed) return error.JobFailed;
+
+        // The cell may have been dropped by a newer patch while the job ran.
+        for (self.parts.items) |*p| {
+            if (p.cx != job.cx or p.cz != job.cz) continue;
+            if (!p.wanted or p.built) break;
+            try p.blades.appendSlice(std.heap.page_allocator, job.blades.items);
+            const need = self.allocSlot(p.blades.items.len) orelse {
+                p.blades.clearRetainingCapacity();
+                return error.BufferFull;
+            };
+            p.slot = need;
+            p.has_slot = true;
+            p.built = true;
+            self.built_total += 1;
+            self.last_landed = p.blades.items.len;
+            try uploads.append(std.heap.page_allocator, .{ .offset = need.start, .blades = p.blades.items });
+            break;
+        }
+        return true;
+    }
+
     pub fn pendingCount(self: *Stream) usize {
         var n: usize = 0;
         for (self.parts.items) |p| {
@@ -204,6 +303,7 @@ pub const Stream = struct {
             p.built = true;
             try uploads.append(alloc, .{ .offset = need.start, .blades = p.blades.items });
             self.built_total += 1;
+            self.last_landed = p.blades.items.len;
             built += 1;
         }
         return self.pendingCount() == 0;
@@ -308,6 +408,26 @@ test "partition build is deterministic and world-anchored" {
     try std.testing.expect(c.items.len > 0);
     try std.testing.expect(c.items.len != a.items.len or c.items[0].pos[0] != a.items[0].pos[0]);
     std.debug.print("stream: partition determinism ok, {d} blades in cell (4,4)\n", .{a.items.len});
+}
+
+test "a worker-thread job produces the same blades as the serial build" {
+    const alloc = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var serial: std.ArrayList(Blade) = .empty;
+    defer serial.deinit(alloc);
+    try scatter.buildBladesCell(alloc, &.{}, 4, 4, &serial);
+
+    var job = Job{ .cx = 4, .cz = 4 };
+    const no_edits: []const @import("dc_world.zig").Edit = &.{};
+    var future = io.async(jobMain, .{ &job, no_edits, @as(i32, 4), @as(i32, 4) });
+    future.await(io);
+    try std.testing.expect(!job.failed);
+    defer job.blades.deinit(std.heap.page_allocator);
+    try expectSameBlades(serial.items, job.blades.items);
+    std.debug.print("stream: worker job matches serial build ({d} blades)\n", .{serial.items.len});
 }
 
 test "stream assigns cells, reuses slots and commits the new patch" {

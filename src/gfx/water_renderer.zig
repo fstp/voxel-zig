@@ -157,6 +157,7 @@ pub const WaterRenderer = struct {
     built_min_x: f32 = -1e30,
     built_min_z: f32 = -1e30,
     built_size: f32 = 0,
+    dirty: bool = true,
 
     pub fn init() !WaterRenderer {
         var shader = try Shader.init(vertex_src, fragment_src);
@@ -198,7 +199,9 @@ pub const WaterRenderer = struct {
     }
 
     /// Rebuilds the grid when the patch moves. `min_x`/`min_z` are the patch's world minima.
-    pub fn ensurePatch(self: *WaterRenderer, min_x: f32, min_z: f32, size: f32) void {
+    /// Build the sea grid for a patch. Split from the upload so the CPU half can run while the
+    /// swap frame is still ahead of us (ADR 0042): the depth walk is a heightAt() per vertex.
+    pub fn buildPatch(self: *WaterRenderer, min_x: f32, min_z: f32, size: f32) void {
         if (self.built_size == size and self.built_min_x == min_x and self.built_min_z == min_z) return;
         const step = size / @as(f32, @floatFromInt(GRID));
         for (0..VERTS) |j| {
@@ -218,7 +221,14 @@ pub const WaterRenderer = struct {
         self.built_min_x = min_x;
         self.built_min_z = min_z;
         self.built_size = size;
+        self.dirty = true;
+    }
 
+    /// Upload whatever `buildPatch` produced. Idempotent: the swap frame calls it, and a frame in
+    /// which nothing changed costs one branch.
+    pub fn uploadPatch(self: *WaterRenderer) void {
+        if (!self.dirty) return;
+        self.dirty = false;
         if (self.vao == 0) {
             gl.GenVertexArrays(1, @ptrCast(&self.vao));
             gl.GenBuffers(1, @ptrCast(&self.vbo));
@@ -235,6 +245,12 @@ pub const WaterRenderer = struct {
         }
         gl.BindBuffer(gl.ARRAY_BUFFER, self.vbo);
         gl.BufferData(gl.ARRAY_BUFFER, @intCast(self.verts.len * @sizeOf([3]f32)), self.verts.ptr, gl.STATIC_DRAW);
+    }
+
+    /// Build and upload in one call, for the startup path.
+    pub fn ensurePatch(self: *WaterRenderer, min_x: f32, min_z: f32, size: f32) void {
+        self.buildPatch(min_x, min_z, size);
+        self.uploadPatch();
     }
 
     pub fn draw(

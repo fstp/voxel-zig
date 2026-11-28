@@ -21,12 +21,14 @@ const CHUNK: usize = dcw.CHUNK;
 const PATCH: i32 = dcw.PATCH;
 const BUILD_TAG = "dc-modules-1";
 
-const TimeSpec = extern struct { tv_sec: i64, tv_nsec: i64 };
-extern "c" fn clock_gettime(clk_id: c_int, tp: *TimeSpec) c_int;
-fn nowNs() i64 {
-    var ts: TimeSpec = undefined;
-    _ = clock_gettime(1, &ts);
-    return ts.tv_sec * 1_000_000_000 + ts.tv_nsec;
+/// Monotonic nanoseconds for the app's own instrumentation. An extern `clock_gettime` against
+/// this libc can land on a vDSO page that is resolved differently once a library is injected
+/// (RenderDoc), which makes main-thread stamps non-monotonic in a way that looks like a 10 ms
+/// stall in whichever block sits between two of them. `std.Io.Timestamp.now` goes through the
+/// runtime's own clock and was monotonic under the same conditions.
+fn nowNsIo(io: std.Io) i64 {
+    const ts = std.Io.Timestamp.now(io, .awake);
+    return @intCast(ts.nanoseconds);
 }
 
 fn playerSave(p: DcPlayer) dcw.PlayerSave {
@@ -143,6 +145,7 @@ pub fn main(init: std.process.Init) !void {
     // Sampling the background colour from the frame cannot make that distinction, and did not:
     // two builds with IDENTICAL geometry measured 74 vs 320 "hole" pixels purely from shading.
     const bg_magenta = if (init.environ_map.get("VOXEL_DC_BG")) |raw| raw.len > 0 and raw[0] == 'm' else false;
+    const io = init.io;
     var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
     defer _ = debug_allocator.deinit();
     const alloc = debug_allocator.allocator();
@@ -314,35 +317,37 @@ pub fn main(init: std.process.Init) !void {
     defer probe_verts.deinit(alloc);
     var probe_idx: std.ArrayList(u32) = .empty;
     defer probe_idx.deinit(alloc);
-    const t_rebuild = nowNs();
+    const t_rebuild = nowNsIo(io);
     const probe = try dcw.meshPatch(alloc, edits.items, patch_origin, patch_origin_z, &probe_verts, &probe_idx);
-    const rebuild_ms = @as(f64, @floatFromInt(nowNs() - t_rebuild)) / 1e6;
+    const rebuild_ms = @as(f64, @floatFromInt(nowNsIo(io) - t_rebuild)) / 1e6;
     const identical = probe_verts.items.len == all_verts_s.len and probe_idx.items.len == all_idx_s.len and probe.quads == first.quads;
     std.debug.print("rebuild: {d} quads in {d:.1} ms, identical to the first build: {}\n", .{ probe.quads, rebuild_ms, identical });
 
+    // The AO map lives here (not in the swap) so a refresh is built before the frame that uses it.
+    var ao_work: ?[]u8 = null;
+    defer if (ao_work) |buf| alloc.free(buf);
     var renderer = try vz.gfx.DcRenderer.init();
     defer renderer.deinit();
     renderer.upload(all_verts_s, all_idx_s);
     renderer.setAoEnabled(ao_enabled);
     if (ao_enabled) {
-        const ao_t0 = nowNs();
-        const ao_map = try vz.world.heightfield_ao.build(
+        const ao_t0 = nowNsIo(io);
+        ao_work = try vz.world.heightfield_ao.build(
             alloc,
             @floatFromInt(patch_origin * @as(i32, @intCast(CHUNK))),
             @floatFromInt(patch_origin_z * @as(i32, @intCast(CHUNK))),
             @floatFromInt(PATCH * @as(i32, @intCast(CHUNK))),
         );
-        defer alloc.free(ao_map);
         renderer.uploadAo(
-            ao_map,
+            ao_work.?,
             @floatFromInt(patch_origin * @as(i32, @intCast(CHUNK))),
             @floatFromInt(patch_origin_z * @as(i32, @intCast(CHUNK))),
             @floatFromInt(PATCH * @as(i32, @intCast(CHUNK))),
         );
-        std.debug.print("ao: 64x64 in {d:.2} ms\n", .{@as(f64, @floatFromInt(nowNs() - ao_t0)) / 1e6});
+        std.debug.print("ao: 64x64 in {d:.2} ms\n", .{@as(f64, @floatFromInt(nowNsIo(io) - ao_t0)) / 1e6});
     }
 
-    const scatter_t0 = nowNs();
+    const scatter_t0 = nowNsIo(io);
     var scatter = try scatter_mod.buildProps(
         alloc,
         edits.items,
@@ -356,21 +361,26 @@ pub fn main(init: std.process.Init) !void {
         scatter.rocks.items.len,
         scatter.snow.items.len,
         scatter.shore.items.len,
-        @as(f64, @floatFromInt(nowNs() - scatter_t0)) / 1e6,
+        @as(f64, @floatFromInt(nowNsIo(io) - scatter_t0)) / 1e6,
     });
     defer scatter.deinit(alloc);
     var grass = try GrassRenderer.init();
     defer grass.deinit();
     // Blade partitions: the same stream the patch swap uses, run to completion once at startup.
-    var blade_capacity: usize = 4_000_000;
+    const blade_capacity: usize = 4_000_000;
     var stream = try blade_stream.Stream.init(alloc, blade_capacity);
     defer stream.deinit(alloc);
+    // The stream is mutated in place by begin/step/commit/takeJob; taking the pointer once here
+    // keeps that explicit for the compiler's "never mutated" check.
+    const stream_ptr = &stream;
+    _ = stream_ptr;
     var uploads: std.ArrayList(blade_stream.Upload) = .empty;
     defer uploads.deinit(alloc);
     {
-        const st = nowNs();
+        const st = nowNsIo(io);
         const patch_min_x = @as(f32, @floatFromInt(patch_origin * @as(i32, @intCast(CHUNK))));
         const patch_min_z = @as(f32, @floatFromInt(patch_origin_z * @as(i32, @intCast(CHUNK))));
+        // Startup is synchronous: build every partition at once, then hand them to the GPU.
         stream.begin(patch_origin, patch_origin_z, PATCH, patch_min_x + 128.0, patch_min_z + 128.0);
         while (!(try stream.step(alloc, edits.items, 1 << 30, &uploads))) {}
         _ = stream.commit(alloc);
@@ -378,7 +388,7 @@ pub fn main(init: std.process.Init) !void {
         for (uploads.items) |u| grass.uploadRange(u.offset, u.blades);
         std.debug.print("blades: {d} partitions, {d} instances, slots {d}/{d}, built in {d:.1} ms\n", .{
             stream.liveCount(), stream.liveBlades(), stream.used, blade_capacity,
-            @as(f64, @floatFromInt(nowNs() - st)) / 1e6,
+            @as(f64, @floatFromInt(nowNsIo(io) - st)) / 1e6,
         });
         uploads.clearRetainingCapacity();
 
@@ -386,7 +396,7 @@ pub fn main(init: std.process.Init) !void {
         // whole-patch build. Order-independent: count plus a commutative sum of per-blade hashes.
         if (init.environ_map.get("VOXEL_BLADE_CHECK")) |raw| {
             if (raw.len > 0 and raw[0] == '1') {
-                const ct = nowNs();
+                const ct = nowNsIo(io);
                 var ref = try scatter_mod.build(alloc, edits.items, patch_min_x, patch_min_z, @floatFromInt(PATCH * @as(i32, @intCast(CHUNK))));
                 defer ref.deinit(alloc);
                 var stream_sum: u64 = 0;
@@ -408,7 +418,7 @@ pub fn main(init: std.process.Init) !void {
                     stream.liveBlades(), stream_sum, ref.blades.items.len, ref_sum,
                     stream.liveBlades() == ref.blades.items.len and stream_sum == ref_sum,
                 });
-                std.debug.print("blade check took {d:.1} ms\n", .{@as(f64, @floatFromInt(nowNs() - ct)) / 1e6});
+                std.debug.print("blade check took {d:.1} ms\n", .{@as(f64, @floatFromInt(nowNsIo(io) - ct)) / 1e6});
             }
         }
     }
@@ -461,9 +471,10 @@ pub fn main(init: std.process.Init) !void {
     renderer.meadow_centre = grass.field_centre;
     grass.animation_cutoff = animation_cutoff;
     grass.animation_fade = animation_fade;
-    // Far-field stamp A/B: VOXEL_STAMP=0 turns the painted meadow off.
+    // Far-field stamp A/B: VOXEL_STAMP=1 paints the meadow into the ground beyond the blades.
+    // Off by default until the colour has been calibrated against the blades (ADR 0039).
     if (init.environ_map.get("VOXEL_STAMP")) |raw| {
-        if (raw.len > 0 and raw[0] == '0') renderer.stamp_on = false;
+        if (raw.len > 0 and raw[0] == '1') renderer.stamp_on = true;
     }
     props.animation_cutoff = animation_cutoff;
     props.animation_fade = animation_fade;
@@ -498,13 +509,13 @@ pub fn main(init: std.process.Init) !void {
     }
     shadow.enabled = shadows_enabled;
     {
-        const t0 = nowNs();
+        const t0 = nowNsIo(io);
         water.ensurePatch(
             @floatFromInt(patch_origin * @as(i32, @intCast(CHUNK))),
             @floatFromInt(patch_origin_z * @as(i32, @intCast(CHUNK))),
             @floatFromInt(PATCH * @as(i32, @intCast(CHUNK))),
         );
-        std.debug.print("water: patch grid built in {d:.1} ms\n", .{@as(f64, @floatFromInt(nowNs() - t0)) / 1e6});
+        std.debug.print("water: patch grid built in {d:.1} ms\n", .{@as(f64, @floatFromInt(nowNsIo(io) - t0)) / 1e6});
     }
 
     // ADR 0008: the engine draws into an sRGB framebuffer and every shader writes LINEAR, so the
@@ -518,19 +529,25 @@ pub fn main(init: std.process.Init) !void {
 
 
     var frames: u64 = 0;
-    var window_start = nowNs();
+    var window_start = nowNsIo(io);
     var worst_ns: i64 = 0;
-    var last_frame_ns = nowNs();
+    var last_frame_ns = nowNsIo(io);
     var accumulator: f64 = 0;
     var was_swimming = false;
     var tree_stats_logged = false;
     var stream_update_ms: f32 = 0;
     var stream_dirty: usize = 0;
+    var blade_job: blade_stream.Job = .{ .cx = 0, .cz = 0 };
+    var props_ready = false;
+    var ao_pending_done = false;
+    // Terrain double buffering (ADR 0042): the pending mesh is uploaded in slices while it grows.
+    var up_v: usize = 0;
+    var up_i: usize = 0;
     const fixed_dt: f64 = 1.0 / 60.0;
     var frame_ms: f64 = 0;
     var fps_now: f64 = 0;
     frame: while (true) {
-        const frame_start = nowNs();
+        const frame_start = nowNsIo(io);
         var frame_dt = @as(f64, @floatFromInt(frame_start - last_frame_ns)) / 1e9;
         last_frame_ns = frame_start;
         frame_dt = @min(frame_dt, 0.1);
@@ -650,14 +667,21 @@ pub fn main(init: std.process.Init) !void {
             pending_x = want_x;
             pending_z = want_z;
             pending_cursor = 0;
+            props_ready = false;
+            ao_pending_done = false;
+            up_v = 0;
+            up_i = 0;
+            // Size the back buffers from the current mesh (a patch is within ~10 % of its neighbour)
+            // and grow once at the swap if the estimate was short.
+            renderer.beginUpload(all_verts.items.len + all_verts.items.len / 8 + 4096, all_idx.items.len + all_idx.items.len / 8 + 4096);
             stream.begin(pending_x, pending_z, PATCH, @as(f32, @floatFromInt(pending_x * @as(i32, @intCast(CHUNK)))) + 128.0, @as(f32, @floatFromInt(pending_z * @as(i32, @intCast(CHUNK)))) + 128.0);
             next_verts.clearRetainingCapacity();
             next_idx.clearRetainingCapacity();
         }
         if (pending) {
-            // Four chunks per frame is ~2.4 ms of meshing: enough to finish a 64-chunk patch in 16
-            // frames (a quarter second) while the old patch stays on screen.
-            const t_slice = nowNs();
+            // The swap frame only uploads: meshing slices, blade partitions, the prop scatter and
+            // the AO bake all complete before it (ADR 0041).
+            const t_slice = nowNsIo(io);
             var done: i32 = 0;
             while (done < 4 and pending_cursor < PATCH * PATCH) : (done += 1) {
                 const cx = @divTrunc(pending_cursor, PATCH);
@@ -665,81 +689,128 @@ pub fn main(init: std.process.Init) !void {
                 _ = try dcw.meshChunkInto(alloc, edits.items, pending_x, pending_z, cx, cz, &next_verts, &next_idx);
                 pending_cursor += 1;
             }
-            // One blade partition per frame into its persistent slot: the partitions that stay do
-            // not rebuild, and nothing that did not change is re-uploaded.
+
+            // Keep the terrain upload in step with the mesh: ~12k vertices per frame is ~0.15 ms.
             {
-                const pt = nowNs();
-                _ = stream.step(alloc, edits.items, 1, &uploads) catch |err| switch (err) {
-                    error.BufferFull => blk: {
-                        std.debug.print("blades: buffer full at {d} instances, growing to {d}\n", .{ stream.used, blade_capacity * 2 });
-                        blade_capacity *= 2;
-                        grass.ensureCapacity(blade_capacity);
-                        for (stream.parts.items) |*pp| {
-                            if (pp.live and pp.blades.items.len > 0) grass.uploadRange(pp.slot.start, pp.blades.items);
-                        }
-                        break :blk false;
-                    },
-                    else => return err,
-                };
-                stream_dirty = uploads.items.len;
-                for (uploads.items) |u| {
-                    grass.uploadRange(u.offset, u.blades);
-                    std.debug.print("blades: partition slot {d} +{d} instances in {d:.2} ms\n", .{
-                        u.offset, u.blades.len, @as(f64, @floatFromInt(nowNs() - pt)) / 1e6,
-                    });
+                const cap_v: usize = 12000;
+                const v_to = @min(next_verts.items.len, up_v + cap_v);
+                const i_to = @min(next_idx.items.len, up_i + cap_v * 3 / 2);
+                if (v_to > up_v or i_to > up_i) {
+                    renderer.uploadSlice(next_verts.items, next_idx.items, up_v, v_to, up_i, i_to);
+                    up_v = v_to;
+                    up_i = i_to;
                 }
-                uploads.clearRetainingCapacity();
-                stream_update_ms = @as(f32, @floatFromInt(nowNs() - pt)) / 1e6;
             }
-            if (pending_cursor >= PATCH * PATCH and stream.pendingCount() == 0) {
+
+            // Blade partitions: at most one generation job in flight, so the wait below is short;
+            // on the frame a job lands it is already finished and costs only the copy.
+            // Drain first, then refill: starting before draining would overwrite the in-flight job's
+            // start stamp and report a bogus duration.
+            const taken = try stream.takeJob(io, &uploads, nowNsIo(io));
+            if (taken) {
+                std.debug.print("blades: landed +{d} instances, {d:.2} ms from start to upload\n", .{
+                    stream.last_landed, @as(f64, @floatFromInt(stream.last_job_ms_ns)) / 1e6,
+                });
+            }
+            const job_t0 = nowNsIo(io);
+            const started = if (stream.job == null) try stream.startJobTimed(io, &blade_job, edits.items, job_t0) else false;
+            if (started) {
+                std.debug.print("blades: job started for cell ({d},{d}), dispatch {d} ns\n", .{
+                    blade_job.cx, blade_job.cz, nowNsIo(io) - job_t0,
+                });
+            }
+            if (taken) {
+                for (uploads.items) |u| grass.uploadRange(u.offset, u.blades);
+                uploads.clearRetainingCapacity();
+            }
+            stream_update_ms = stream.last_wait_ms;
+            stream_dirty = if (stream.job_ptr != null) 1 else 0;
+
+            // Props for the pending patch, built once alongside the mesh slices (6.1 ms here).
+            if (!props_ready) {
+                const pt = nowNsIo(io);
+                scatter.deinit(alloc);
+                scatter = try scatter_mod.buildProps(
+                    alloc,
+                    edits.items,
+                    @floatFromInt(pending_x * @as(i32, @intCast(CHUNK))),
+                    @floatFromInt(pending_z * @as(i32, @intCast(CHUNK))),
+                    @floatFromInt(PATCH * @as(i32, @intCast(CHUNK))),
+                );
+                props_ready = true;
+                std.debug.print("scatter props: {d} trees, {d} bushes, {d} rocks, {d} snow, {d} shore in {d:.1} ms (off the swap frame)\n", .{
+                    scatter.trees.items.len,
+                    scatter.bushes.items.len,
+                    scatter.rocks.items.len,
+                    scatter.snow.items.len,
+                    scatter.shore.items.len,
+                    @as(f64, @floatFromInt(nowNsIo(io) - pt)) / 1e6,
+                });
+            }
+
+            // The AO bake (2.5 ms) is independent of the mesh; it waits for the props so only one
+            // patch-sized allocation is in flight at a time.
+            if (props_ready and !ao_pending_done) {
+                const wt = nowNsIo(io);
+                water.buildPatch(
+                    @floatFromInt(pending_x * @as(i32, @intCast(CHUNK))),
+                    @floatFromInt(pending_z * @as(i32, @intCast(CHUNK))),
+                    @floatFromInt(PATCH * @as(i32, @intCast(CHUNK))),
+                );
+                std.debug.print("water: grid built off-frame in {d:.2} ms\n", .{@as(f64, @floatFromInt(nowNsIo(io) - wt)) / 1e6});
+                const at = nowNsIo(io);
+                if (ao_work) |old| alloc.free(old);
+                ao_work = try vz.world.heightfield_ao.build(
+                    alloc,
+                    @floatFromInt(pending_x * @as(i32, @intCast(CHUNK))),
+                    @floatFromInt(pending_z * @as(i32, @intCast(CHUNK))),
+                    @floatFromInt(PATCH * @as(i32, @intCast(CHUNK))),
+                );
+                ao_pending_done = true;
+                std.debug.print("ao: 64x64 in {d:.2} ms (off the swap frame)\n", .{@as(f64, @floatFromInt(nowNsIo(io) - at)) / 1e6});
+            }
+
+            if (pending_cursor >= PATCH * PATCH and stream.pendingCount() == 0 and stream.job == null and props_ready and ao_pending_done) {
+                const swap_t = nowNsIo(io);
                 // Complete: swap the buffers and upload both at once. Uploading is the only part that
                 // must not be interrupted, and it is ~2 MB of vertex data.
+                const t_a = nowNsIo(io);
+                const fits = renderer.backFits(next_verts.items.len, next_idx.items.len);
+                if (!fits) {
+                    renderer.beginUpload(next_verts.items.len, next_idx.items.len);
+                    up_v = 0;
+                    up_i = 0;
+                }
+                const t_b = nowNsIo(io);
+                if (up_v < next_verts.items.len or up_i < next_idx.items.len) {
+                    renderer.uploadSlice(next_verts.items, next_idx.items, up_v, next_verts.items.len, up_i, next_idx.items.len);
+                    up_v = next_verts.items.len;
+                    up_i = next_idx.items.len;
+                }
+                const t_c = nowNsIo(io);
+                renderer.setIndexCount(next_idx.items.len);
+                renderer.flip();
+                const t_flip = nowNsIo(io);
+                std.debug.print("  swap breakdown: fits+realloc {d} us, remainder upload {d} us, flip {d} us\n", .{
+                    @divTrunc(t_b - t_a, 1000), @divTrunc(t_c - t_b, 1000), @divTrunc(t_flip - t_c, 1000),
+                });
                 std.mem.swap(std.ArrayList(dcw.Vertex), &all_verts, &next_verts);
                 std.mem.swap(std.ArrayList(u32), &all_idx, &next_idx);
-                renderer.upload(all_verts.items, all_idx.items);
                 patch_origin = pending_x;
                 patch_origin_z = pending_z;
-                if (ao_enabled) {
-                    const at = nowNs();
-                    const ao_map = try vz.world.heightfield_ao.build(
-                        alloc,
-                        @floatFromInt(patch_origin * @as(i32, @intCast(CHUNK))),
-                        @floatFromInt(patch_origin_z * @as(i32, @intCast(CHUNK))),
-                        @floatFromInt(PATCH * @as(i32, @intCast(CHUNK))),
-                    );
-                    defer alloc.free(ao_map);
+                if (ao_enabled and ao_work != null) {
                     renderer.uploadAo(
-                        ao_map,
+                        ao_work.?,
                         @floatFromInt(patch_origin * @as(i32, @intCast(CHUNK))),
                         @floatFromInt(patch_origin_z * @as(i32, @intCast(CHUNK))),
                         @floatFromInt(PATCH * @as(i32, @intCast(CHUNK))),
                     );
-                    std.debug.print("ao: 64x64 rebuilt in {d:.2} ms\n", .{@as(f64, @floatFromInt(nowNs() - at)) / 1e6});
                 }
+                const t_ao = nowNsIo(io);
+                water.uploadPatch();
+                const t_water = nowNsIo(io);
                 {
-                    const wt = nowNs();
-                    water.ensurePatch(
-                        @floatFromInt(patch_origin * @as(i32, @intCast(CHUNK))),
-                        @floatFromInt(patch_origin_z * @as(i32, @intCast(CHUNK))),
-                        @floatFromInt(PATCH * @as(i32, @intCast(CHUNK))),
-                    );
-                    std.debug.print("water: patch grid rebuilt in {d:.1} ms\n", .{@as(f64, @floatFromInt(nowNs() - wt)) / 1e6});
-                }
-                {
-                    const st = nowNs();
-                    scatter.deinit(alloc);
-                    scatter = try scatter_mod.buildProps(
-                        alloc,
-                        edits.items,
-                        @floatFromInt(patch_origin * @as(i32, @intCast(CHUNK))),
-                        @floatFromInt(patch_origin_z * @as(i32, @intCast(CHUNK))),
-                        @floatFromInt(PATCH * @as(i32, @intCast(CHUNK))),
-                    );
                     const dropped = stream.commit(alloc);
-                    const pmx = @as(f32, @floatFromInt(patch_origin * @as(i32, @intCast(CHUNK)))) + 128.0;
-                    const pmz = @as(f32, @floatFromInt(patch_origin_z * @as(i32, @intCast(CHUNK)))) + 128.0;
-                    grass.field_centre = .{ pmx, pmz };
-                    renderer.meadow_centre = .{ pmx, pmz };
                     props.uploadRocks(scatter.rocks.items);
                     props.uploadBushes(scatter.bushes.items);
                     props.uploadSnow(scatter.snow.items);
@@ -751,25 +822,34 @@ pub fn main(init: std.process.Init) !void {
                         @floatFromInt(patch_origin_z * @as(i32, @intCast(CHUNK))),
                         @floatFromInt(PATCH * @as(i32, @intCast(CHUNK))),
                     );
-                    std.debug.print("scatter props: {d} trees, {d} bushes, {d} rocks, {d} snow, {d} shore in {d:.1} ms; blades {d} partitions ({d} dropped), {d} instances, slots {d}/{d}\n", .{
-                        scatter.trees.items.len,
-                        scatter.bushes.items.len,
-                        scatter.rocks.items.len,
-                        scatter.snow.items.len,
-                        scatter.shore.items.len,
-                        @as(f64, @floatFromInt(nowNs() - st)) / 1e6,
+                    const pmx = @as(f32, @floatFromInt(patch_origin * @as(i32, @intCast(CHUNK)))) + 128.0;
+                    const pmz = @as(f32, @floatFromInt(patch_origin_z * @as(i32, @intCast(CHUNK)))) + 128.0;
+                    grass.field_centre = .{ pmx, pmz };
+                    renderer.meadow_centre = .{ pmx, pmz };
+                    std.debug.print("swap: blades {d} partitions ({d} dropped), {d} instances, slots {d}/{d}; swap upload {d:.2} ms\n", .{
                         stream.liveCount(),
                         dropped,
                         stream.liveBlades(),
                         stream.used,
                         blade_capacity,
+                        @as(f64, @floatFromInt(nowNsIo(io) - swap_t)) / 1e6,
                     });
                 }
+                const t_parts = nowNsIo(io);
+                std.debug.print("swap parts: remainder {d:.2} ms | flip {d:.2} | ao {d:.2} | water {d:.2} | props+commit {d:.2}\n", .{
+                    @as(f64, @floatFromInt(t_flip - swap_t)) / 1e6,
+                    @as(f64, @floatFromInt(t_ao - t_flip)) / 1e6,
+                    @as(f64, @floatFromInt(t_water - t_ao)) / 1e6,
+                    @as(f64, @floatFromInt(t_parts - t_water)) / 1e6,
+                    0.0,
+                });
                 pending = false;
+                props_ready = false;
+                ao_pending_done = false;
                 rebuilds += 1;
                 std.debug.print("stream: patch ({d},{d}) ready, {d} verts, {d} rebuilds, {d:.2} ms this slice\n", .{
                     patch_origin, patch_origin_z, all_verts.items.len, rebuilds,
-                    @as(f64, @floatFromInt(nowNs() - t_slice)) / 1e6,
+                    @as(f64, @floatFromInt(nowNsIo(io) - t_slice)) / 1e6,
                 });
             }
         }
@@ -911,11 +991,11 @@ pub fn main(init: std.process.Init) !void {
         }
         window.swap();
 
-        const frame_ns = nowNs() - frame_start;
+        const frame_ns = nowNsIo(io) - frame_start;
         frame_ms = @as(f64, @floatFromInt(frame_ns)) / 1e6;
         if (frame_ns > worst_ns) worst_ns = frame_ns;
         frames += 1;
-        const elapsed = nowNs() - window_start;
+        const elapsed = nowNsIo(io) - window_start;
         if (elapsed >= 1_000_000_000) {
             fps_now = @as(f64, @floatFromInt(frames)) * 1e9 / @as(f64, @floatFromInt(elapsed));
             std.debug.print("stream: parts {d}  dirty {d}  upd {d:.2} ms  blades {d}  slots {d}/{d}\n", .{
@@ -937,7 +1017,7 @@ pub fn main(init: std.process.Init) !void {
             });
             frames = 0;
             worst_ns = 0;
-            window_start = nowNs();
+            window_start = nowNsIo(io);
         }
     }
 }

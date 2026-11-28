@@ -490,16 +490,22 @@ const fragment_src: [:0]const u8 =
 pub const DcRenderer = struct {
     shader: Shader,
     depth_shader: Shader,
-    vao: u32 = 0,
-    vbo: u32 = 0,
-    ebo: u32 = 0,
+    /// Two mesh sides (ADR 0042): the pending patch is uploaded into the back side across the
+    /// suspension frames, and the swap only flips which side is drawn.
+    vao: [2]gl.uint = .{ 0, 0 },
+    vbo: [2]gl.uint = .{ 0, 0 },
+    ebo: [2]gl.uint = .{ 0, 0 },
+    cap_v: [2]usize = .{ 0, 0 },
+    cap_i: [2]usize = .{ 0, 0 },
+    counts: [2]usize = .{ 0, 0 },
+    front: usize = 0,
     ao_tex: u32 = 0,
     ao_min_x: f32 = 0,
     ao_min_z: f32 = 0,
     ao_size: f32 = 256,
     ao_enabled: bool = true,
     /// Far-field meadow stamp (ADR 0039).
-    stamp_on: bool = true,
+    stamp_on: bool = false,
     meadow_radius: f32 = 110.0,
     meadow_band: f32 = 14.0,
     meadow_centre: [2]f32 = .{ 0, 0 },
@@ -615,10 +621,12 @@ pub const DcRenderer = struct {
     }
 
     pub fn deinit(self: *DcRenderer) void {
-        if (self.vao != 0) {
-            gl.DeleteVertexArrays(1, @ptrCast(&self.vao));
-            gl.DeleteBuffers(1, @ptrCast(&self.vbo));
-            gl.DeleteBuffers(1, @ptrCast(&self.ebo));
+        for (0..2) |i| {
+            if (self.vao[i] != 0) {
+                gl.DeleteVertexArrays(1, @ptrCast(&self.vao[i]));
+                gl.DeleteBuffers(1, @ptrCast(&self.vbo[i]));
+                gl.DeleteBuffers(1, @ptrCast(&self.ebo[i]));
+            }
         }
         if (self.ao_tex != 0) gl.DeleteTextures(1, @ptrCast(&self.ao_tex));
         for (0..3) |i| {
@@ -655,21 +663,34 @@ pub const DcRenderer = struct {
         gl.DepthMask(gl.TRUE);
         gl.Disable(gl.BLEND);
         gl.Disable(gl.CULL_FACE);
-        gl.BindVertexArray(self.vao);
+        gl.BindVertexArray(self.vao[self.front]);
         gl.DrawElements(gl.TRIANGLES, @intCast(index_count), gl.UNSIGNED_INT, 0);
     }
 
-    pub fn upload(self: *DcRenderer, verts: []const Vertex, idx: []const u32) void {
-        if (self.vao == 0) {
-            gl.GenVertexArrays(1, @ptrCast(&self.vao));
-            gl.GenBuffers(1, @ptrCast(&self.vbo));
-            gl.GenBuffers(1, @ptrCast(&self.ebo));
+    fn ensureSide(self: *DcRenderer, side: usize, vbytes: usize, ibytes: usize) void {
+        if (self.vao[side] == 0) {
+            gl.GenVertexArrays(1, @ptrCast(&self.vao[side]));
+            gl.GenBuffers(1, @ptrCast(&self.vbo[side]));
+            gl.GenBuffers(1, @ptrCast(&self.ebo[side]));
         }
-        gl.BindVertexArray(self.vao);
-        gl.BindBuffer(gl.ARRAY_BUFFER, self.vbo);
-        gl.BufferData(gl.ARRAY_BUFFER, @intCast(verts.len * @sizeOf(Vertex)), verts.ptr, gl.STATIC_DRAW);
-        gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, self.ebo);
-        gl.BufferData(gl.ELEMENT_ARRAY_BUFFER, @intCast(idx.len * @sizeOf(u32)), idx.ptr, gl.STATIC_DRAW);
+        gl.BindVertexArray(self.vao[side]);
+        gl.BindBuffer(gl.ARRAY_BUFFER, self.vbo[side]);
+        if (self.cap_v[side] < vbytes) {
+            gl.BufferData(gl.ARRAY_BUFFER, @intCast(vbytes), null, gl.DYNAMIC_DRAW);
+            self.cap_v[side] = vbytes;
+        }
+        gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, self.ebo[side]);
+        if (self.cap_i[side] < ibytes) {
+            gl.BufferData(gl.ELEMENT_ARRAY_BUFFER, @intCast(ibytes), null, gl.DYNAMIC_DRAW);
+            self.cap_i[side] = ibytes;
+        }
+        gl.BindVertexArray(0);
+    }
+
+    fn bindAttributes(self: *DcRenderer, side: usize) void {
+        gl.BindVertexArray(self.vao[side]);
+        gl.BindBuffer(gl.ARRAY_BUFFER, self.vbo[side]);
+        gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, self.ebo[side]);
         gl.EnableVertexAttribArray(0);
         gl.VertexAttribPointer(0, 3, gl.FLOAT, gl.FALSE, @sizeOf(Vertex), 0);
         gl.EnableVertexAttribArray(1);
@@ -679,6 +700,68 @@ pub const DcRenderer = struct {
         gl.EnableVertexAttribArray(3);
         gl.VertexAttribPointer(3, 1, gl.FLOAT, gl.FALSE, @sizeOf(Vertex), @sizeOf([3]f32) * 3);
         gl.BindVertexArray(0);
+    }
+
+    /// Whole-mesh upload, used once at startup: writes the front side directly.
+    pub fn upload(self: *DcRenderer, verts: []const Vertex, idx: []const u32) void {
+        self.ensureSide(0, verts.len * @sizeOf(Vertex), idx.len * @sizeOf(u32));
+        gl.BindVertexArray(self.vao[0]);
+        gl.BindBuffer(gl.ARRAY_BUFFER, self.vbo[0]);
+        gl.BufferSubData(gl.ARRAY_BUFFER, 0, @intCast(verts.len * @sizeOf(Vertex)), verts.ptr);
+        gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, self.ebo[0]);
+        gl.BufferSubData(gl.ELEMENT_ARRAY_BUFFER, 0, @intCast(idx.len * @sizeOf(u32)), idx.ptr);
+        self.bindAttributes(0);
+        self.counts[0] = idx.len;
+        self.front = 0;
+    }
+
+    /// Prepare the back side for a streamed upload and remember its index count.
+    pub fn beginUpload(self: *DcRenderer, vert_count: usize, idx_count: usize) void {
+        const back = 1 - self.front;
+        self.ensureSide(back, vert_count * @sizeOf(Vertex), idx_count * @sizeOf(u32));
+        self.counts[back] = idx_count;
+    }
+
+    /// Copy one slice of the pending mesh into the back side. Called a few times per suspension.
+    pub fn uploadSlice(self: *DcRenderer, verts: []const Vertex, idx: []const u32, v_from: usize, v_to: usize, i_from: usize, i_to: usize) void {
+        const back = 1 - self.front;
+        gl.BindVertexArray(0);
+        gl.BindBuffer(gl.ARRAY_BUFFER, self.vbo[back]);
+        if (v_to > v_from) {
+            gl.BufferSubData(
+                gl.ARRAY_BUFFER,
+                @intCast(v_from * @sizeOf(Vertex)),
+                @intCast((v_to - v_from) * @sizeOf(Vertex)),
+                @as([*]const u8, @ptrCast(verts.ptr)) + v_from * @sizeOf(Vertex),
+            );
+        }
+        gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, self.ebo[back]);
+        if (i_to > i_from) {
+            gl.BufferSubData(
+                gl.ELEMENT_ARRAY_BUFFER,
+                @intCast(i_from * @sizeOf(u32)),
+                @intCast((i_to - i_from) * @sizeOf(u32)),
+                @as([*]const u8, @ptrCast(idx.ptr)) + i_from * @sizeOf(u32),
+            );
+        }
+    }
+
+    /// Update the back side's index count just before flipping (the pending mesh's real size).
+    pub fn setIndexCount(self: *DcRenderer, n: usize) void {
+        self.counts[1 - self.front] = n;
+    }
+
+    /// True when the back side can hold this mesh; false means `beginUpload` must run again.
+    pub fn backFits(self: *const DcRenderer, vert_count: usize, idx_count: usize) bool {
+        const back = 1 - self.front;
+        return self.cap_v[back] >= vert_count * @sizeOf(Vertex) and self.cap_i[back] >= idx_count * @sizeOf(u32);
+    }
+
+    /// Bind the back side's attributes and make it the drawn one. Microseconds, not a re-upload.
+    pub fn flip(self: *DcRenderer) void {
+        const back = 1 - self.front;
+        self.bindAttributes(back);
+        self.front = back;
     }
 
     /// Draws the terrain. The app owns clear/viewport; this owns the depth/blend/cull state the
@@ -766,7 +849,7 @@ pub const DcRenderer = struct {
         self.shader.setFloat("u_sea_level", sea_level);
         self.shader.setFloat("u_snow_line", snow_line);
         self.shader.setFloat("u_mud_band", mud_band);
-        gl.BindVertexArray(self.vao);
+        gl.BindVertexArray(self.vao[self.front]);
         gl.DrawElements(gl.TRIANGLES, @intCast(index_count), gl.UNSIGNED_INT, 0);
     }
 };

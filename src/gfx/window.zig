@@ -29,6 +29,10 @@ pub const Window = struct {
         _ = sdl.SDL_GL_SetAttribute(sdl.SDL_GL_CONTEXT_MINOR_VERSION, 6);
         _ = sdl.SDL_GL_SetAttribute(sdl.SDL_GL_DOUBLEBUFFER, 1);
         _ = sdl.SDL_GL_SetAttribute(sdl.SDL_GL_DEPTH_SIZE, 24);
+        // RenderDoc: a GL application must say which attributes it enabled explicitly, or the
+        // capture/replay cannot reproduce the context. Harmless when nothing is capturing.
+        _ = sdl.SDL_GL_SetAttribute(sdl.SDL_GL_CONTEXT_FLAGS, sdl.SDL_GL_CONTEXT_FORWARD_COMPATIBLE_FLAG);
+        _ = sdl.SDL_GL_SetAttribute(sdl.SDL_GL_CONTEXT_RELEASE_BEHAVIOR, sdl.SDL_GL_CONTEXT_RELEASE_BEHAVIOR_FLUSH);
 
         const handle = sdl.SDL_CreateWindow(
             config.title,
